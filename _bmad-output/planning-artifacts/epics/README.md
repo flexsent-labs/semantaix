@@ -25,7 +25,7 @@ This directory contains the BMAD feature-based sequential epic layout.
 11. `epic-11-calendar-availability-scheduling.md`
 12. `epic-12-sales-conversation-persona.md` *(planning merged via PR [#82](https://github.com/flexsent-labs/semantaix/pull/82) + cap PR [#83](https://github.com/flexsent-labs/semantaix/pull/83); stories backlog)*
 13. `epic-13-unified-project-services-catalog.md` *(shipped via PR [#80](https://github.com/flexsent-labs/semantaix/pull/80))*
-14. *Epic 14 — Usage / Token / Cost Monitoring (planned; brainstorm complete, queued post-Epic 10.5)*
+14. `epic-14-usage-cost-monitoring.md` *(planning — Step 2 of `bmad-create-epics-and-stories` complete; queued post-Epic 10.5 for stories 14.07 + 14.08; other stories can proceed in parallel)*
 
 ## Recent Implementation Notes
 - **Epic 04 (HITL escalation):** runtime HITL recipient/chat routing can be updated by Telegram command `/hitl_config @username <chat_id>`.
