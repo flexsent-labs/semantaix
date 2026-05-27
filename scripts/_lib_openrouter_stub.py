@@ -1,10 +1,21 @@
 """Tiny in-memory OpenRouter stub used by signoff scripts.
 
 Returns a canned chat completion so demos can exercise `/suggest` end-to-end
-without hitting the real provider. The response body is taken from the
-``OPENROUTER_STUB_RESPONSE`` environment variable (default: "Use the reset
-link via the email."), which lets a demo steer guardrails toward valid or
-invalid outcomes.
+without hitting the real provider.
+
+The response body comes from one of these environment variables, checked
+in order on every request (so a signoff can `export` a new value between
+steps to steer the next call):
+
+1. ``OPENROUTER_STUB_RESPONSE_JSON`` — used verbatim as the ``content``
+   string when callers expect schema'd JSON (e.g. the SalesPersonaAnswerer
+   parsing ``{"extracted_fields": ..., "next_question": ...}``).
+2. ``OPENROUTER_STUB_RESPONSE`` — plain text (default: "Use the reset
+   link via the email."), used by guardrail / grounding demos.
+
+The listening port comes from ``OPENROUTER_STUB_PORT`` (default 18500);
+signoff scripts that set ``OPENROUTER_BASE_URL=http://127.0.0.1:<port>``
+must export this to match.
 """
 
 from __future__ import annotations
@@ -21,6 +32,8 @@ class _StubHandler(BaseHTTPRequestHandler):
         if length > 0:
             self.rfile.read(length)
         response_text = os.environ.get(
+            "OPENROUTER_STUB_RESPONSE_JSON"
+        ) or os.environ.get(
             "OPENROUTER_STUB_RESPONSE", "Use the reset link via the email."
         )
         body = json.dumps(

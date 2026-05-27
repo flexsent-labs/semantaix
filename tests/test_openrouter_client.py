@@ -5,6 +5,7 @@ import pytest
 from services.api.app.openrouter_client import (
     GroundingVerdict,
     OpenRouterClient,
+    OpenRouterJsonSchemaViolation,
     _parse_verdict,
 )
 from services.api.app.rag import RagChunk
@@ -296,3 +297,66 @@ async def test_verify_grounding_uses_overridden_system_prompt(monkeypatch):
     )
     system = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
     assert system == "Use only YES or NO."
+
+
+@pytest.mark.asyncio
+async def test_complete_json_requires_api_key():
+    client = OpenRouterClient()
+    client.api_key = None
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        await client.complete_json(system="sys", user="user")
+
+
+@pytest.mark.asyncio
+async def test_complete_json_returns_decoded_object(monkeypatch):
+    http_client = _http_mock(
+        monkeypatch,
+        content='{"extracted_fields": {"dates": "1 мая"}, "next_question": "..."}',
+    )
+    client = OpenRouterClient()
+    client.api_key = "token"
+    client.grounding_model = "default-json-model"
+
+    payload = await client.complete_json(system="sys", user="user msg")
+
+    assert payload == {
+        "extracted_fields": {"dates": "1 мая"},
+        "next_question": "...",
+    }
+    sent = http_client.post.call_args.kwargs["json"]
+    assert sent["model"] == "default-json-model"
+    assert sent["response_format"] == {"type": "json_object"}
+    assert sent["messages"][0] == {"role": "system", "content": "sys"}
+    assert sent["messages"][1] == {"role": "user", "content": "user msg"}
+
+
+@pytest.mark.asyncio
+async def test_complete_json_model_override(monkeypatch):
+    http_client = _http_mock(monkeypatch, content='{"a": 1}')
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.complete_json(
+        system="sys", user="user", model="override-json-model"
+    )
+    assert (
+        http_client.post.call_args.kwargs["json"]["model"]
+        == "override-json-model"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_json_raises_on_non_json_response(monkeypatch):
+    _http_mock(monkeypatch, content="not really json {[")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    with pytest.raises(OpenRouterJsonSchemaViolation):
+        await client.complete_json(system="sys", user="user")
+
+
+@pytest.mark.asyncio
+async def test_complete_json_raises_on_non_object_root(monkeypatch):
+    _http_mock(monkeypatch, content='["just", "a", "list"]')
+    client = OpenRouterClient()
+    client.api_key = "token"
+    with pytest.raises(OpenRouterJsonSchemaViolation):
+        await client.complete_json(system="sys", user="user")

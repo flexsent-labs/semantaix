@@ -1,0 +1,66 @@
+# Sales intent seed phrases (lemma form, lowercase). One phrase per line.
+# Matched against `RussianNormalizer.lemmas(question)` overlap.
+# Story 12.03 — keep ≤ 50 entries in v1; expand from real traffic.
+тур
+квадро
+квадроцикл
+багги
+эндуро
+прокат
+кататься
+катание
+маршрут
+программа
+цена
+стоимость
+сколько
+даты
+мая
+июня
+июля
+августа
+число
+числа
+группа
+человек
+водитель
+сложность
+сложности
+начальный
+средний
+сложный
+бронировать
+бронь
+забронировать
+записаться
+запись
+поехать
+приехать
+актив
+активно
+выходные
+выходной
+привет
+здравствуйте
+добрый
+хочу
+интересует
+хотим
+# Story 12.06 — catalog and concept-explainer turn triggers.
+что у вас есть
+какие туры
+что предлагаете
+варианты
+список
+что такое
+что значит
+объясните
+расскажите про
+расскажите о
+# Story 12.05 — equipment-question triggers so the funnel can detect a
+# customer asking what to bring or wear and dispatch the equipment gallery.
+снаряжение
+экипировка
+шлем
+одежда
+что нужно

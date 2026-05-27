@@ -31,6 +31,11 @@ class NormalizedTelegramMessage:
     caption: str | None = None
     media_group_id: str | None = None
     attachments: tuple[TelegramAttachment, ...] = ()
+    # Story 12.05 — surface the first attachment of the replied-to message so
+    # ``/material`` (a reply to media) can extract it without re-parsing the
+    # raw Telegram payload. Stays ``None`` for non-reply or text-only replies.
+    reply_to_attachment: TelegramAttachment | None = None
+    reply_to_caption: str | None = None
 
 
 def _extract_document(message: dict[str, Any]) -> TelegramAttachment | None:
@@ -184,11 +189,19 @@ def normalize_update(payload: dict[str, Any]) -> NormalizedTelegramMessage | Non
         return None
 
     reply_to_text: str | None = None
+    reply_to_attachment: TelegramAttachment | None = None
+    reply_to_caption: str | None = None
     reply_to = message.get("reply_to_message")
     if isinstance(reply_to, dict):
         candidate = reply_to.get("text")
         if isinstance(candidate, str) and candidate.strip():
             reply_to_text = candidate
+        reply_attachments = _collect_attachments(reply_to)
+        if reply_attachments:
+            reply_to_attachment = reply_attachments[0]
+        reply_caption_field = reply_to.get("caption")
+        if isinstance(reply_caption_field, str) and reply_caption_field.strip():
+            reply_to_caption = reply_caption_field
 
     return NormalizedTelegramMessage(
         update_id=update_id,
@@ -201,4 +214,6 @@ def normalize_update(payload: dict[str, Any]) -> NormalizedTelegramMessage | Non
         caption=caption_value,
         media_group_id=media_group_id,
         attachments=attachments,
+        reply_to_attachment=reply_to_attachment,
+        reply_to_caption=reply_to_caption,
     )

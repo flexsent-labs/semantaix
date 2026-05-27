@@ -47,7 +47,7 @@ Tie the epic together: insert `SalesPersonaAnswerer` into `AnswerPipeline` (befo
 ## Test Plan
 ### Unit
 - `tests/test_pipeline_order_includes_sales_before_calendar.py` — described above.
-- `tests/test_pipeline_sales_silent_when_dormant.py` — described above.
+- `tests/test_pipeline_sales_silent_on_non_intent.py` — described above.
 - `tests/test_sales_no_secrets_in_logs.py` — described above.
 - `tests/test_sales_system_prompts_present.py` — file-existence + non-empty for every prompt file referenced by the answerer.
 - `tests/test_sales_dev_tick_endpoint_gated.py` — `POST /sales/_dev/tick-followup-now` returns 404 outside `environment="dev"`; 200 inside.

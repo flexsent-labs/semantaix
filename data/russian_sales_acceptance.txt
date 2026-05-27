@@ -1,0 +1,12 @@
+# Sales-acceptance seed lemmas (Story 12.07). One phrase per line.
+# Matched against `RussianNormalizer.lemmas(question)` overlap so the
+# customer's reply survives inflection and slang substitution.
+да
+согласен
+согласна
+подтверждаю
+давайте
+устраивает
+ок
+хорошо
+замечательно
