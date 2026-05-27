@@ -75,7 +75,8 @@ export INTERNAL_SERVICE_TOKEN="epic12-internal-token"
 
 AUTH_HEADER="Authorization: Bearer ${INTERNAL_SERVICE_TOKEN}"
 
-python3.11 "${ROOT_DIR}/scripts/_lib_openrouter_stub.py" >/tmp/epic12-stub.log 2>&1 &
+OPENROUTER_STUB_PORT=18512 \
+  python3.11 "${ROOT_DIR}/scripts/_lib_openrouter_stub.py" >/tmp/epic12-stub.log 2>&1 &
 STUB_PID=$!
 uvicorn services.api.app.main:app --port 8012 >/tmp/epic12-api.log 2>&1 &
 API_PID=$!
