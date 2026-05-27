@@ -132,6 +132,43 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.bootstrap import (
+    init_schema as sales_bootstrap_init_schema,
+)
+from services.api.app.sales.client_materials_analyzer import (
+    AnalysisOutcome,
+    ClientMaterialsAnalyzer,
+)
+from services.api.app.sales.client_materials_repository import (
+    ClientMaterial,
+    ClientMaterialsRepository,
+)
+from services.api.app.sales.client_materials_selector import (
+    ClientMaterialsSelector,
+)
+from services.api.app.sales.followup_cancel_hook import maybe_cancel
+from services.api.app.sales.followup_fire_handler import FollowupFireHandler
+from services.api.app.sales.followup_queue_repository import (
+    REASON_PAST_INTENT_DATE,
+    FollowupQueueRepository,
+    FollowupRow,
+)
+from services.api.app.sales.sales_persona_answerer import (
+    RESPONSE_MODE_SALES_ESCALATION,
+    SalesPersonaAnswerer,
+)
+from services.api.app.sales.services_extractor import (
+    ExtractionOutcome,
+    ServicesExtractor,
+)
+from services.api.app.sales.services_repository import (
+    ServiceAlreadyExists,
+    ServiceNotFound,
+    ServicesRepository,
+)
+from services.api.app.sales.state_repository import (
+    StateRepository as SalesStateRepository,
+)
 from services.api.app.services_nl_ops import (
     OP_SERVICE_REMOVE,
     ServicesNlOpsRepository,
@@ -153,7 +190,10 @@ from services.api.app.services_nl_ops import (
 from services.api.app.services_nl_ops import (
     NlOpSessionNotPending as ServicesNlSessionNotPending,
 )
-from services.api.app.telegram_bot_sender import TelegramBotSender
+from services.api.app.telegram_bot_sender import (
+    TelegramBotSender,
+    TelegramMediaSendError,
+)
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 from services.api.app.trace_corrections import (
     BRANCH_MODERATION,
@@ -394,9 +434,154 @@ def _effective_bot_persona() -> tuple[str, str]:
     )
 
 
+def _effective_sales_persona_name() -> str:
+    """Resolve the persona name passed to the sales LLM prompts.
+
+    Joins the configurable first/last name (already used by the HITL bot
+    identity) so the sales persona is the same human face the customer
+    sees elsewhere.
+    """
+    first, last = _effective_bot_persona()
+    return f"{first} {last}".strip() if last else first
+
+
+# Epic 12 story 12.01: bootstrap every sales DB table + index in a single
+# call so the schema is fully shaped before any repository handle opens
+# the file. The repositories below still run their own per-table
+# init_schema (idempotent) for tests that construct them in isolation.
+sales_bootstrap_init_schema(settings.sales_db_path)
+
+# Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
+# `sales_conversation_state` table is bootstrapped at startup. Story 12.09
+# wires the answerer into `answer_pipeline` below, immediately BEFORE the
+# calendar availability answerer. Construction is unconditional; the
+# always-on activation gate inside the answerer (state row OR sales-intent
+# regex match) handles dormancy without consulting the services catalog.
+sales_state_repository = SalesStateRepository(db_path=settings.sales_db_path)
+sales_services_repository = ServicesRepository(db_path=settings.sales_db_path)
+sales_followup_repository = FollowupQueueRepository(
+    db_path=settings.sales_db_path
+)
+client_materials_repository = ClientMaterialsRepository(
+    db_path=settings.sales_db_path
+)
+client_materials_selector = ClientMaterialsSelector(
+    repo=client_materials_repository
+)
+
+
+async def _in_process_material_dispatcher(
+    *,
+    chat_id: int,
+    material_id: int,
+    trace_id: str | None,
+    caption_override: str | None = None,
+) -> dict[str, object]:
+    """Story 12.05 — call ``POST /sales/dispatch/material`` in-process.
+
+    The sales answerer threads the trace_id through so both the textual
+    pitch and the dispatch log land on the same ``answer_traces`` row.
+    Internally calls :func:`sales_dispatch_material` directly so we don't
+    pay the HTTP round-trip when both sides live in the api service.
+    """
+    request = SalesMaterialDispatchRequest(
+        chat_id=chat_id,
+        material_id=material_id,
+        caption_override=caption_override,
+        trace_id=trace_id,
+    )
+    return await sales_dispatch_material(
+        request=request,
+        _="internal",
+    )
+
+
+sales_persona_answerer = SalesPersonaAnswerer(
+    state_repo=sales_state_repository,
+    services_repo=sales_services_repository,
+    openrouter=openrouter_client,
+    normalizer=get_russian_normalizer(),
+    clock=lambda: datetime.now(UTC),
+    bot_persona_getter=_effective_sales_persona_name,
+    followup_repo=sales_followup_repository,
+    material_selector=client_materials_selector,
+    material_dispatcher=_in_process_material_dispatcher,
+)
+client_materials_analyzer = ClientMaterialsAnalyzer(
+    openrouter=openrouter_client,
+    operator_files_view=operator_files_view,
+    materials_repo=client_materials_repository,
+)
+
+
+class _ServicesExtractorRepoAdapter:
+    """Adapts the canonical ``project_services_repository`` (Epic-13) to the
+    ``ServicesExtractor``'s 12.01-shaped ``find_by_name`` + ``add`` surface.
+
+    The extractor uses ``find_by_name`` solely to soft-skip an existing
+    service — it never overwrites an operator's manually-crafted description
+    on file upload (per the 12.05c story rules). ``add`` for a brand-new
+    name maps to ``upsert`` on the underlying repo; since the SELECT-then-
+    INSERT path of ``upsert`` is only reached when the row does not exist,
+    the call cannot accidentally update a pre-existing row.
+    """
+
+    def __init__(self, *, repo: ProjectServiceRepository) -> None:
+        self._repo = repo
+
+    def find_by_name(
+        self, *, project_id: int, name: str
+    ) -> ProjectService | None:
+        return self._repo.get_by_name(project_id=project_id, name=name)
+
+    def add(
+        self,
+        *,
+        project_id: int,
+        name: str,
+        description_md: str | None,
+        tags: list[str],
+        now: datetime,
+    ) -> int:
+        # ``now`` is accepted for the 12.01-shaped protocol but the canonical
+        # repo stamps its own ``updated_at`` UTC string inside ``upsert``.
+        created = self._repo.upsert(
+            project_id=project_id,
+            name=name,
+            description=description_md,
+            tags=tags,
+        )
+        return created.id
+
+
+services_extractor = ServicesExtractor(
+    openrouter=openrouter_client,
+    operator_files_view=operator_files_view,
+    services_repo=_ServicesExtractorRepoAdapter(
+        repo=project_services_repository
+    ),
+)
+
+sales_followup_fire_handler = FollowupFireHandler(
+    followup_repo=sales_followup_repository,
+    state_repo=sales_state_repository,
+    openrouter=openrouter_client,
+    telegram_sender=telegram_bot_sender,
+    persona_getter=_effective_sales_persona_name,
+    clock=lambda: datetime.now(UTC),
+)
+
+
 answer_pipeline = AnswerPipeline(
     [
-        # Calendar availability runs FIRST so an enabled project answers its own
+        # Story 12.09: SalesPersonaAnswerer runs BEFORE CalendarAvailabilityAnswerer
+        # so the sales funnel (greeting → scoping → pricing → proposing → closing)
+        # owns the turn before scheduling questions ever reach the calendar. The
+        # answerer's own activation gate (existing state OR sales-intent regex)
+        # keeps the dormant cost at one cheap repo read + one regex match for
+        # every non-sales inbound message.
+        sales_persona_answerer,
+        # Calendar availability runs next so an enabled project answers its own
         # scheduling questions before they ever reach RAG. A disabled project
         # (the default) is a cheap no-op skip, so this is a pure prepend with no
         # behaviour change when calendar is off.
@@ -1864,6 +2049,130 @@ async def _escalate_calendar_availability(
     }
 
 
+async def _dispatch_sales_escalation(
+    *,
+    request: InboundMessageRequest,
+    trace_id: str,
+    latency_ms: int,
+    pipeline_result,
+) -> dict[str, object]:
+    """Deliver the sales fixed-line + open a HITL ticket (story 12.09 wiring).
+
+    The sales answerer signals an escalation by returning
+    ``handled=True`` with ``response_mode='sales_escalation'`` and a
+    ``hitl_reason`` in its metadata. The customer receives the verbatim
+    fallback line; the operator picks up via the resulting HITL ticket
+    so unknown prices / drift / closing handoffs always reach a human.
+    """
+    metadata = pipeline_result.metadata
+    answer_text = pipeline_result.text or ""
+    hitl_reason = str(metadata.get("hitl_reason") or "sales_escalation")
+
+    delivered = True
+    if request.chat_id is not None:
+        delivered = await _safe_send_message(
+            chat_id=request.chat_id,
+            text=answer_text,
+            failure_summary="Inbound sales answer delivery failed",
+            failure_kind="inbound_delivery_failed",
+        )
+
+    active_ticket = (
+        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        if request.chat_id is not None
+        else None
+    )
+    if active_ticket is not None:
+        await _notify_hitl_operator_with_question(
+            ticket_id=active_ticket.id,
+            question=f"[follow-up] {request.text}",
+            customer_username=request.customer_username,
+        )
+        logger.info(
+            "sales_escalation_coalesced",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": request.chat_id,
+                "ticket_id": active_ticket.id,
+                "hitl_reason": hitl_reason,
+                "sales_turn_kind": metadata.get("sales_turn_kind"),
+            },
+        )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode=pipeline_result.response_mode or "sales_escalation",
+            guardrail_outcome="escalated",
+            guardrail_reasons=[],
+            guardrail_score=None,
+            retrieval=[],
+            latency_ms=latency_ms,
+            limitations=["awaiting_human_response", "coalesced_sales_followup"],
+            hitl_ticket_id=active_ticket.id,
+        )
+        return {
+            "delivered": delivered,
+            "escalated": True,
+            "response_mode": pipeline_result.response_mode,
+            "answer_text": answer_text,
+            "answerer": metadata.get("answerer"),
+            "hitl_ticket_id": active_ticket.id,
+            "hitl_reason": hitl_reason,
+            "trace_id": persisted_trace_id,
+            "coalesced": True,
+        }
+
+    ticket = hitl_ticket_repository.create(
+        conversation_ref=request.text[:120],
+        reason=hitl_reason,
+        target_chat_id=request.chat_id,
+    )
+    assignee = _pick_assignee_for_chat(request.chat_id)
+    hitl_ticket_repository.assign(
+        ticket_id=ticket.id,
+        operator_username=assignee,
+    )
+    logger.info(
+        "sales_escalation_ticket_created",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": request.chat_id,
+            "ticket_id": ticket.id,
+            "hitl_reason": hitl_reason,
+            "operator_username": assignee,
+            "sales_turn_kind": metadata.get("sales_turn_kind"),
+        },
+    )
+    await _notify_hitl_operator_with_question(
+        ticket_id=ticket.id,
+        question=request.text,
+        customer_username=request.customer_username,
+    )
+    persisted_trace_id = _persist_answer_trace(
+        trace_id=trace_id,
+        request_text=request.text,
+        response_mode=pipeline_result.response_mode or "sales_escalation",
+        guardrail_outcome="escalated",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
+        latency_ms=latency_ms,
+        limitations=["awaiting_human_response", "sales_escalation"],
+        hitl_ticket_id=ticket.id,
+    )
+    return {
+        "delivered": delivered,
+        "escalated": True,
+        "response_mode": pipeline_result.response_mode,
+        "answer_text": answer_text,
+        "answerer": metadata.get("answerer"),
+        "hitl_ticket_id": ticket.id,
+        "hitl_operator_username": assignee,
+        "hitl_reason": hitl_reason,
+        "trace_id": persisted_trace_id,
+    }
+
+
 @app.post("/conversations/inbound")
 async def conversations_inbound(request: InboundMessageRequest) -> dict[str, object]:
     if not request.text.strip():
@@ -1908,6 +2217,16 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         }
 
     now = datetime.now(UTC)
+    # Story 12.08: cancel any pending +1d nudge BEFORE the pipeline runs so a
+    # reply arriving at the same instant the queue fires never double-notifies.
+    # The hook is a no-op when chat_id is None.
+    await asyncio.to_thread(
+        maybe_cancel,
+        repo=sales_followup_repository,
+        chat_id=request.chat_id,
+        now=now,
+        trace_id=trace_id,
+    )
     ctx = _build_answer_context(
         chat_id=request.chat_id,
         customer_username=request.customer_username,
@@ -1930,6 +2249,21 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             trace_id=trace_id,
             latency_ms=latency_ms,
             metadata=pipeline_result.metadata,
+        )
+
+    if (
+        pipeline_result.handled
+        and pipeline_result.response_mode == RESPONSE_MODE_SALES_ESCALATION
+    ):
+        # Sales answerer wants to deliver a fixed customer-facing line AND open
+        # a HITL ticket so the operator picks up the unknown price / drift /
+        # closing handoff. We deliver the line first, then create+notify the
+        # ticket using ``hitl_reason`` from the answerer metadata.
+        return await _dispatch_sales_escalation(
+            request=request,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            pipeline_result=pipeline_result,
         )
 
     if pipeline_result.handled:
@@ -2085,6 +2419,499 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         "hitl_ticket_id": ticket.id,
         "hitl_operator_username": _effective_hitl_operator_username(),
         "trace_id": persisted_trace_id,
+    }
+
+
+class FollowupRescheduleRequest(BaseModel):
+    new_fire_at: datetime
+
+
+def _followup_row_to_dict(
+    row: FollowupRow, *, intent_dates: str | None = None
+) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "chat_id": row.chat_id,
+        "project_id": row.project_id,
+        "fire_at": row.fire_at.isoformat(),
+        "status": row.status,
+        "reason": row.reason,
+        "intent_dates": intent_dates,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _intent_dates_for_chat(chat_id: int) -> str | None:
+    state = sales_state_repository.get(chat_id)
+    if state is None:
+        return None
+    collected = state.get("collected_intent") or {}
+    raw = collected.get("dates")
+    return str(raw) if isinstance(raw, str) and raw.strip() else None
+
+
+@app.get("/sales/followups/due")
+def list_due_followups(
+    now: str | None = None,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    if now is None:
+        cursor = datetime.now(UTC)
+    else:
+        try:
+            parsed = datetime.fromisoformat(now)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid_now") from exc
+        cursor = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    rows = sales_followup_repository.due(now=cursor, limit=100)
+    return {
+        "rows": [
+            _followup_row_to_dict(
+                row, intent_dates=_intent_dates_for_chat(row.chat_id)
+            )
+            for row in rows
+        ]
+    }
+
+
+@app.post("/sales/followups/{followup_id}/skip-stale")
+def skip_stale_followup(
+    followup_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = sales_followup_repository.get(followup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="followup_not_found")
+    sales_followup_repository.mark_skipped_stale(
+        followup_id, reason=REASON_PAST_INTENT_DATE, now=datetime.now(UTC)
+    )
+    return {"ok": True}
+
+
+@app.post("/sales/followups/{followup_id}/reschedule")
+def reschedule_followup(
+    followup_id: int,
+    payload: FollowupRescheduleRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = sales_followup_repository.get(followup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="followup_not_found")
+    fire_at = payload.new_fire_at
+    if fire_at.tzinfo is None:
+        fire_at = fire_at.replace(tzinfo=UTC)
+    sales_followup_repository.reschedule(
+        followup_id, new_fire_at=fire_at, now=datetime.now(UTC)
+    )
+    return {"ok": True}
+
+
+@app.post("/sales/followups/{followup_id}/fire")
+async def fire_followup(
+    followup_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = sales_followup_repository.get(followup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="followup_not_found")
+    outcome = await sales_followup_fire_handler.fire(row)
+    return {
+        "ok": True,
+        "sent": outcome.sent,
+        "fallback_text_used": outcome.fallback_text_used,
+    }
+
+
+@app.post("/sales/_dev/tick-followup-now")
+async def dev_tick_followup_now() -> dict[str, object]:
+    """Dev-only fast-forward: fire every currently-due follow-up row.
+
+    Story 12.09 uses this in ``scripts/epic12_signoff.sh`` to drive the
+    proactive nudge without manipulating the system clock. The endpoint
+    is exposed ONLY when ``Settings.app_env == "dev"``; any other env
+    returns 404 so a misconfigured production never accidentally
+    exposes an unauthenticated tick endpoint.
+    """
+    if settings.app_env != "dev":
+        raise HTTPException(status_code=404, detail="not_found")
+    rows = sales_followup_repository.due(now=datetime.now(UTC), limit=100)
+    fired = 0
+    for row in rows:
+        outcome = await sales_followup_fire_handler.fire(row)
+        if outcome.sent or outcome.fallback_text_used:
+            fired += 1
+    return {"fired": fired}
+
+
+class SalesAnalyzeKbFileRequest(BaseModel):
+    project_id: int
+    operator_file_short_id: str
+    now: str | None = None
+
+
+def _analysis_outcome_to_dict(outcome: AnalysisOutcome) -> dict[str, object]:
+    return {
+        "registered": outcome.registered,
+        "material_id": outcome.material_id,
+        "reason": outcome.reason,
+    }
+
+
+class SalesServiceCreateRequest(BaseModel):
+    project_id: int
+    name: str
+    description_md: str | None = None
+    tags: list[str] | None = None
+
+
+def _sales_service_to_dict(service) -> dict[str, object]:
+    return {
+        "id": service.id,
+        "project_id": service.project_id,
+        "name": service.name,
+        "description_md": service.description_md,
+        "tags": service.tags,
+        "is_active": service.is_active,
+    }
+
+
+def _sales_state_row_to_dict(row: dict) -> dict[str, object]:
+    """Curated projection of a `StateRepository` row for the API response.
+
+    Explicitly enumerates only the keys we want on the wire so a future
+    column added to the row dict (e.g. a token-bearing field) cannot
+    silently leak through.
+    """
+    last_customer = row.get("last_customer_msg_at")
+    last_bot = row.get("last_bot_msg_at")
+    return {
+        "chat_id": row["chat_id"],
+        "project_id": row["project_id"],
+        "current_stage": row["current_stage"],
+        "collected_intent": row.get("collected_intent") or {},
+        "last_proposal": row.get("last_proposal"),
+        "last_customer_msg_at": (
+            last_customer.isoformat() if last_customer is not None else None
+        ),
+        "last_bot_msg_at": (
+            last_bot.isoformat() if last_bot is not None else None
+        ),
+    }
+
+
+@app.post("/sales/services")
+async def sales_services_add(
+    request: SalesServiceCreateRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    clean_name = (request.name or "").strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="invalid_service_name")
+    try:
+        service_id = await asyncio.to_thread(
+            sales_services_repository.add,
+            project_id=request.project_id,
+            name=clean_name,
+            description_md=request.description_md,
+            tags=request.tags,
+            now=datetime.now(UTC),
+        )
+    except ServiceAlreadyExists as exc:
+        raise HTTPException(
+            status_code=409, detail="service_already_exists"
+        ) from exc
+    return {"id": service_id}
+
+
+@app.get("/sales/services")
+async def sales_services_list(
+    project_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    services = await asyncio.to_thread(
+        sales_services_repository.list_active, project_id=project_id
+    )
+    return {"services": [_sales_service_to_dict(s) for s in services]}
+
+
+@app.delete("/sales/services/{service_id}")
+async def sales_services_delete(
+    service_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    try:
+        await asyncio.to_thread(
+            sales_services_repository.soft_delete, service_id=service_id
+        )
+    except ServiceNotFound as exc:
+        raise HTTPException(status_code=404, detail="service_not_found") from exc
+    return {"ok": True}
+
+
+@app.get("/sales/state")
+async def sales_state_list(
+    project_id: int,
+    chat_id: int | None = None,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    rows = await asyncio.to_thread(
+        sales_state_repository.list_active,
+        project_id=project_id,
+        chat_id=chat_id,
+    )
+    return {"states": [_sales_state_row_to_dict(row) for row in rows]}
+
+
+@app.post("/sales/materials/analyze-kb-file")
+async def sales_materials_analyze_kb_file(
+    request: SalesAnalyzeKbFileRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    """Run the 12.05b client-materials analyzer on a KB-uploaded file.
+
+    Called by the bot_gateway KB-upload hook after a successful KB ingest.
+    The endpoint always returns a 200 with the ``AnalysisOutcome`` shape —
+    the bot treats ``registered=False`` as "no extra message" and never
+    surfaces an error from this endpoint. The injected ``now`` is tz-aware
+    UTC; tests may pass an explicit ISO string for determinism.
+    """
+    parsed_now = _parse_optional_now(request.now)
+    effective_now = parsed_now if parsed_now is not None else datetime.now(UTC)
+    outcome = await client_materials_analyzer.analyze_and_register(
+        project_id=request.project_id,
+        operator_file_short_id=request.operator_file_short_id,
+        now=effective_now,
+    )
+    return _analysis_outcome_to_dict(outcome)
+
+
+def _extraction_outcome_to_dict(
+    outcome: ExtractionOutcome,
+) -> dict[str, object]:
+    return {
+        "added": [
+            {"service_id": item.service_id, "name": item.name}
+            for item in outcome.added
+        ],
+        "skipped_existing": list(outcome.skipped_existing),
+        "reason": outcome.reason,
+    }
+
+
+@app.post("/sales/services/extract-from-kb-file")
+async def sales_services_extract_from_kb_file(
+    request: SalesAnalyzeKbFileRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    """Run the 12.05c services extractor on a KB-uploaded file.
+
+    Called by the bot_gateway KB-upload hook in parallel with the 12.05b
+    materials analyzer. The endpoint always returns a 200 with the
+    ``ExtractionOutcome`` shape — the bot treats an empty ``added`` list
+    as "no extra message" and never surfaces an error from this endpoint.
+    The injected ``now`` is tz-aware UTC; tests may pass an explicit ISO
+    string for determinism.
+    """
+    parsed_now = _parse_optional_now(request.now)
+    effective_now = parsed_now if parsed_now is not None else datetime.now(UTC)
+    outcome = await services_extractor.extract_and_register(
+        project_id=request.project_id,
+        operator_file_short_id=request.operator_file_short_id,
+        now=effective_now,
+    )
+    return _extraction_outcome_to_dict(outcome)
+
+
+_MATERIAL_CAPTION_MAX_CHARS = 200
+_MATERIAL_ALLOWED_KINDS: frozenset[str] = frozenset(
+    {"video", "photo", "pdf", "document"}
+)
+
+
+class SalesMaterialCreateRequest(BaseModel):
+    project_id: int
+    kind: str
+    local_path: str
+    byte_size: int
+    duration_seconds: int | None = None
+    caption: str | None = None
+    tags: list[str] | None = None
+    telegram_file_id: str | None = None
+    source_operator_file_id: str | None = None
+
+
+class SalesMaterialDispatchRequest(BaseModel):
+    chat_id: int
+    material_id: int
+    caption_override: str | None = None
+    trace_id: str | None = None
+
+
+def _client_material_to_dict(row: ClientMaterial) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "kind": row.kind,
+        "local_path": row.local_path,
+        "byte_size": row.byte_size,
+        "duration_seconds": row.duration_seconds,
+        "caption": row.caption,
+        "tags": row.tags,
+        "telegram_file_id": row.telegram_file_id,
+        "source_operator_file_id": row.source_operator_file_id,
+        "is_active": row.is_active,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _validate_material_caption(caption: str | None) -> None:
+    if caption is not None and len(caption) > _MATERIAL_CAPTION_MAX_CHARS:
+        raise HTTPException(status_code=400, detail="caption_too_long")
+
+
+@app.post("/sales/materials")
+async def sales_materials_add(
+    request: SalesMaterialCreateRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    if request.kind not in _MATERIAL_ALLOWED_KINDS:
+        raise HTTPException(status_code=400, detail="invalid_kind")
+    _validate_material_caption(request.caption)
+    material_id = await asyncio.to_thread(
+        client_materials_repository.add,
+        project_id=request.project_id,
+        kind=request.kind,
+        local_path=request.local_path,
+        byte_size=request.byte_size,
+        duration_seconds=request.duration_seconds,
+        caption=request.caption,
+        tags=request.tags,
+        telegram_file_id=request.telegram_file_id,
+        source_operator_file_id=request.source_operator_file_id,
+        now=datetime.now(UTC),
+    )
+    return {"id": material_id}
+
+
+@app.get("/sales/materials")
+async def sales_materials_list(
+    project_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    rows = await asyncio.to_thread(
+        client_materials_repository.list_active, project_id=project_id
+    )
+    return {"materials": [_client_material_to_dict(row) for row in rows]}
+
+
+@app.delete("/sales/materials/{material_id}")
+async def sales_materials_delete(
+    material_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = await asyncio.to_thread(
+        client_materials_repository.get, material_id=material_id
+    )
+    if row is None or not row.is_active:
+        raise HTTPException(status_code=404, detail="material_not_found")
+    await asyncio.to_thread(
+        client_materials_repository.soft_delete, material_id=material_id
+    )
+    return {"ok": True}
+
+
+_DISPATCH_METHOD_BY_KIND: dict[str, str] = {
+    "video": "send_video",
+    "photo": "send_photo",
+    "pdf": "send_document",
+    "document": "send_document",
+}
+
+
+@app.post("/sales/dispatch/material")
+async def sales_dispatch_material(
+    request: SalesMaterialDispatchRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    """Send a registered client material to a Telegram chat.
+
+    Prefers the cached ``telegram_file_id`` so subsequent sends never read
+    from disk; on a fresh upload the returned ``file_id`` is cached on the
+    row via :meth:`ClientMaterialsRepository.update_telegram_file_id`.
+
+    Telegram-side failures resolve to ``{ok: false, error_reason}`` so the
+    caller (the answerer's media moment) can fall back to a textual reply
+    within the same turn. The ``telegram_file_id`` is never logged.
+    """
+    _validate_material_caption(request.caption_override)
+    row = await asyncio.to_thread(
+        client_materials_repository.get, material_id=request.material_id
+    )
+    if row is None or not row.is_active:
+        raise HTTPException(status_code=404, detail="material_not_found")
+
+    method_name = _DISPATCH_METHOD_BY_KIND.get(row.kind)
+    if method_name is None:
+        raise HTTPException(status_code=400, detail="invalid_kind")
+
+    caption = (
+        request.caption_override
+        if request.caption_override is not None
+        else row.caption
+    )
+    send_method = getattr(telegram_bot_sender, method_name)
+    has_cached_id = row.telegram_file_id is not None
+    kwargs: dict[str, object] = {"chat_id": request.chat_id}
+    if caption is not None:
+        kwargs["caption"] = caption
+    if has_cached_id:
+        kwargs["file_id"] = row.telegram_file_id
+    else:
+        kwargs["local_path"] = Path(row.local_path)
+
+    try:
+        result = await send_method(**kwargs)
+    except TelegramMediaSendError as exc:
+        # NOTE: never log ``exc.description`` — Telegram error descriptions can
+        # echo the ``file_id`` back to us, which would violate the Story 12.05
+        # 'never log telegram_file_id' exit criterion.
+        logger.warning(
+            "sales_material_dispatch_failed",
+            extra={
+                "trace_id": request.trace_id,
+                "material_id": row.id,
+                "kind": row.kind,
+                "reason": exc.reason,
+                "cached_file_id_used": has_cached_id,
+            },
+        )
+        return {"ok": False, "error_reason": exc.reason}
+
+    returned_file_id = result.get("telegram_file_id")
+    if not has_cached_id and isinstance(returned_file_id, str) and returned_file_id:
+        await asyncio.to_thread(
+            client_materials_repository.update_telegram_file_id,
+            material_id=row.id,
+            telegram_file_id=returned_file_id,
+        )
+        cached_now = True
+    else:
+        cached_now = False
+    logger.info(
+        "sales_material_dispatched",
+        extra={
+            "trace_id": request.trace_id,
+            "material_id": row.id,
+            "kind": row.kind,
+            "telegram_file_id_cached_now": cached_now,
+            "used_cached_file_id": has_cached_id,
+        },
+    )
+    return {
+        "ok": True,
+        "telegram_file_id_cached": has_cached_id,
     }
 
 
@@ -2752,6 +3579,7 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
                 "extracted_chars": 0,
                 "is_confidential": existing.is_confidential,
                 "deduplicated": True,
+                "project_id": existing.project_id,
             }
 
     try:
@@ -2870,6 +3698,7 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
         "extracted_chars": len(wrapped),
         "is_confidential": request.is_confidential,
         "deduplicated": False,
+        "project_id": resolved_project_id,
     }
 
 

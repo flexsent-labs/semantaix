@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,6 +8,14 @@ import httpx
 
 from platform_common.settings import get_settings
 from services.api.app.rag import RagChunk
+
+
+class OpenRouterJsonSchemaViolation(Exception):
+    """Raised by `OpenRouterClient.complete_json` when the response is not
+    valid JSON. Callers convert this into their own domain-specific
+    schema-violation type (e.g. ``LlmSchemaViolation`` in the sales
+    answerer) so the pipeline can fall through cleanly.
+    """
 
 _GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
     "Ты — {name}, сотрудник компании, описанной в приведённых ниже "
@@ -170,6 +179,58 @@ class OpenRouterClient:
         return await self._chat(
             model=model or self.grounding_model, messages=messages
         )
+
+    async def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Single structured JSON-out completion.
+
+        Used by the SalesPersonaAnswerer (Story 12.03) for per-turn
+        extraction + next-question generation. The response is expected
+        to be a JSON object; we ask OpenRouter to enforce that via the
+        ``response_format=json_object`` payload field. On parse failure
+        we raise ``OpenRouterJsonSchemaViolation`` so the caller can
+        log + fall through without raising into the pipeline.
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        if not self.api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        payload: dict[str, Any] = {
+            "model": model or self.grounding_model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            raw = data["choices"][0]["message"]["content"]
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise OpenRouterJsonSchemaViolation(
+                f"non-JSON response: {raw[:200]}"
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise OpenRouterJsonSchemaViolation(
+                f"JSON response is not an object: {type(decoded).__name__}"
+            )
+        return decoded
 
     async def verify_grounding(
         self,

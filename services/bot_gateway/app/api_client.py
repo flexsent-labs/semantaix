@@ -115,6 +115,227 @@ class ApiClient:
             timeout_override=timeout_seconds,
         )
 
+    async def add_sales_service(
+        self,
+        *,
+        project_id: int,
+        name: str,
+        description_md: str | None,
+        tags: list[str] | None,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: create a row on the sales services catalog.
+
+        Returns ``{"id": int}`` on success. Raises :class:`ApiError` with
+        ``.detail == "service_already_exists"`` on a 409 duplicate so the
+        slash-command dispatcher can DM a one-line "уже есть" message.
+        """
+        response = await self._bearer_post(
+            "/sales/services",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "name": name,
+                "description_md": description_md,
+                "tags": tags,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def list_sales_services(
+        self,
+        *,
+        project_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: list active sales services for a project."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/sales/services",
+                params={"project_id": project_id},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def delete_sales_service(
+        self,
+        *,
+        service_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: soft-delete a sales service row."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.delete(
+                f"{self._base_url}/sales/services/{service_id}",
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def get_sales_state(
+        self,
+        *,
+        project_id: int,
+        chat_id: int | None,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: read the sales-conversation state for a project.
+
+        Optional ``chat_id`` filters server-side so the ``/sales_state @name``
+        command doesn't have to fetch + scan the whole project.
+        """
+        params: dict[str, object] = {"project_id": project_id}
+        if chat_id is not None:
+            params["chat_id"] = chat_id
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/sales/state",
+                params=params,
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def add_sales_material(
+        self,
+        *,
+        project_id: int,
+        kind: str,
+        local_path: str,
+        byte_size: int,
+        internal_token: str,
+        duration_seconds: int | None = None,
+        caption: str | None = None,
+        tags: list[str] | None = None,
+        telegram_file_id: str | None = None,
+        source_operator_file_id: str | None = None,
+    ) -> dict:
+        """Story 12.05: register a client material row from the `/material` bot command."""
+        response = await self._bearer_post(
+            "/sales/materials",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "kind": kind,
+                "local_path": local_path,
+                "byte_size": byte_size,
+                "duration_seconds": duration_seconds,
+                "caption": caption,
+                "tags": tags,
+                "telegram_file_id": telegram_file_id,
+                "source_operator_file_id": source_operator_file_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def list_sales_materials(
+        self,
+        *,
+        project_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.05: list active client materials for a project."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/sales/materials",
+                params={"project_id": project_id},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def delete_sales_material(
+        self,
+        *,
+        material_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.05: soft-delete a client material row."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.delete(
+                f"{self._base_url}/sales/materials/{material_id}",
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def dispatch_sales_material(
+        self,
+        *,
+        chat_id: int,
+        material_id: int,
+        internal_token: str,
+        caption_override: str | None = None,
+        trace_id: str | None = None,
+    ) -> dict:
+        """Story 12.05: send a registered material to a customer chat."""
+        response = await self._bearer_post(
+            "/sales/dispatch/material",
+            internal_token=internal_token,
+            json={
+                "chat_id": chat_id,
+                "material_id": material_id,
+                "caption_override": caption_override,
+                "trace_id": trace_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def analyze_kb_material(
+        self,
+        *,
+        project_id: int,
+        operator_file_short_id: str,
+        internal_token: str,
+    ) -> dict:
+        """Call the 12.05b client-materials analyzer endpoint.
+
+        Returns the api body ``{registered: bool, material_id: int|None,
+        reason: str}``. Raises ``ApiError`` on a non-2xx response so the
+        caller can surface a redacted error in the operator-facing DM (or,
+        per the story, swallow it and keep the KB ack visible).
+        """
+        response = await self._bearer_post(
+            "/sales/materials/analyze-kb-file",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "operator_file_short_id": operator_file_short_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def extract_kb_services(
+        self,
+        *,
+        project_id: int,
+        operator_file_short_id: str,
+        internal_token: str,
+    ) -> dict:
+        """Call the 12.05c services extractor endpoint.
+
+        Returns the api body ``{added: list, skipped_existing: list, reason:
+        str}``. Raises ``ApiError`` on a non-2xx response — the caller in the
+        bot KB-upload hook swallows the exception, logs it, and keeps the
+        KB ack visible (services-extract failure must never block the
+        materials hook or the bare KB ack).
+        """
+        response = await self._bearer_post(
+            "/sales/services/extract-from-kb-file",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "operator_file_short_id": operator_file_short_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
     async def initiate_calendar_connect(
         self,
         *,

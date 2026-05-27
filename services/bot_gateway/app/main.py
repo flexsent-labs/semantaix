@@ -11,6 +11,7 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.hitl import HitlTicketRepository
+from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
@@ -19,6 +20,9 @@ from services.bot_gateway.app.api_client import ApiClient, ApiError
 from services.bot_gateway.app.calendar_commands import handle_calendar_command
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
+from services.bot_gateway.app.material_command_dispatch import (
+    handle_material_command,
+)
 from services.bot_gateway.app.media_group_buffer import (
     MediaGroupBuffer,
 )
@@ -26,11 +30,15 @@ from services.bot_gateway.app.operator_files import (
     OperatorFileRecord,
     OperatorFileRepository,
 )
+from services.bot_gateway.app.operator_service_nl import (
+    handle_operator_service_nl_message,
+)
 from services.bot_gateway.app.persistence import persist_normalized_message
 from services.bot_gateway.app.prompt_commands import (
     dispatch_pending_prompt_edit,
     handle_prompt_command,
 )
+from services.bot_gateway.app.sales_command_dispatch import handle_sales_command
 from services.bot_gateway.app.services_nl_dialog import handle_services_nl_message
 from services.bot_gateway.app.telegram_file_download import (
     TelegramFileDownloader,
@@ -66,6 +74,11 @@ telegram_file_sender = TelegramFileSender(
     bot_token=settings.telegram_bot_token,
     base_url=settings.telegram_bot_api_base_url,
 )
+# Story 12.02b — OpenRouter client used by the operator services NL classifier.
+# Single shared instance: each ``complete_json`` call opens its own httpx
+# AsyncClient with a 30s timeout, so a long-running LLM call cannot block
+# concurrent webhook handlers.
+operator_service_nl_openrouter = OpenRouterClient()
 
 _BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
@@ -602,6 +615,22 @@ def _kb_attachment_count_word(count: int) -> str:
     return "файлов"
 
 
+def _material_downloader_factory(storage_dir: Path) -> TelegramFileDownloader:
+    """Construct a :class:`TelegramFileDownloader` rooted at the per-project
+    sales materials subdir; the ``/material`` handler passes
+    ``<storage_root>/<project_id>/`` so files land under
+    ``.data/sales_materials/<project_id>/<file>`` (spec exit criterion).
+    Reuses the same Telegram fetch path as ``/kb_add``.
+    """
+    return TelegramFileDownloader(
+        bot_token=settings.telegram_bot_token,
+        storage_dir=storage_dir,
+        max_bytes=settings.operator_upload_max_bytes,
+        base_url=settings.telegram_bot_api_base_url,
+        local_mode=settings.telegram_bot_api_local_mode,
+    )
+
+
 async def _process_operator_upload(
     *,
     normalized: NormalizedTelegramMessage,
@@ -791,6 +820,11 @@ async def _process_operator_upload(
             summary_lines.append(f"   • #{short_id} · {name}")
     if deduped:
         summary_lines.append(f"♻️ Из них уже было в базе: {deduped}.")
+    material_lines = await _analyze_kb_uploads_for_materials(
+        successes=successes,
+        successes_meta=successes_meta,
+    )
+    summary_lines.extend(material_lines)
     for label, reason, short_id in failures:
         friendly = _friendly_failure_reason(
             reason, max_bytes=settings.operator_upload_max_bytes
@@ -800,6 +834,126 @@ async def _process_operator_upload(
             f"⚠️ Не удалось обработать {label}: {friendly}{suffix}"
         )
     await _send_dm(normalized.chat_id, "\n".join(summary_lines))
+
+
+async def _analyze_kb_uploads_for_materials(
+    *,
+    successes: list[dict],
+    successes_meta: list[tuple[str | None, str | None]],
+) -> list[str]:
+    """Stories 12.05b + 12.05c hook: for each non-confidential KB upload,
+    fan out the materials analyzer + services extractor in parallel and
+    append the resulting lines to the KB-upload ack.
+
+    The fan-out is per-upload: each upload runs both hooks via
+    ``asyncio.gather`` so a single KB upload triggers at most two LLM
+    calls. Each hook is independent — an exception in one MUST NOT
+    block the other (each fan-out branch is wrapped in its own
+    try/except). Failures are silent to the operator and structured
+    logs carry only the short_id + project_id + error (never the file
+    text).
+
+    Per the story rules, output order is: materials line FIRST, then
+    services line. When both are empty the ack stays bare.
+    """
+    lines: list[str] = []
+    token = settings.internal_service_token or ""
+    if not token:
+        return lines
+    for item, (short_id, _name) in zip(successes, successes_meta):
+        if short_id is None:
+            continue
+        if item.get("is_confidential"):
+            continue
+        project_id = item.get("project_id")
+        if project_id is None:
+            continue
+        materials_outcome, services_outcome = await asyncio.gather(
+            _safe_analyze_kb_material(
+                short_id=short_id,
+                project_id=int(project_id),
+                token=token,
+            ),
+            _safe_extract_kb_services(
+                short_id=short_id,
+                project_id=int(project_id),
+                token=token,
+            ),
+        )
+        if materials_outcome is not None and materials_outcome.get("registered"):
+            material_id = materials_outcome.get("material_id")
+            if material_id is not None:
+                lines.append(
+                    f"📎 Добавлен в материалы для клиентов "
+                    f"(id={material_id})."
+                )
+        if services_outcome is not None:
+            added = services_outcome.get("added") or []
+            names = [
+                str(entry.get("name"))
+                for entry in added
+                if isinstance(entry, dict)
+                and isinstance(entry.get("name"), str)
+                and entry.get("name").strip()
+            ]
+            if names:
+                lines.append(
+                    "📦 Услуги добавлены: " + ", ".join(names) + "."
+                )
+    return lines
+
+
+async def _safe_analyze_kb_material(
+    *, short_id: str, project_id: int, token: str
+) -> dict | None:
+    """Run the 12.05b materials analyzer; swallow + log any error.
+
+    Returns ``None`` when the analyzer call raised — the caller treats
+    that as "no line to append" and keeps the bare KB ack visible.
+    """
+    try:
+        return await api_client.analyze_kb_material(
+            project_id=project_id,
+            operator_file_short_id=short_id,
+            internal_token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "sales_kb_material_analyze_failed",
+            extra={
+                "operator_file_short_id": short_id,
+                "project_id": project_id,
+                "error": _redact_token(str(exc)),
+            },
+        )
+        return None
+
+
+async def _safe_extract_kb_services(
+    *, short_id: str, project_id: int, token: str
+) -> dict | None:
+    """Run the 12.05c services extractor; swallow + log any error.
+
+    Returns ``None`` when the extract call raised — the caller treats
+    that as "no line to append" and keeps the materials line + bare KB
+    ack visible.
+    """
+    try:
+        return await api_client.extract_kb_services(
+            project_id=project_id,
+            operator_file_short_id=short_id,
+            internal_token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "sales_services_extract_failed",
+            extra={
+                "operator_file_short_id": short_id,
+                "project_id": project_id,
+                "error": _redact_token(str(exc)),
+            },
+        )
+        return None
 
 
 _API_DETAIL_FRIENDLY: dict[str, str] = {
@@ -2034,6 +2188,63 @@ async def _process_telegram_update(
     if admin_nl_result is not None:
         response = {"trace_id": trace_id}
         response.update(admin_nl_result)
+        return response
+
+    sales_command_result = await handle_sales_command(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        primary_operator_username=_effective_operator_username(),
+        admin_username=settings.hitl_config_admin_username,
+        internal_token=settings.internal_service_token or "",
+    )
+    if sales_command_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(sales_command_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=sales_command_result,
+            fallback="sales_command",
+        )
+        return response
+
+    material_command_result = await handle_material_command(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        primary_operator_username=_effective_operator_username(),
+        admin_username=settings.hitl_config_admin_username,
+        internal_token=settings.internal_service_token or "",
+        downloader_factory=_material_downloader_factory,
+        storage_root=Path(settings.sales_materials_storage_dir),
+    )
+    if material_command_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(material_command_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=material_command_result,
+            fallback="material_command",
+        )
+        return response
+
+    operator_service_nl_result = await handle_operator_service_nl_message(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        openrouter=operator_service_nl_openrouter,
+        primary_operator_username=_effective_operator_username(),
+        admin_username=settings.hitl_config_admin_username,
+        internal_token=settings.internal_service_token or "",
+    )
+    if operator_service_nl_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(operator_service_nl_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=operator_service_nl_result,
+            fallback="operator_service_nl",
+        )
         return response
 
     services_nl_result = await handle_services_nl_message(

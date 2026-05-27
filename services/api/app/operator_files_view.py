@@ -57,6 +57,26 @@ class FileSearchHit:
     snippet: str
 
 
+@dataclass(frozen=True)
+class KbFileMaterialView:
+    """Server-internal projection used by the KB-upload analyzer (12.05b).
+
+    Exposes the file metadata + extracted text the analyzer needs to judge
+    whether a KB-uploaded file is suitable as customer-facing material.
+    No viewer scope: the analyzer runs as a server-internal background
+    job after a successful KB ingest.
+    """
+
+    short_id: str
+    mime_type: str | None
+    file_extension: str
+    byte_size: int
+    local_path: str | None
+    is_confidential: bool
+    extracted_text: str | None
+    project_id: int | None
+
+
 def _open(operator_files_db_path: str, knowledge_db_path: str) -> sqlite3.Connection:
     if not Path(operator_files_db_path).exists():
         # Caller still needs a connection to query; create-empty by opening RW once,
@@ -143,6 +163,72 @@ class OperatorFilesView:
         if row is None:
             return None
         return _row_to_detail(row)
+
+    def get_for_kb_material(
+        self, *, short_id: str
+    ) -> KbFileMaterialView | None:
+        """Server-internal lookup used by the 12.05b KB-material analyzer.
+
+        Returns ``None`` when the file is unknown. Joins to the knowledge
+        moderation row to source ``extracted_text`` and ``project_id``;
+        ``file_extension`` is derived from ``source_file_name`` (lowercased,
+        no leading dot) and falls back to a normalized hint from
+        ``source_file_type`` when the original name has no extension.
+        """
+        sql = """
+            SELECT op.short_id, op.source_file_name, op.source_file_type,
+                   op.mime_type, op.file_size_bytes, op.is_confidential,
+                   op.stored_binary_path,
+                   kmc.candidate_text AS candidate_text,
+                   kmc.project_id AS project_id
+            FROM operator_files op
+            LEFT JOIN kdb.knowledge_moderation_candidates kmc
+                ON kmc.id = op.knowledge_candidate_id
+            WHERE op.short_id = ?
+            LIMIT 1
+        """
+        with _open(self.operator_files_db_path, self.knowledge_db_path) as conn:
+            row = conn.execute(sql, [short_id]).fetchone()
+        if row is None:
+            return None
+        candidate_text = row["candidate_text"]
+        source_file_name = row["source_file_name"]
+        source_file_type = row["source_file_type"]
+        return KbFileMaterialView(
+            short_id=str(row["short_id"]),
+            mime_type=(
+                str(row["mime_type"]) if row["mime_type"] is not None else None
+            ),
+            file_extension=_resolve_file_extension(
+                source_file_name=(
+                    str(source_file_name)
+                    if source_file_name is not None
+                    else None
+                ),
+                source_file_type=(
+                    str(source_file_type)
+                    if source_file_type is not None
+                    else None
+                ),
+            ),
+            byte_size=(
+                int(row["file_size_bytes"])
+                if row["file_size_bytes"] is not None
+                else 0
+            ),
+            local_path=(
+                str(row["stored_binary_path"])
+                if row["stored_binary_path"] is not None
+                else None
+            ),
+            is_confidential=bool(row["is_confidential"]),
+            extracted_text=(
+                str(candidate_text) if candidate_text is not None else None
+            ),
+            project_id=(
+                int(row["project_id"]) if row["project_id"] is not None else None
+            ),
+        )
 
     def search_files(
         self,
@@ -253,6 +339,38 @@ def _row_to_hit(row: sqlite3.Row, *, query: str) -> FileSearchHit:
         uploaded_at=str(row["created_at"]),
         snippet=snippet,
     )
+
+
+_SOURCE_TYPE_EXTENSION_FALLBACK: dict[str, str] = {
+    "pdf": "pdf",
+    "docx": "docx",
+    "pptx": "pptx",
+    "xlsx": "xlsx",
+    "txt": "txt",
+    "csv": "csv",
+    "html": "html",
+    "md": "md",
+    "rtf": "rtf",
+    "epub": "epub",
+    "zip": "zip",
+    "image": "jpg",
+    "audio": "ogg",
+    "video": "mp4",
+    "inline_text": "txt",
+}
+
+
+def _resolve_file_extension(
+    *, source_file_name: str | None, source_file_type: str | None
+) -> str:
+    if source_file_name and "." in source_file_name:
+        suffix = source_file_name.rsplit(".", 1)[-1].lower().strip()
+        if suffix:
+            return suffix
+    if source_file_type:
+        normalized = source_file_type.lower().strip()
+        return _SOURCE_TYPE_EXTENSION_FALLBACK.get(normalized, normalized)
+    return "bin"
 
 
 def _build_snippet(*, text: str, query: str) -> str:

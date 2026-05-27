@@ -73,6 +73,34 @@ def test_normalize_update_validation_errors(payload, reason):
         normalize_update(payload)
 
 
+def test_normalize_update_extracts_reply_to_caption() -> None:
+    """Story 12.05: the ``/material`` handler reads ``reply_to_caption`` to
+    fall back to the original media caption when the operator omits one."""
+    payload = {
+        "update_id": 99,
+        "message": {
+            "message_id": 2,
+            "chat": {"id": 3},
+            "from": {"id": 4, "username": "op"},
+            "text": "/material",
+            "reply_to_message": {
+                "message_id": 1,
+                "chat": {"id": 3},
+                "from": {"id": 4, "username": "op"},
+                "video": {
+                    "file_id": "TG-V",
+                    "file_size": 1,
+                    "mime_type": "video/mp4",
+                },
+                "caption": "Тур-превью",
+            },
+        },
+    }
+    normalized = normalize_update(payload)
+    assert normalized is not None
+    assert normalized.reply_to_caption == "Тур-превью"
+
+
 @pytest.mark.parametrize(
     "payload",
     [

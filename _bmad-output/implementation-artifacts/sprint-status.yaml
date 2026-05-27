@@ -1,5 +1,5 @@
 # generated: 2026-05-23
-# last_updated: 2026-05-26
+# last_updated: 2026-05-27
 # project: Semantaix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -38,13 +38,9 @@
 #   12-07 ∥ 12-08 after 12-03; 12-09 last (depends on all).
 # - Epic 13 dependency order (epics/stories/epic-13/README.md): 13-01 blocks all; 13-02 ∥ 13-06 after 13-01;
 #   13-03 ∥ 13-04 after 13-02; 13-05 after 13-04.
-# - Epic 10.5 (Operator-Project Model Refinement) is a brownfield refinement that must complete before
-#   Epic 14 implementation can start (removes hitl_primary_operator_username; required for Epic 14 RBAC).
-# - Epic 14 (Usage / Token / Cost Monitoring) planning surface ready (see brainstorming session
-#   2026-05-26); stories TBD via `bmad-create-epics-and-stories` after Epic 10.5 ships.
 
 generated: 2026-05-23
-last_updated: 2026-05-26
+last_updated: 2026-05-27
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -108,17 +104,5 @@ development_status:
   12-06-service-list-and-concept-explainer: backlog
   12-07-date-proposal-turn: backlog
   12-08-proactive-followup: backlog
-  12-09-pipeline-wiring-and-e2e-signoff: backlog
+  12-09-pipeline-wiring-and-e2e-signoff: in-progress
   epic-12-retrospective: optional
-
-  # --- Queued refinement (blocker for Epic 14) ---
-  epic-10-5: backlog
-  10-5-01-settings-and-runtime-config-cleanup: backlog
-  10-5-02-bot-gateway-resolver-rewrite: backlog
-  10-5-03-api-surface-updates: backlog
-  10-5-04-epic-signoff: backlog
-  epic-10-5-retrospective: optional
-
-  # --- Planned (Usage / Token / Cost Monitoring; queued post-10.5) ---
-  epic-14: backlog
-  epic-14-retrospective: optional
