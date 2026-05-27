@@ -196,3 +196,24 @@ def test_get_for_kb_material_uses_jpg_for_image_type(tmp_path: Path) -> None:
 
     assert result is not None
     assert result.file_extension == "jpg"
+
+
+def test_get_for_kb_material_returns_none_when_operator_files_db_missing(
+    tmp_path: Path,
+) -> None:
+    """A KB-upload lookup before any operator has uploaded a file (i.e. before
+    the operator_files SQLite DB has been created) must return ``None`` so the
+    analyzer can record ``registered=False`` rather than crash the request.
+
+    Regression for the epic-12 signoff Step 3/9 failure where this raised
+    ``FileNotFoundError`` and surfaced as a 500 on
+    ``POST /sales/materials/analyze-kb-file``.
+    """
+    view = OperatorFilesView(
+        operator_files_db_path=str(tmp_path / "does_not_exist.db"),
+        knowledge_db_path=str(tmp_path / "knowledge_also_missing.db"),
+    )
+
+    result = view.get_for_kb_material(short_id="anything")
+
+    assert result is None

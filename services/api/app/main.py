@@ -153,6 +153,7 @@ from services.api.app.sales.followup_queue_repository import (
     FollowupQueueRepository,
     FollowupRow,
 )
+from services.api.app.sales.price_lookup import PriceLookup
 from services.api.app.sales.sales_persona_answerer import (
     RESPONSE_MODE_SALES_ESCALATION,
     SalesPersonaAnswerer,
@@ -496,6 +497,10 @@ async def _in_process_material_dispatcher(
     )
 
 
+sales_price_lookup = PriceLookup(
+    rag_retriever=rag_repository,
+    normalizer=get_russian_normalizer(),
+)
 sales_persona_answerer = SalesPersonaAnswerer(
     state_repo=sales_state_repository,
     services_repo=sales_services_repository,
@@ -503,7 +508,10 @@ sales_persona_answerer = SalesPersonaAnswerer(
     normalizer=get_russian_normalizer(),
     clock=lambda: datetime.now(UTC),
     bot_persona_getter=_effective_sales_persona_name,
+    rag_retriever=rag_repository,
+    grounding_threshold_getter=lambda: _effective_grounding_threshold(),
     followup_repo=sales_followup_repository,
+    price_lookup=sales_price_lookup,
     material_selector=client_materials_selector,
     material_dispatcher=_in_process_material_dispatcher,
 )

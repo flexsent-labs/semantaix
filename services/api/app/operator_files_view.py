@@ -187,8 +187,17 @@ class OperatorFilesView:
             WHERE op.short_id = ?
             LIMIT 1
         """
-        with _open(self.operator_files_db_path, self.knowledge_db_path) as conn:
-            row = conn.execute(sql, [short_id]).fetchone()
+        try:
+            with _open(
+                self.operator_files_db_path, self.knowledge_db_path
+            ) as conn:
+                row = conn.execute(sql, [short_id]).fetchone()
+        except FileNotFoundError:
+            # No operator has uploaded a file yet, so the operator_files DB
+            # hasn't been created. Treat this the same as "file unknown" so
+            # the KB-material analyzer records ``registered=False`` rather
+            # than crashing the request with a 500.
+            return None
         if row is None:
             return None
         candidate_text = row["candidate_text"]
