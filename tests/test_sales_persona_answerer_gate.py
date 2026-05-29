@@ -231,7 +231,7 @@ async def test_empty_catalog_is_a_valid_state_for_greeting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage_pitching_skips_with_not_implemented_reason() -> None:
+async def test_stage_pitching_completes_with_handoff() -> None:
     state_repo = _FakeStateRepo()
     state_repo.rows[7] = {
         "chat_id": 7,
@@ -250,9 +250,13 @@ async def test_stage_pitching_skips_with_not_implemented_reason() -> None:
     }
     answerer = _build_answerer(state_repo=state_repo)
 
+    # A pitching follow-up (no calendar wired) confirms + hands off to a human,
+    # rather than the old "stage_not_implemented_yet" dead-end skip.
     result = await answerer.try_answer(question="ну что там?", ctx=_ctx())
-    assert result.handled is False
-    assert result.metadata.get("skip_reason") == "stage_not_implemented_yet"
+    assert result.handled is True
+    assert result.response_mode == "sales_escalation"
+    assert result.metadata.get("hitl_reason") == "sales_scoping_complete"
+    assert result.metadata.get("sales_closure_detected") is False
 
 
 @pytest.mark.asyncio

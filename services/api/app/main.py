@@ -514,6 +514,12 @@ sales_persona_answerer = SalesPersonaAnswerer(
     price_lookup=sales_price_lookup,
     material_selector=client_materials_selector,
     material_dispatcher=_in_process_material_dispatcher,
+    # Epic-12.10 — calendar availability so scoping completion can check the
+    # customer's requested time and offer the nearest free slot when busy.
+    calendar_settings_repo=calendar_settings_repository,
+    calendar_token_provider=calendar_token_provider,
+    calendar_freebusy_client=calendar_freebusy_client,
+    operator_chat_resolver=_resolve_calendar_operator_chat_id,
 )
 client_materials_analyzer = ClientMaterialsAnalyzer(
     openrouter=openrouter_client,
@@ -2075,6 +2081,13 @@ async def _dispatch_sales_escalation(
     metadata = pipeline_result.metadata
     answer_text = pipeline_result.text or ""
     hitl_reason = str(metadata.get("hitl_reason") or "sales_escalation")
+    # When the answerer attaches an escalation context (e.g. the collected
+    # booking summary), prepend it to the operator DM so the human sees the
+    # gathered details rather than only the customer's last message.
+    escalation_context = metadata.get("escalation_context") or ""
+
+    def _operator_question(text: str) -> str:
+        return f"[{escalation_context}] {text}" if escalation_context else text
 
     delivered = True
     if request.chat_id is not None:
@@ -2093,7 +2106,7 @@ async def _dispatch_sales_escalation(
     if active_ticket is not None:
         await _notify_hitl_operator_with_question(
             ticket_id=active_ticket.id,
-            question=f"[follow-up] {request.text}",
+            question=_operator_question(f"[follow-up] {request.text}"),
             customer_username=request.customer_username,
         )
         logger.info(
@@ -2153,7 +2166,7 @@ async def _dispatch_sales_escalation(
     )
     await _notify_hitl_operator_with_question(
         ticket_id=ticket.id,
-        question=request.text,
+        question=_operator_question(request.text),
         customer_username=request.customer_username,
     )
     persisted_trace_id = _persist_answer_trace(
