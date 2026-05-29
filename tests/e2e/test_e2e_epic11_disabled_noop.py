@@ -87,7 +87,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     monkeypatch.setattr(
         api_main,
         "answer_pipeline",
-        AnswerPipeline([calendar, api_main.answer_pipeline.answerers[-1]]),
+        AnswerPipeline([
+            calendar,
+            next(a for a in api_main.answer_pipeline.answerers if a.name == "grounded_rag"),
+            next(a for a in api_main.answer_pipeline.answerers if a.name == "scope_guard"),
+        ]),
     )
     client = TestClient(api_app)
     yield {
@@ -139,19 +143,21 @@ def test_e2e_disabled_project_availability_question_grounds_via_rag(
     env["freebusy_client"].query_busy.assert_not_called()
 
 
-def test_e2e_disabled_project_availability_question_escalates_when_no_rag(env) -> None:
+def test_e2e_disabled_project_availability_question_declines_when_no_rag(env) -> None:
     client = env["client"]
     body = client.post(
         "/conversations/inbound",
         json={
             "text": "можно записаться на маникюр в субботу в 15:00?",
             "chat_id": _CHAT_ID,
-            "trace_id": "t-disabled-hitl",
+            "trace_id": "t-disabled-scope",
         },
     ).json()
 
-    # No corpus -> falls through to HITL exactly as before the calendar feature.
-    assert body["escalated"] is True
-    assert body["response_mode"] == "human_only"
+    # No corpus + calendar disabled -> scope guard polite decline (no HITL ticket).
+    from services.api.app.answerers.scope_guard import RESPONSE_MODE_SCOPE_DECLINE
+    assert body["delivered"] is True
+    assert body["escalated"] is False
+    assert body["response_mode"] == RESPONSE_MODE_SCOPE_DECLINE
     env["token_provider"].get_access_token.assert_not_called()
     env["freebusy_client"].query_busy.assert_not_called()

@@ -1,12 +1,16 @@
-"""Russian-first inbound pipeline e2e: deterministic -> grounded -> HITL."""
+"""Russian-first inbound pipeline e2e: deterministic -> grounded -> scope-guard -> HITL."""
 
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+import services.api.app.main as api_main
+from services.api.app.answerers import AnswerResult
+from services.api.app.answerers.scope_guard import RESPONSE_MODE_SCOPE_DECLINE
 from services.api.app.answerers.weather_client import WeatherSummary
 from services.api.app.main import (
+    answer_pipeline,
     answer_trace_repository,
     hitl_ticket_repository,
     incident_repository,
@@ -54,12 +58,13 @@ def _post_inbound(client, **kwargs):
     return client.post("/conversations/inbound", json=kwargs).json()
 
 
-def test_e2e_bare_factual_question_escalates(tmp_path, monkeypatch):
-    # Datetime/holiday/weather are no longer pipeline stages, so a bare factual
-    # question with no grounding falls through to HITL like any other.
+def test_e2e_bare_factual_question_declines(tmp_path, monkeypatch):
+    # Off-topic questions (no grounding, no sales intent) now get a polite
+    # scope-decline from the scope guard — no HITL ticket created.
     _wire(tmp_path, monkeypatch)
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
+    monkeypatch.setattr(api_main, "_should_send_interim", lambda text, chat_id: False)
     client = TestClient(api_app)
 
     body = _post_inbound(
@@ -69,13 +74,13 @@ def test_e2e_bare_factual_question_escalates(tmp_path, monkeypatch):
         customer_username="@customer",
         trace_id="t-det-date",
     )
-    assert body["escalated"] is True
-    assert body["response_mode"] == "human_only"
+    assert body["delivered"] is True
+    assert body["escalated"] is False
+    assert body["response_mode"] == RESPONSE_MODE_SCOPE_DECLINE
 
     tickets = client.get("/hitl/tickets").json()["items"]
-    assert len(tickets) == 1
-    assert tickets[0]["target_chat_id"] == 9001
-    send_mock.assert_awaited()
+    assert tickets == []
+    send_mock.assert_awaited_once()
 
 
 def test_e2e_scheduling_question_enriches_grounded_answer(tmp_path, monkeypatch):
@@ -161,7 +166,14 @@ def test_e2e_grounded_rag_russian_answer(tmp_path, monkeypatch):
 
 def test_e2e_full_hitl_journey_via_bot_gateway(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
-    # Force escalation: no RAG corpus, no deterministic match
+    # Force HITL escalation by stubbing the pipeline to return handled=False.
+    # This test exercises the ticket-creation and operator-reply mechanism,
+    # not the pipeline answerer logic (scope guard would otherwise fire).
+    monkeypatch.setattr(
+        answer_pipeline,
+        "run",
+        AsyncMock(return_value=AnswerResult(handled=False)),
+    )
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
 
     api_client = TestClient(api_app)
@@ -291,9 +303,12 @@ def test_e2e_slang_rag_via_lemma_overlap(tmp_path, monkeypatch):
     assert body["response_mode"] == "grounded_rag"
 
 
-def test_e2e_profanity_in_llm_output_escalates(tmp_path, monkeypatch):
+def test_e2e_profanity_in_llm_output_declines(tmp_path, monkeypatch):
+    # When guardrails block profane LLM output, GroundedRagAnswerer returns
+    # handled=False and the scope guard picks it up with a polite decline.
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    monkeypatch.setattr(api_main, "_should_send_interim", lambda text, chat_id: False)
     hitl_ticket_repository.set_runtime_config(
         key="rag_grounding_score_threshold", value="0.2", updated_by="@admin"
     )
@@ -315,15 +330,18 @@ def test_e2e_profanity_in_llm_output_escalates(tmp_path, monkeypatch):
     body = _post_inbound(
         client, text="когда придёт возврат?", chat_id=9001, trace_id="t-profane"
     )
-    assert body["escalated"] is True
-    assert body["response_mode"] == "human_only"
+    assert body["delivered"] is True
+    assert body["escalated"] is False
+    assert body["response_mode"] == RESPONSE_MODE_SCOPE_DECLINE
 
 
-def test_e2e_english_factual_question_escalates(tmp_path, monkeypatch):
-    # English factual question with no grounding now escalates to HITL.
+def test_e2e_english_factual_question_declines(tmp_path, monkeypatch):
+    # English off-topic question with no grounding → scope guard polite decline.
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    monkeypatch.setattr(api_main, "_should_send_interim", lambda text, chat_id: False)
     client = TestClient(api_app)
     body = _post_inbound(client, text="what is the date?", chat_id=9001)
-    assert body["escalated"] is True
-    assert body["response_mode"] == "human_only"
+    assert body["delivered"] is True
+    assert body["escalated"] is False
+    assert body["response_mode"] == RESPONSE_MODE_SCOPE_DECLINE
