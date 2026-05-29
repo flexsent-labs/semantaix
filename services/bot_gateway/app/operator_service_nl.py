@@ -32,6 +32,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import time as dtime
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -58,6 +59,24 @@ _EMPTY_LIST_HINT = (
 _API_UNAVAILABLE = "Сервис временно недоступен, попробуйте позже."
 _DESCRIBE_USAGE = "Использование: опиши <услугу> как <описание>"
 
+# Story 13.04 — set a service's bookable schedule (working hours/days/slot
+# length) from NL, routed through the SAME canonical project-services upsert the
+# ``/service edit`` command uses (so the availability engine reads the result).
+_SCHEDULE_MISSING_HOURS = (
+    "Укажите часы работы, например: «работаем с 8:00 до 21:00»."
+)
+_SCHEDULE_PARSE_ERROR = (
+    "Не понял часы или дни. Пример: «с 08:00 до 21:00, mon-sun»."
+)
+_SCHEDULE_UPDATED = "Расписание обновлено: {name} — {start}–{end}, дни: {days}."
+_SCHEDULE_CREATED = (
+    "Услуга создана и сделана бронируемой: {name} — {start}–{end}, дни: {days}."
+)
+# Minimum/default bookable slot length (operator answered "minimal 1 hour").
+_DEFAULT_SLOT_MINUTES = 60
+_SCHEDULE_DAY_TOKENS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_SCHEDULE_HOURS_RE = re.compile(r"^\s*(\d{1,2}:\d{2})-(\d{1,2}:\d{2})\s*$")
+
 # Cost cap: a long pasted message would otherwise be sent verbatim to
 # OpenRouter and bill the project for an open-ended number of tokens. 500
 # chars covers every reasonable NL phrasing of the four supported intents.
@@ -67,9 +86,14 @@ ACTION_ADD: Literal["add"] = "add"
 ACTION_REMOVE: Literal["remove"] = "remove"
 ACTION_LIST: Literal["list"] = "list"
 ACTION_DESCRIBE: Literal["describe"] = "describe"
+ACTION_SCHEDULE: Literal["schedule"] = "schedule"
 
-_VALID_ACTIONS = (ACTION_ADD, ACTION_REMOVE, ACTION_LIST, ACTION_DESCRIBE)
-_ACTIONS_REQUIRING_NAME = (ACTION_ADD, ACTION_REMOVE, ACTION_DESCRIBE)
+_VALID_ACTIONS = (
+    ACTION_ADD, ACTION_REMOVE, ACTION_LIST, ACTION_DESCRIBE, ACTION_SCHEDULE
+)
+_ACTIONS_REQUIRING_NAME = (
+    ACTION_ADD, ACTION_REMOVE, ACTION_DESCRIBE, ACTION_SCHEDULE
+)
 
 
 # System prompt — Russian-first, utilitarian, NO persona voice. The prompt
@@ -87,6 +111,14 @@ description: null.
 - "list"     — показать список услуг. Поля: name: null, description: null.
 - "describe" — переописать существующую услугу (sugar над удалить+добавить). \
 Поля: name (название), description (новое описание, строка).
+- "schedule" — задать часы работы / расписание услуги (когда её можно \
+бронировать). Поля: name (название услуги, строка); hours (часы в формате \
+"ЧЧ:ММ-ЧЧ:ММ", например "08:00-21:00", или null); days (дни английскими \
+сокращениями mon,tue,wed,thu,fri,sat,sun — диапазон "mon-fri" или список \
+"sat,sun"; если все дни — "mon-sun"; null если не указано); duration_minutes \
+(длительность одного слота в минутах, целое число, или null).
+
+Для действий add/remove/list/describe поля hours, days, duration_minutes = null.
 
 Если сообщение НЕ относится к управлению каталогом услуг (например, "привет", \
 "послушай", обычный чат), верни {"action": null}. Лучше вернуть null, чем \
@@ -113,6 +145,14 @@ description: null.
 Вход: "опиши каньонинг как спуск по верёвке"
 Выход: {"action": "describe", "name": "каньонинг", "description": "спуск по верёвке"}
 
+Вход: "работаем с 8 до 21 каждый день, услуга аренда багги"
+Выход: {"action": "schedule", "name": "аренда багги", "hours": "08:00-21:00", \
+"days": "mon-sun", "duration_minutes": null}
+
+Вход: "сделай йогу бронируемой по будням с 9 до 18, занятие час"
+Выход: {"action": "schedule", "name": "йога", "hours": "09:00-18:00", \
+"days": "mon-fri", "duration_minutes": 60}
+
 Вход: "послушай"
 Выход: {"action": null}
 
@@ -128,9 +168,13 @@ class _OpenRouterClient(Protocol):
 
 @dataclass(frozen=True)
 class ServiceIntent:
-    action: Literal["add", "remove", "list", "describe"]
+    action: Literal["add", "remove", "list", "describe", "schedule"]
     name: str | None = None
     description: str | None = None
+    # Schedule-only fields (Story 13.04); ``None`` for the other actions.
+    hours: str | None = None
+    days: str | None = None
+    duration_minutes: int | None = None
 
 
 def _log_schema_violation(*, reason: str, **extra: Any) -> None:
@@ -193,7 +237,105 @@ async def classify_service_intent(
     if action in _ACTIONS_REQUIRING_NAME and not name:
         _log_schema_violation(reason="missing_name", action=action)
         return None
-    return ServiceIntent(action=action, name=name, description=description)
+    hours = result.get("hours")
+    days = result.get("days")
+    duration_minutes = result.get("duration_minutes")
+    if hours is not None and not isinstance(hours, str):
+        _log_schema_violation(reason="bad_hours_type", action=action)
+        return None
+    if days is not None and not isinstance(days, str):
+        _log_schema_violation(reason="bad_days_type", action=action)
+        return None
+    if duration_minutes is not None and (
+        isinstance(duration_minutes, bool)
+        or not isinstance(duration_minutes, int)
+        or duration_minutes <= 0
+    ):
+        _log_schema_violation(reason="bad_duration_type", action=action)
+        return None
+    return ServiceIntent(
+        action=action,
+        name=name,
+        description=description,
+        hours=hours,
+        days=days,
+        duration_minutes=duration_minutes,
+    )
+
+
+def _expand_days(token: str) -> list[str] | None:
+    """Expand one day token/range (``mon`` / ``mon-fri``) into ordered tokens.
+
+    Returns ``None`` for an unknown token or an inverted range so the caller
+    can surface ``invalid_days`` to the operator.
+    """
+    token = token.strip().lower()
+    if "-" in token:
+        start, _, end = token.partition("-")
+        if start not in _SCHEDULE_DAY_TOKENS or end not in _SCHEDULE_DAY_TOKENS:
+            return None
+        i, j = _SCHEDULE_DAY_TOKENS.index(start), _SCHEDULE_DAY_TOKENS.index(end)
+        if i > j:
+            return None
+        return list(_SCHEDULE_DAY_TOKENS[i : j + 1])
+    if token not in _SCHEDULE_DAY_TOKENS:
+        return None
+    return [token]
+
+
+def _parse_clock(value: str) -> dtime | None:
+    """Parse an ``HH:MM`` clock string (already shape-validated by the caller's
+    regex) into a ``time``; returns ``None`` for an out-of-range value."""
+    try:
+        hour_str, minute_str = value.split(":")
+        return dtime(hour=int(hour_str), minute=int(minute_str))
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_schedule(
+    *, hours: str | None, days: str | None
+) -> tuple[dict[str, list[str]] | None, list[str] | None, str | None]:
+    """Parse the LLM-extracted ``hours``/``days`` into upsert-ready fields.
+
+    Returns ``(working_hours, service_days, error)``:
+
+    - ``working_hours`` maps each bookable weekday to a ``[start, end]`` window
+      (canonical ``HH:MM``); ``None`` when no ``hours`` were given.
+    - ``service_days`` are the weekday tokens the hours apply to (defaults to
+      the whole week when ``days`` is omitted but ``hours`` is present).
+    - ``error`` is ``"invalid_days"`` / ``"invalid_hours"`` on a parse failure
+      (then both other fields are ``None``), else ``None``.
+    """
+    service_days: list[str] | None = None
+    if days:
+        collected: list[str] = []
+        for token in str(days).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            expanded = _expand_days(token)
+            if expanded is None:
+                return None, None, "invalid_days"
+            for day in expanded:
+                if day not in collected:
+                    collected.append(day)
+        service_days = collected or None
+
+    working_hours: dict[str, list[str]] | None = None
+    if hours:
+        match = _SCHEDULE_HOURS_RE.match(str(hours))
+        if match is None:
+            return None, None, "invalid_hours"
+        start_t = _parse_clock(match.group(1))
+        end_t = _parse_clock(match.group(2))
+        if start_t is None or end_t is None or start_t >= end_t:
+            return None, None, "invalid_hours"
+        start_c, end_c = start_t.strftime("%H:%M"), end_t.strftime("%H:%M")
+        day_keys = service_days or list(_SCHEDULE_DAY_TOKENS)
+        working_hours = {day: [start_c, end_c] for day in day_keys}
+        service_days = day_keys
+    return working_hours, service_days, None
 
 
 def _is_slash_prefixed(text: str) -> bool:
@@ -210,7 +352,7 @@ def _is_slash_prefixed(text: str) -> bool:
 # with FastAPI's TestClient where the otherwise-unconditional auth roundtrip
 # de-syncs pytest-cov's tracer for the rest of the webhook function.
 _SERVICE_HINT_RE = re.compile(
-    r"услуг|опиши(те)?\b",
+    r"услуг|опиши(те)?\b|\bчас|расписан|график|\bработ|\bрабоч|\bброн",
     re.IGNORECASE,
 )
 
@@ -639,6 +781,127 @@ async def _handle_describe(
     }
 
 
+async def _handle_schedule(
+    *,
+    normalized: NormalizedTelegramMessage,
+    resolved: ResolvedOperator,
+    intent: ServiceIntent,
+    api_client: ApiClient,
+    send_dm: SendDmFn,
+    internal_token: str,
+    trace_id: str,
+) -> dict[str, str]:
+    """Set a service's bookable schedule (hours/days/slot length).
+
+    In-place edit: reads the existing project service (preserving its
+    description/price/tags) and upserts the new ``working_hours`` /
+    ``service_days`` / ``duration_minutes`` through the canonical Epic-13
+    surface the availability engine reads. Creates the service when it does not
+    exist yet so a single NL turn can make an offering bookable.
+    """
+    working_hours, service_days, error = parse_schedule(
+        hours=intent.hours, days=intent.days
+    )
+    if error is not None:
+        await send_dm(normalized.chat_id, _SCHEDULE_PARSE_ERROR)
+        return {"status": "error", "route": "service_schedule", "decision": error}
+    if working_hours is None or service_days is None:
+        await send_dm(normalized.chat_id, _SCHEDULE_MISSING_HOURS)
+        return {
+            "status": "error",
+            "route": "service_schedule",
+            "decision": "missing_hours",
+        }
+
+    name = intent.name or ""
+    try:
+        body = await api_client.list_project_services(
+            project_id=int(resolved.project_id or 0),
+            internal_token=internal_token,
+        )
+    except (ApiError, httpx.HTTPStatusError, httpx.RequestError, OSError) as exc:
+        await _log_api_error_and_dm(
+            send_dm=send_dm,
+            normalized=normalized,
+            trace_id=trace_id,
+            route="service_schedule",
+            exc=exc,
+        )
+        return {"status": "error", "route": "service_schedule"}
+    match = _find_service_by_name(list(body.get("services") or []), name)
+
+    if match is not None:
+        duration = (
+            intent.duration_minutes
+            or match.get("duration_minutes")
+            or _DEFAULT_SLOT_MINUTES
+        )
+        payload: dict[str, object] = {
+            "name": match.get("name") or name,
+            "description": match.get("description"),
+            "price_text": match.get("price_text"),
+            "tags": match.get("tags"),
+            "duration_minutes": duration,
+            "working_hours": working_hours,
+            "service_days": service_days,
+            "date_exceptions": match.get("date_exceptions"),
+        }
+        confirm_template = _SCHEDULE_UPDATED
+    else:
+        payload = {
+            "name": name,
+            "description": None,
+            "price_text": None,
+            "tags": None,
+            "duration_minutes": intent.duration_minutes or _DEFAULT_SLOT_MINUTES,
+            "working_hours": working_hours,
+            "service_days": service_days,
+            "date_exceptions": None,
+        }
+        confirm_template = _SCHEDULE_CREATED
+
+    try:
+        result = await api_client.upsert_project_service(
+            project_id=int(resolved.project_id or 0),
+            actor=resolved.username,
+            actor_role="operator",
+            internal_token=internal_token,
+            payload=payload,
+        )
+    except (ApiError, httpx.HTTPStatusError, httpx.RequestError, OSError) as exc:
+        await _log_api_error_and_dm(
+            send_dm=send_dm,
+            normalized=normalized,
+            trace_id=trace_id,
+            route="service_schedule",
+            exc=exc,
+        )
+        return {"status": "error", "route": "service_schedule"}
+
+    start, end = working_hours[service_days[0]]
+    await send_dm(
+        normalized.chat_id,
+        confirm_template.format(
+            name=payload["name"],
+            start=start,
+            end=end,
+            days=",".join(service_days),
+        ),
+    )
+    service_id = int(result.get("id", 0))
+    _log_action_taken(
+        trace_id=trace_id,
+        action=ACTION_SCHEDULE,
+        service_id=service_id or None,
+        from_username=normalized.username,
+    )
+    return {
+        "status": "ok",
+        "route": "service_schedule",
+        "service_id": str(service_id),
+    }
+
+
 # --- Top-level dispatch ----------------------------------------------------
 
 
@@ -712,6 +975,16 @@ async def handle_operator_service_nl_message(
         )
     if intent.action == ACTION_REMOVE:
         return await _handle_remove(
+            normalized=normalized,
+            resolved=resolved,
+            intent=intent,
+            api_client=api_client,
+            send_dm=send_dm,
+            internal_token=internal_token,
+            trace_id=trace_id,
+        )
+    if intent.action == ACTION_SCHEDULE:
+        return await _handle_schedule(
             normalized=normalized,
             resolved=resolved,
             intent=intent,
