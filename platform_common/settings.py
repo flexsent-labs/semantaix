@@ -83,6 +83,17 @@ class AppSettings(BaseSettings):
     operator_media_group_debounce_seconds: float = 3.0
     operator_media_group_settling_cap_seconds: float = 30.0
     operator_media_group_poll_interval_seconds: float = 0.5
+    # Offline message backlog recovery: a customer message whose Telegram send
+    # time is older than `stale_seconds` is treated as redelivered backlog and
+    # buffered per chat; the debounced flush answers only the latest message,
+    # pulling up to `max_context_messages` preceding ones in as context when the
+    # latest is shorter than `min_context_chars` (or a known context cue).
+    offline_backlog_stale_seconds: float = 30.0
+    offline_backlog_debounce_seconds: float = 5.0
+    offline_backlog_settling_cap_seconds: float = 30.0
+    offline_backlog_poll_interval_seconds: float = 0.5
+    offline_backlog_min_context_chars: int = 12
+    offline_backlog_max_context_messages: int = 3
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50

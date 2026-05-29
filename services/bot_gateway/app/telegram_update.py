@@ -27,6 +27,10 @@ class NormalizedTelegramMessage:
     user_id: int
     username: str | None
     text: str
+    # Telegram message send time (Unix epoch seconds). Used to detect
+    # redelivered backlog after the bot was offline. ``None`` when the payload
+    # omits/garbles it — treated as a live message (never as stale backlog).
+    date: int | None = None
     reply_to_text: str | None = None
     caption: str | None = None
     media_group_id: str | None = None
@@ -168,6 +172,9 @@ def normalize_update(payload: dict[str, Any]) -> NormalizedTelegramMessage | Non
     username = from_user.get("username")
     normalized_username = f"@{username}" if isinstance(username, str) and username else None
 
+    date_field = message.get("date")
+    date_value: int | None = date_field if isinstance(date_field, int) else None
+
     text_field = message.get("text")
     text_value: str = ""
     if isinstance(text_field, str):
@@ -210,6 +217,7 @@ def normalize_update(payload: dict[str, Any]) -> NormalizedTelegramMessage | Non
         user_id=user_id,
         username=normalized_username,
         text=text_value,
+        date=date_value,
         reply_to_text=reply_to_text,
         caption=caption_value,
         media_group_id=media_group_id,

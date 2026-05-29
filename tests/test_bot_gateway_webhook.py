@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,14 @@ from platform_common.settings import get_settings
 from services.bot_gateway.app.main import app as bot_app
 from services.bot_gateway.app.main import hitl_ticket_repository
 from tests.e2e.db_seed import load_telegram_fixture as load_fixture
+
+
+def _fresh(payload: dict) -> dict:
+    """Stamp a customer fixture with a current send time so it is treated as a
+    live message, not redelivered offline backlog (the fixtures ship a fixed
+    2024 ``date``)."""
+    payload["message"]["date"] = int(datetime.now(UTC).timestamp())
+    return payload
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +41,7 @@ def test_webhook_accepts_text_message_and_returns_trace():
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=load_fixture("update_message_text_basic.json"),
+        json=_fresh(load_fixture("update_message_text_basic.json")),
     )
     assert response.status_code == 200
     data = response.json()
@@ -101,7 +110,7 @@ def test_duplicate_update_fixture_is_idempotent_at_gateway_level():
     constraint: first call is accepted, subsequent calls return ignored
     with reason=duplicate_source_message and never reach the api."""
     client = TestClient(bot_app)
-    payload = load_fixture("update_duplicate_update_id.json")
+    payload = _fresh(load_fixture("update_duplicate_update_id.json"))
     first = client.post("/telegram/webhook", json=payload)
     second = client.post("/telegram/webhook", json=payload)
     assert first.status_code == 200 and first.json()["status"] == "accepted"
