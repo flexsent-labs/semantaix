@@ -1,0 +1,45 @@
+name: Update LOC counter
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "platform_common/**"
+      - "scripts/count_loc.py"
+      - ".github/workflows/loc.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: loc-counter
+  cancel-in-progress: true
+
+jobs:
+  loc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Recompute LOC and update README
+        run: python scripts/count_loc.py --update-readme README.md
+
+      - name: Commit refreshed badge if changed
+        run: |
+          if ! git diff --quiet README.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "chore: update LOC counter [skip ci]"
+            git push
+          else
+            echo "LOC unchanged; nothing to commit."
+          fi

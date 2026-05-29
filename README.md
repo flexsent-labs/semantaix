@@ -1,5 +1,7 @@
 # Semantaix Bootstrap
 
+<!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-30877%20lines-blue)<!-- LOC:END -->
+
 Initial Docker-first skeleton for the Semantaix Option B architecture.
 
 ## Services
