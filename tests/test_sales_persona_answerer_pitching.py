@@ -20,10 +20,12 @@ from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
+    ASK_FOR_TIME_LINE,
     MATERIAL_DISPATCH_FALLBACK_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
     SLOT_FREE_HANDOFF_LINE,
+    STAGE_AWAITING_TIME,
     SalesPersonaAnswerer,
 )
 
@@ -248,22 +250,28 @@ async def test_settings_missing_plain_handoff() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_dates_plain_handoff() -> None:
-    answerer, _ = _build(
+async def test_no_time_asks_for_date_and_time() -> None:
+    # Story 12.10 — calendar-actionable booking with no date/time at all:
+    # ask for it (→ awaiting_time) instead of a blind hand off.
+    answerer, state_repo = _build(
         state=_state(dates=None), cal_settings=_FakeCalSettings()
     )
     result = await answerer.try_answer(question="ну что?", ctx=_ctx())
-    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+    assert result.text == ASK_FOR_TIME_LINE
+    assert result.metadata["sales_turn_kind"] == "awaiting_time_prompt"
+    assert result.metadata.get("escalate") is not True
+    assert state_repo.upserts[-1]["current_stage"] == STAGE_AWAITING_TIME
 
 
 @pytest.mark.asyncio
-async def test_dates_without_time_plain_handoff() -> None:
-    # "1 мая" has a day but no clock time → not a concrete requested start.
-    answerer, _ = _build(
+async def test_dates_without_concrete_time_asks_for_date_and_time() -> None:
+    # "скоро" has no clock time → not a concrete requested start → ask.
+    answerer, state_repo = _build(
         state=_state(dates="скоро"), cal_settings=_FakeCalSettings()
     )
     result = await answerer.try_answer(question="ну что?", ctx=_ctx())
-    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+    assert result.text == ASK_FOR_TIME_LINE
+    assert state_repo.upserts[-1]["current_stage"] == STAGE_AWAITING_TIME
 
 
 @pytest.mark.asyncio
