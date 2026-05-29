@@ -40,6 +40,7 @@ from services.bot_gateway.app.operator_files import (
 from services.bot_gateway.app.operator_service_nl import (
     handle_operator_service_nl_message,
 )
+from services.bot_gateway.app.pending_forward_outbox import PendingForwardOutbox
 from services.bot_gateway.app.persistence import persist_normalized_message
 from services.bot_gateway.app.prompt_commands import (
     dispatch_pending_prompt_edit,
@@ -70,6 +71,7 @@ kb_session_repository = OperatorKbSessionRepository(settings.hitl_ticket_db_path
 operator_file_repository = OperatorFileRepository(settings.operator_files_db_path)
 media_group_buffer = MediaGroupBuffer(settings.hitl_ticket_db_path)
 offline_backlog_buffer = OfflineBacklogBuffer(settings.persistence_db_path)
+pending_forward_outbox = PendingForwardOutbox(settings.persistence_db_path)
 offline_context_cues = load_context_cues()
 api_client = ApiClient(
     base_url=settings.api_internal_base_url,
@@ -1950,13 +1952,17 @@ async def _forward_inbound_safe(
     chat_id: int,
     customer_username: str | None,
     trace_id: str,
-) -> None:
+) -> bool:
     """Forward a customer message to the api, swallowing+logging failures.
 
     Runs as a FastAPI BackgroundTask after the webhook has already returned
     200 OK to Telegram. The api side emits its own incidents on failure;
     this wrapper exists so an exception in the background task does not
     propagate uncaught.
+
+    Returns True iff the forward was confirmed (api accepted it). Callers use
+    that to clear the pending-forward outbox only on success, so a failed
+    forward leaves the message buffered for the startup recovery sweep.
     """
     try:
         await api_client.forward_inbound(
@@ -1965,11 +1971,37 @@ async def _forward_inbound_safe(
             customer_username=customer_username,
             trace_id=trace_id,
         )
+        return True
     except Exception as exc:  # broad: best-effort; api emits incidents on its side
         logger.warning(
             "inbound_forward_failed",
             extra={"trace_id": trace_id, "error": str(exc)},
         )
+        return False
+
+
+async def _forward_live_and_clear_pending(
+    *,
+    text: str,
+    chat_id: int,
+    update_id: int,
+    customer_username: str | None,
+    trace_id: str,
+) -> None:
+    """Live-path forward that clears its pending-outbox row only on success.
+
+    The message was marked pending synchronously in the webhook handler (before
+    the 200 OK), so a crash mid-forward leaves the row for startup recovery.
+    On a confirmed forward we drop the row; on failure we leave it.
+    """
+    forwarded = await _forward_inbound_safe(
+        text=text,
+        chat_id=chat_id,
+        customer_username=customer_username,
+        trace_id=trace_id,
+    )
+    if forwarded:
+        pending_forward_outbox.clear(chat_id=chat_id, update_id=update_id)
 
 
 async def _flush_offline_backlog_after_debounce(*, chat_id: int) -> None:
@@ -2074,6 +2106,80 @@ async def _recover_offline_backlog_on_startup() -> None:
         task.add_done_callback(_offline_recovery_tasks.discard)
         logger.info(
             "offline_backlog_recovery_scheduled",
+            extra={"chat_id": chat_id},
+        )
+
+
+async def _replay_pending_forward(*, chat_id: int) -> None:
+    """Re-forward a chat's unconfirmed customer messages, collapsed to latest.
+
+    A live message returns 200 to Telegram before the forward runs, so a
+    restart (or a silent forward failure) leaves it in the outbox with no
+    Telegram redelivery to fall back on. We answer only the latest pending
+    message per chat — pulling preceding ones in as inline context when the
+    latest is too thin to stand alone, mirroring the backlog flush — and clear
+    the chat only on a confirmed forward, so a still-failing api keeps the rows
+    for the next restart instead of dropping the customer's message.
+    """
+    try:
+        items = pending_forward_outbox.peek_chat(chat_id=chat_id)
+        if not items:
+            return
+        latest = items[-1]
+        if is_thin(
+            latest.text,
+            min_context_chars=settings.offline_backlog_min_context_chars,
+            cues=offline_context_cues,
+        ):
+            max_context = settings.offline_backlog_max_context_messages
+            preceding = [item.text for item in items[:-1]]
+            preceding = preceding[-max_context:] if max_context > 0 else []
+        else:
+            preceding = []
+        text = build_inbound_text(latest=latest.text, preceding=preceding)
+        logger.info(
+            "pending_forward_replay_forwarding",
+            extra={
+                "trace_id": latest.trace_id,
+                "chat_id": chat_id,
+                "pending_count": len(items),
+                "context_count": len(preceding),
+            },
+        )
+        forwarded = await _forward_inbound_safe(
+            text=text,
+            chat_id=chat_id,
+            customer_username=latest.customer_username,
+            trace_id=latest.trace_id,
+        )
+        if forwarded:
+            pending_forward_outbox.clear_chat(chat_id=chat_id)
+    except Exception as exc:  # broad: a replay failure must never crash startup
+        logger.exception(
+            "pending_forward_replay_failed",
+            extra={"chat_id": chat_id, "error": _redact_token(str(exc))},
+        )
+
+
+_pending_forward_recovery_tasks: set[asyncio.Task] = set()
+
+
+@app.on_event("startup")
+async def _recover_pending_forwards_on_startup() -> None:
+    """Replay every customer message received but not confirmed-forwarded.
+
+    This is the "check the dialogs for unreceived messages" recovery: the
+    outbox holds live messages that were 200-acked to Telegram but whose
+    forward never completed (restart or api failure), which the
+    redelivery-based ``offline_backlog_buffer`` sweep cannot see. Strong refs
+    are held until each task completes so they are not garbage-collected.
+    """
+    for chat_id in pending_forward_outbox.pending_chat_ids():
+        task = asyncio.create_task(_replay_pending_forward(chat_id=chat_id))
+        _pending_forward_recovery_tasks.add(task)
+        task.add_done_callback(_pending_forward_recovery_tasks.discard)
+        logger.info(
+            "pending_forward_recovery_scheduled",
             extra={"chat_id": chat_id},
         )
 
@@ -2489,10 +2595,25 @@ async def _process_telegram_update(
     # OK within a few milliseconds. The AnswerPipeline (LLM + RAG + verifier
     # + guardrails) frequently exceeds Telegram's ~5s webhook deadline; when
     # that happened in production Telegram retried and produced 3x acks.
+    #
+    # Returning 200 before the forward completes means Telegram will never
+    # redeliver this update, so a restart (or a silent forward failure) in the
+    # gap would strand the message. We record it in the pending-forward outbox
+    # first and clear it only once the forward is confirmed; the startup sweep
+    # replays anything still pending.
+    pending_forward_outbox.mark_pending(
+        chat_id=normalized.chat_id,
+        update_id=normalized.update_id,
+        source_message_id=normalized.source_message_id,
+        customer_username=normalized.username,
+        text=normalized.text,
+        trace_id=trace_id,
+    )
     background_tasks.add_task(
-        _forward_inbound_safe,
+        _forward_live_and_clear_pending,
         text=normalized.text,
         chat_id=normalized.chat_id,
+        update_id=normalized.update_id,
         customer_username=normalized.username,
         trace_id=trace_id,
     )
