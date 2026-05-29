@@ -1,6 +1,7 @@
 """Epic 01: Telegram webhook -> persistence -> /conversations/inbound pipeline."""
 
 import sqlite3
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -62,10 +63,11 @@ def test_epic01_e2e_webhook_persist_then_inbound_grounded_rag(monkeypatch, tmp_p
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
 
     bot_client = TestClient(bot_app)
-    webhook = bot_client.post(
-        "/telegram/webhook",
-        json=load_telegram_fixture("update_message_text_basic.json"),
-    )
+    fixture = load_telegram_fixture("update_message_text_basic.json")
+    # Stamp a current send time so the message is treated as live, not as
+    # redelivered offline backlog (the fixture ships a fixed 2024 ``date``).
+    fixture["message"]["date"] = int(datetime.now(UTC).timestamp())
+    webhook = bot_client.post("/telegram/webhook", json=fixture)
     assert webhook.status_code == 200
     assert webhook.json()["status"] == "accepted"
 

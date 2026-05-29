@@ -26,6 +26,13 @@ from services.bot_gateway.app.material_command_dispatch import (
 from services.bot_gateway.app.media_group_buffer import (
     MediaGroupBuffer,
 )
+from services.bot_gateway.app.offline_backlog_buffer import OfflineBacklogBuffer
+from services.bot_gateway.app.offline_context import (
+    build_inbound_text,
+    is_stale,
+    is_thin,
+    load_context_cues,
+)
 from services.bot_gateway.app.operator_files import (
     OperatorFileRecord,
     OperatorFileRepository,
@@ -62,6 +69,8 @@ hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
 kb_session_repository = OperatorKbSessionRepository(settings.hitl_ticket_db_path)
 operator_file_repository = OperatorFileRepository(settings.operator_files_db_path)
 media_group_buffer = MediaGroupBuffer(settings.hitl_ticket_db_path)
+offline_backlog_buffer = OfflineBacklogBuffer(settings.persistence_db_path)
+offline_context_cues = load_context_cues()
 api_client = ApiClient(
     base_url=settings.api_internal_base_url,
     internal_token=settings.admin_internal_token,
@@ -1963,6 +1972,112 @@ async def _forward_inbound_safe(
         )
 
 
+async def _flush_offline_backlog_after_debounce(*, chat_id: int) -> None:
+    """Wait until a chat's redelivered backlog has settled, then answer once.
+
+    Mirrors `_flush_media_group_after_debounce`: poll `latest_received_at`
+    until the chat has been quiet for `offline_backlog_debounce_seconds` (or
+    a hard settling cap is hit), then drain. The latest buffered message is
+    answered via the existing `_forward_inbound_safe`; preceding messages are
+    pulled in as context only when the latest is too thin to stand alone.
+    Multiple flushers may run for one chat; only the one that drains a
+    non-empty buffer forwards.
+    """
+    debounce = settings.offline_backlog_debounce_seconds
+    cap = settings.offline_backlog_settling_cap_seconds
+    poll = max(settings.offline_backlog_poll_interval_seconds, 0.05)
+    started = asyncio.get_event_loop().time()
+
+    try:
+        while True:
+            latest = offline_backlog_buffer.latest_received_at(chat_id=chat_id)
+            if latest is None:
+                return
+            quiet_for = (datetime.now(UTC) - latest).total_seconds()
+            elapsed = asyncio.get_event_loop().time() - started
+            if quiet_for >= debounce or elapsed >= cap:
+                if elapsed >= cap and quiet_for < debounce:
+                    logger.warning(
+                        "offline_backlog_settling_cap_hit",
+                        extra={
+                            "chat_id": chat_id,
+                            "quiet_for_seconds": quiet_for,
+                            "elapsed_seconds": elapsed,
+                            "cap_seconds": cap,
+                        },
+                    )
+                break
+            await asyncio.sleep(poll)
+
+        items = offline_backlog_buffer.drain(chat_id=chat_id)
+        if not items:
+            return
+        latest_message = items[-1]
+        if is_thin(
+            latest_message.text,
+            min_context_chars=settings.offline_backlog_min_context_chars,
+            cues=offline_context_cues,
+        ):
+            max_context = settings.offline_backlog_max_context_messages
+            preceding = [item.text for item in items[:-1]]
+            if max_context > 0:
+                preceding = preceding[-max_context:]
+            else:
+                preceding = []
+        else:
+            preceding = []
+        text = build_inbound_text(latest=latest_message.text, preceding=preceding)
+        trace_id = _derive_trace_id(
+            header_trace=None,
+            update_id=latest_message.update_id,
+        )
+        logger.info(
+            "offline_backlog_flush_forwarding",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": chat_id,
+                "buffered_count": len(items),
+                "context_count": len(preceding),
+            },
+        )
+        await _forward_inbound_safe(
+            text=text,
+            chat_id=latest_message.chat_id,
+            customer_username=latest_message.customer_username,
+            trace_id=trace_id,
+        )
+    except Exception as exc:  # broad: a flush failure must never crash the loop
+        logger.exception(
+            "offline_backlog_flush_failed",
+            extra={"chat_id": chat_id, "error": _redact_token(str(exc))},
+        )
+
+
+_offline_recovery_tasks: set[asyncio.Task] = set()
+
+
+@app.on_event("startup")
+async def _recover_offline_backlog_on_startup() -> None:
+    """Reschedule a flush for any chat still holding buffered backlog.
+
+    The buffer is SQLite-backed and survives a restart, but the in-memory
+    BackgroundTask that would flush it does not. Without this sweep a chat
+    buffered just before a restart would be stranded (a later message sees a
+    non-empty buffer and so never reschedules the flush). Strong refs are
+    held until each task completes so they are not garbage-collected.
+    """
+    for chat_id in offline_backlog_buffer.pending_chat_ids():
+        task = asyncio.create_task(
+            _flush_offline_backlog_after_debounce(chat_id=chat_id)
+        )
+        _offline_recovery_tasks.add(task)
+        task.add_done_callback(_offline_recovery_tasks.discard)
+        logger.info(
+            "offline_backlog_recovery_scheduled",
+            extra={"chat_id": chat_id},
+        )
+
+
 def _log_routed(*, trace_id: str, result: dict, fallback: str) -> None:
     route = result.get("route") or fallback
     logger.info(
@@ -2336,6 +2451,39 @@ async def _process_telegram_update(
         response = {"trace_id": trace_id}
         response.update(operator_result)
         return response
+
+    if is_stale(
+        message_date=normalized.date,
+        now=datetime.now(UTC),
+        stale_seconds=settings.offline_backlog_stale_seconds,
+    ):
+        # Redelivered backlog after the bot was offline: buffer per chat and
+        # collapse the burst to a single answer for the latest message (see
+        # offline_backlog_buffer.py / offline_context.py). Live messages skip
+        # this branch entirely and keep their immediate-forward path below.
+        scheduled = offline_backlog_buffer.add(
+            chat_id=normalized.chat_id,
+            update_id=normalized.update_id,
+            source_message_id=normalized.source_message_id,
+            customer_username=normalized.username,
+            text=normalized.text,
+            message_date=normalized.date,
+        )
+        if scheduled:
+            background_tasks.add_task(
+                _flush_offline_backlog_after_debounce,
+                chat_id=normalized.chat_id,
+            )
+        logger.info(
+            "offline_backlog_buffered",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": normalized.chat_id,
+                "update_id": normalized.update_id,
+                "scheduled_flush": scheduled,
+            },
+        )
+        return {"status": "backlog_buffered", "trace_id": trace_id}
 
     # Customer forward runs as a background task so the webhook returns 200
     # OK within a few milliseconds. The AnswerPipeline (LLM + RAG + verifier

@@ -1,0 +1,63 @@
+# Short, context-dependent message cues (RU + EN). A redelivered backlog
+# message that exactly matches one of these — or whose first word does — is
+# treated as "thin" and answered together with the preceding buffered
+# messages as context. Data, not code: add cues here, one per line, lowercase.
+# Lines starting with '#' are comments.
+
+# --- Russian affirmations / fillers ---
+да
+нет
+ок
+окей
+окей.
+хорошо
+ладно
+конечно
+точно
+угу
+ага
+неа
+
+# --- Russian question words (depend on prior turn) ---
+сколько
+когда
+где
+куда
+откуда
+почему
+зачем
+как
+что
+кто
+какой
+какая
+какие
+какое
+а
+и
+это
+этот
+эта
+эти
+тоже
+ещё
+еще
+можно
+
+# --- English ---
+yes
+no
+ok
+okay
+sure
+maybe
+how
+when
+where
+why
+what
+who
+which
+this
+that
+too

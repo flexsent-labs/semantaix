@@ -117,3 +117,34 @@ def test_normalize_update_extracts_reply_to_caption() -> None:
 )
 def test_normalize_update_ignored_cases(payload):
     assert normalize_update(payload) is None
+
+
+def test_normalize_update_extracts_date():
+    payload = {
+        "update_id": 12,
+        "message": {
+            "message_id": 24,
+            "chat": {"id": 35},
+            "from": {"id": 46},
+            "text": "hi",
+            "date": 1710000000,
+        },
+    }
+    normalized = normalize_update(payload)
+    assert normalized is not None
+    assert normalized.date == 1710000000
+
+
+@pytest.mark.parametrize("date_field", [None, "1710000000", 3.5, {}])
+def test_normalize_update_date_none_when_missing_or_not_int(date_field):
+    message = {
+        "message_id": 24,
+        "chat": {"id": 35},
+        "from": {"id": 46},
+        "text": "hi",
+    }
+    if date_field is not None:
+        message["date"] = date_field
+    normalized = normalize_update({"update_id": 12, "message": message})
+    assert normalized is not None
+    assert normalized.date is None
