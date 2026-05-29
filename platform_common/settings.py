@@ -36,6 +36,14 @@ class AppSettings(BaseSettings):
     inbound_ack_message: str = (
         "Минутку, уточню и вернусь с ответом."
     )
+    inbound_interim_message: str = "Проверяю, минуточку… 🙂"
+    scope_decline_messages: str = (
+        "Этим не занимаюсь.\n"
+        "Не моя тема 🙂\n"
+        "Не смогу тут помочь.\n"
+        "Это не ко мне.\n"
+        "С этим не помогу."
+    )
     bot_persona_first_name: str = "Анна"
     bot_persona_last_name: str = "Иванова"
     bot_telegram_description: str = (
