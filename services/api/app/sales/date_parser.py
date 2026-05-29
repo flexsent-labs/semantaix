@@ -11,6 +11,9 @@ Shapes accepted:
 - ``"1–3 мая"``     → (May 1, May 3)
 - ``"1-3 мая"``     → (May 1, May 3)
 - ``"в мае"``       → (May 1, May 31)  (whole-month span)
+- ``"сегодня"``     → (now, now)
+- ``"завтра"``      → (now + 1d, now + 1d)
+- ``"послезавтра"`` → (now + 2d, now + 2d)
 
 Anything else returns ``None`` so the answerer can ask a scoping
 clarification. The year falls back to ``now.year`` — we never roll
@@ -22,7 +25,7 @@ from __future__ import annotations
 
 import calendar
 import re
-from datetime import date
+from datetime import date, timedelta
 
 # Russian month prefixes (sufficient to cover every grammatical case for
 # the shapes the parser accepts). Lookup is by ``startswith``, so a single
@@ -57,6 +60,18 @@ _WHOLE_MONTH_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Relative day offsets from ``now``. Longest alternative first so the regex
+# does not stop at "завтра" inside "послезавтра".
+_RELATIVE_OFFSETS: tuple[tuple[str, int], ...] = (
+    ("послезавтра", 2),
+    ("сегодня", 0),
+    ("завтра", 1),
+)
+_RELATIVE_RE = re.compile(
+    r"\b(послезавтра|сегодня|завтра)\b",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def _month_from_token(token: str) -> int | None:
     lowered = token.lower()
@@ -87,6 +102,13 @@ def parse_russian_date_span(
     if not stripped:
         return None
     lowered = stripped.lower()
+
+    relative_match = _RELATIVE_RE.search(lowered)
+    if relative_match is not None:
+        keyword = relative_match.group(1)
+        offset = next(days for word, days in _RELATIVE_OFFSETS if word == keyword)
+        target = now + timedelta(days=offset)
+        return target, target
 
     range_match = _RANGE_RE.search(lowered)
     if range_match is not None:

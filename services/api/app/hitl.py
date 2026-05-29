@@ -279,11 +279,15 @@ class HitlTicketRepository:
 
         Returns ``(first_name, last_name)``. Used by the LLM system prompt
         and the startup Telegram identity sync so they share one source of
-        truth.
+        truth. A stored empty string (operator cleared the surname) is
+        preserved — only an absent key falls back to the settings default.
         """
-        first = self.get_runtime_config("bot_persona_first_name") or default_first_name
-        last = self.get_runtime_config("bot_persona_last_name") or default_last_name
-        return first, last
+        first = self.get_runtime_config("bot_persona_first_name")
+        last = self.get_runtime_config("bot_persona_last_name")
+        return (
+            first if first is not None else default_first_name,
+            last if last is not None else default_last_name,
+        )
 
     @staticmethod
     def _row_to_ticket(row: sqlite3.Row) -> HitlTicket:

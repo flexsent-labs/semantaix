@@ -101,15 +101,14 @@ async def test_greeting_returns_handled_with_llm_text() -> None:
     openrouter.queue_response(
         {
             "extracted_fields": {},
-            "next_question": "Здравствуйте! Меня зовут Николай. Какие даты вас интересуют?",
+            "next_question": "Здравствуйте! Какие даты вас интересуют?",
         }
     )
     result = await answerer.try_answer(
         question="Хочу прокат квадроциклов", ctx=_ctx()
     )
     assert result.handled is True
-    assert result.text is not None
-    assert "Николай" in result.text
+    assert result.text == "Здравствуйте! Какие даты вас интересуют?"
     assert result.metadata.get("answerer") in (None, "sales_persona")
     assert result.metadata.get("stage_before") == "new"
     assert result.metadata.get("stage_after") == "scoping"
@@ -139,10 +138,11 @@ async def test_greeting_persists_state_with_scoping_transition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_greeting_prompt_passes_persona_name_into_system() -> None:
+async def test_greeting_prompt_does_not_introduce_by_name() -> None:
+    """Operator preference: the greeting only says hello, never a name."""
     answerer, _, openrouter = _build_answerer(persona="Анна")
     openrouter.queue_response(
-        {"extracted_fields": {}, "next_question": "Какие даты?"}
+        {"extracted_fields": {}, "next_question": "Здравствуйте! Какие даты?"}
     )
     await answerer.try_answer(
         question="Хочу записаться на тур", ctx=_ctx()
@@ -150,9 +150,11 @@ async def test_greeting_prompt_passes_persona_name_into_system() -> None:
 
     assert len(openrouter.calls) == 1
     system = openrouter.calls[0]["system"]
-    assert "Анна" in system
-    # Never hard-code a different persona name.
+    # No persona name is injected into the greeting prompt at all.
+    assert "Анна" not in system
     assert "Николай" not in system
+    # The prompt explicitly forbids self-introduction.
+    assert "не представляйся" in system.lower()
 
 
 @pytest.mark.asyncio
@@ -179,29 +181,25 @@ async def test_greeting_prompt_includes_referral_source_in_user_block() -> None:
 
 
 @pytest.mark.asyncio
-async def test_greeting_uses_persona_getter_lazily_per_call() -> None:
-    """The persona name is read at call time, not bound at construction."""
-    box = {"name": "Анна"}
-    answerer = SalesPersonaAnswerer(
-        state_repo=_FakeStateRepo(),
-        services_repo=_FakeServicesRepo(),
-        openrouter=_FakeOpenRouter(),
-        normalizer=get_russian_normalizer(),
-        clock=_clock,
-        bot_persona_getter=lambda: box["name"],
+async def test_greeting_extracts_opener_date_and_asks_next_field() -> None:
+    """A date in the opener is captured; the bot asks the next missing field
+    instead of re-asking for dates."""
+    answerer, state_repo, openrouter = _build_answerer()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "завтра в 14:00"},
+            "next_question": "Сколько человек поедет?",
+        }
     )
-    # Swap the getter source between calls.
-    answerer._openrouter.queue = [  # type: ignore[attr-defined]
-        {"extracted_fields": {}, "next_question": "Какие даты?"},
-        {"extracted_fields": {}, "next_question": "Какие даты?"},
-    ]
-    await answerer.try_answer(question="Хочу тур", ctx=_ctx())
-    box["name"] = "Николай"
-    await answerer.try_answer(question="Хочу тур", ctx=_ctx())
+    result = await answerer.try_answer(
+        question="хочу забронировать багги завтра в 14:00", ctx=_ctx()
+    )
 
-    calls = answerer._openrouter.calls  # type: ignore[attr-defined]
-    assert "Анна" in calls[0]["system"]
-    assert "Николай" in calls[1]["system"]
+    assert result.handled is True
+    assert result.text == "Сколько человек поедет?"
+    upsert = state_repo.upsert_calls[0]
+    assert upsert["collected_intent"]["dates"] == "завтра в 14:00"
+    assert upsert["current_stage"] == "scoping"
 
 
 @pytest.mark.asyncio

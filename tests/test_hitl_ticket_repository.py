@@ -105,6 +105,26 @@ def test_get_bot_persona_partial_override(tmp_path):
     assert persona == ("Иван", "Иванова")
 
 
+def test_get_bot_persona_preserves_cleared_surname(tmp_path):
+    """An explicitly-stored empty surname survives — no default re-applied.
+
+    Regression: setting the persona to a first name only stores ``""`` for
+    the surname; a falsy ``or default`` read used to resurrect "Иванова" on
+    every restart.
+    """
+    repository = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
+    repository.set_runtime_config(
+        key="bot_persona_first_name", value="Анна", updated_by="@ajdevy"
+    )
+    repository.set_runtime_config(
+        key="bot_persona_last_name", value="", updated_by="@ajdevy"
+    )
+    persona = repository.get_bot_persona(
+        default_first_name="Анна", default_last_name="Иванова"
+    )
+    assert persona == ("Анна", "")
+
+
 def test_find_active_for_chat_returns_none_when_no_tickets(tmp_path):
     repository = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
     assert repository.find_active_for_chat(9001) is None
