@@ -30,11 +30,19 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
+from zoneinfo import ZoneInfo
 
 from services.api.app.answerers import AnswerContext, AnswerResult
+from services.api.app.calendar.requested_time_check import (
+    STATUS_AVAILABLE,
+    STATUS_UNAVAILABLE,
+    check_requested_availability,
+)
+from services.api.app.calendar.service_resolver import extract_requested_start
 from services.api.app.rag import RagChunk
 from services.api.app.sales.acceptance import is_acceptance
 from services.api.app.sales.client_materials_repository import ClientMaterial
+from services.api.app.sales.closure import is_no_more
 from services.api.app.sales.date_parser import parse_russian_date_span
 from services.api.app.sales.date_proposer import (
     NO_PROPOSAL_AMBIGUOUS_SERVICE,
@@ -75,6 +83,7 @@ HITL_REASON_PROPOSAL_FAILED = "sales_proposal_failed"
 HITL_REASON_CLOSING_HANDOFF = "sales_closing_handoff"
 HITL_REASON_PRICE_UNKNOWN = "price_unknown"
 HITL_REASON_EMPTY_CATALOG = "catalog_empty"
+HITL_REASON_SCOPING_COMPLETE = "sales_scoping_complete"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -91,6 +100,17 @@ MATERIAL_DISPATCH_FALLBACK_LINE = (
     "Видео/фото пришлю чуть позже — уточню у коллег."
 )
 EQUIPMENT_ACK_LINE = "Снаряжение подготовим, расскажу подробнее на месте."
+# Story 12.10 — scoping completion (all 5 fields collected). The bot no longer
+# asks a filler "wishes" question; it confirms and hands off to a human. When a
+# concrete requested time is known and free we say so; when it's busy we offer
+# the nearest free slot via the date proposer.
+SCOPING_COMPLETE_HANDOFF_LINE = (
+    "Спасибо! Передам детали коллегам — подтвердят и вернутся с предложением."
+)
+SLOT_FREE_HANDOFF_LINE = (
+    "Спасибо! Это время свободно — передам коллегам для подтверждения."
+)
+SLOT_BUSY_LINE = "К сожалению, это время уже занято."
 
 # Story 12.05 — equipment-question lemma triggers. Lowercase lemma roots
 # matched against ``RussianNormalizer.lemmas(question)``; any overlap fires
@@ -115,19 +135,19 @@ _HANDLED_STAGES: frozenset[str] = frozenset(
     {
         STAGE_NEW,
         STAGE_SCOPING,
+        STAGE_PITCHING,
         STAGE_PRICING,
         STAGE_AWAITING_OPERATOR_PRICE,
         STAGE_PROPOSING,
         STAGE_CLOSING,
     }
 )
-_DEFERRED_STAGES: frozenset[str] = frozenset({STAGE_PITCHING})
 # Stages where mid-funnel asides (catalog / concept / price) are intercepted
 # before the stage handler. Greeting is excluded: a brand-new chat hits the
 # greeting branch first and the sales-intent gate already covers catalog
 # phrases.
-_ASIDE_INTERCEPT_STAGES: frozenset[str] = (
-    frozenset({STAGE_SCOPING}) | _DEFERRED_STAGES
+_ASIDE_INTERCEPT_STAGES: frozenset[str] = frozenset(
+    {STAGE_SCOPING, STAGE_PITCHING}
 )
 
 # Russian month names in the genitive case — used to format proposal
@@ -268,6 +288,14 @@ class _MaterialSelector(Protocol):
     ) -> ClientMaterial | None: ...
 
 
+class _CalendarSettingsRepo(Protocol):
+    def is_enabled(self, project_id: int) -> bool: ...
+
+    def get(self, project_id: int) -> Any | None: ...
+
+    def list_service_rules(self, project_id: int) -> list[Any]: ...
+
+
 MaterialDispatcher = Callable[..., Awaitable[dict[str, Any]]]
 
 
@@ -299,6 +327,17 @@ def _format_known_fields(intent: Intent) -> str:
 def _format_missing_fields(intent: Intent) -> str:
     missing = intent.missing_fields()
     return "\n".join(f"- {name}" for name in missing) if missing else "(все собраны)"
+
+
+def _format_intent_summary(intent: Intent) -> str:
+    """One-line booking summary for the operator HITL DM (escalation_context)."""
+    parts = [
+        f"{name}={value}"
+        for name, value in intent.to_dict().items()
+        if value is not None
+    ]
+    body = "; ".join(parts) if parts else "нет деталей"
+    return f"бронь: {body}"
 
 
 def _is_equipment_ask(text: str, *, normalizer: _Normalizer) -> bool:
@@ -368,6 +407,10 @@ class SalesPersonaAnswerer:
         price_lookup: _PriceLookup | None = None,
         material_selector: _MaterialSelector | None = None,
         material_dispatcher: MaterialDispatcher | None = None,
+        calendar_settings_repo: _CalendarSettingsRepo | None = None,
+        calendar_token_provider: Any | None = None,
+        calendar_freebusy_client: Any | None = None,
+        operator_chat_resolver: Callable[[str], int | None] | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._services_repo = services_repo
@@ -382,6 +425,10 @@ class SalesPersonaAnswerer:
         self._price_lookup = price_lookup
         self._material_selector = material_selector
         self._material_dispatcher = material_dispatcher
+        self._calendar_settings_repo = calendar_settings_repo
+        self._calendar_token_provider = calendar_token_provider
+        self._calendar_freebusy_client = calendar_freebusy_client
+        self._operator_chat_resolver = operator_chat_resolver
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -420,9 +467,6 @@ class SalesPersonaAnswerer:
             if aside is not None:
                 return aside
 
-        if current_stage in _DEFERRED_STAGES:
-            return _skip("stage_not_implemented_yet")
-
         if current_stage in (STAGE_PRICING, STAGE_AWAITING_OPERATOR_PRICE):
             return await self._handle_pricing(
                 question=question, ctx=ctx, state=state
@@ -430,6 +474,11 @@ class SalesPersonaAnswerer:
 
         if current_stage == STAGE_SCOPING:
             return await self._handle_scoping(
+                question=question, ctx=ctx, state=state
+            )
+
+        if current_stage == STAGE_PITCHING:
+            return await self._handle_pitching(
                 question=question, ctx=ctx, state=state
             )
 
@@ -582,47 +631,272 @@ class SalesPersonaAnswerer:
             return _skip("llm_transport_error")
 
         merged = intent_merge(existing_intent, extracted)
-        stage_after = STAGE_PITCHING if merged.is_complete() else STAGE_SCOPING
-        await self._persist(
-            ctx=ctx,
-            current_stage=stage_after,
-            intent=merged,
-        )
-        # Story 12.05 — scoping → pitching transition is the tour_preview
-        # media moment. The textual pitch (LLM `next_question`) is still the
-        # primary reply; the media dispatch is awaited so a failure can
-        # append a textual fallback within the same turn.
-        media_metadata: dict[str, Any] = {}
-        final_text = next_question
-        if stage_after == STAGE_PITCHING:
-            media_metadata, dispatch_fallback = await self._fire_media_moment(
-                ctx=ctx,
-                intent=merged,
-                purpose="tour_preview",
+        # Not complete → keep scoping: forward the LLM's next-field question.
+        if not merged.is_complete():
+            await self._persist(
+                ctx=ctx, current_stage=STAGE_SCOPING, intent=merged
             )
-            if dispatch_fallback:
-                final_text = f"{next_question}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+            logger.info(
+                "sales_answerer_handled",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "stage_before": STAGE_SCOPING,
+                    "stage_after": STAGE_SCOPING,
+                    "fields_extracted": sorted(
+                        name
+                        for name, value in extracted.items()
+                        if value is not None
+                    ),
+                },
+            )
+            return AnswerResult(
+                handled=True,
+                text=next_question,
+                metadata={
+                    "answerer": NAME,
+                    "stage_before": STAGE_SCOPING,
+                    "stage_after": STAGE_SCOPING,
+                },
+            )
+
+        # Complete → the LLM `next_question` is meaningless (no missing field),
+        # so we ignore it. Story 12.05 — the scoping → pitching transition is the
+        # tour_preview media moment; the dispatch is awaited so a failure can
+        # append a textual fallback to the completion line.
+        media_metadata, dispatch_fallback = await self._fire_media_moment(
+            ctx=ctx,
+            intent=merged,
+            purpose="tour_preview",
+        )
+        return await self._complete_booking(
+            ctx=ctx,
+            intent=merged,
+            stage_before=STAGE_SCOPING,
+            base_metadata=media_metadata,
+            dispatch_fallback=dispatch_fallback,
+        )
+
+    async def _handle_pitching(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> AnswerResult:
+        """Follow-up turns after scoping completed.
+
+        A bare closure word ("всё", "нет", "больше ничего") means the customer
+        has nothing more to add — recognised via :func:`is_no_more` so it is
+        never mistaken for a new request. Either way the booking is complete,
+        so we re-run the completion logic (confirm + hand off, or — if a
+        requested time turns out busy — offer the nearest free slot).
+        """
+        intent = Intent.from_dict(state.get("collected_intent") or {})
+        closure = is_no_more(question, normalizer=self._normalizer)
+        return await self._complete_booking(
+            ctx=ctx,
+            intent=intent,
+            stage_before=STAGE_PITCHING,
+            base_metadata={"sales_closure_detected": closure},
+        )
+
+    async def _complete_booking(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        stage_before: str,
+        base_metadata: dict[str, Any] | None = None,
+        dispatch_fallback: bool = False,
+    ) -> AnswerResult:
+        """Scoping is complete — check the requested time, then confirm/hand off.
+
+        Decision table:
+          * requested time is BUSY → offer the nearest free slot (→ proposing),
+            or hand off if no slot / no proposer.
+          * requested time is FREE → confirm it's free + hand off.
+          * calendar disabled / no concrete time / not connected / error → hand
+            off with the generic completion line (a human picks up).
+        """
+        base_metadata = base_metadata or {}
+        requested = await self._check_requested_slot(ctx=ctx, intent=intent)
+        if requested is not None and requested.status == STATUS_UNAVAILABLE:
+            return await self._propose_alternative_or_handoff(
+                ctx=ctx,
+                intent=intent,
+                stage_before=stage_before,
+                alternative=requested.alternative,
+                base_metadata=base_metadata,
+                dispatch_fallback=dispatch_fallback,
+            )
+        free = requested is not None and requested.status == STATUS_AVAILABLE
+        return await self._handoff_after_scoping(
+            ctx=ctx,
+            intent=intent,
+            stage_before=stage_before,
+            free=free,
+            base_metadata=base_metadata,
+            dispatch_fallback=dispatch_fallback,
+        )
+
+    async def _check_requested_slot(
+        self, *, ctx: AnswerContext, intent: Intent
+    ) -> Any | None:
+        """Validate the customer's concrete requested time, or ``None``.
+
+        Returns ``None`` (→ plain hand off) whenever the calendar cannot give a
+        confident verdict: calendar wired-off / disabled, no parseable
+        date+time in ``intent.dates``, or no single active service to anchor the
+        duration. Otherwise returns a ``RequestedAvailability``.
+        """
+        if self._calendar_settings_repo is None or ctx.project_id is None:
+            return None
+        project_id = ctx.project_id
+        enabled = await asyncio.to_thread(
+            self._calendar_settings_repo.is_enabled, project_id
+        )
+        if not enabled:
+            return None
+        settings = await asyncio.to_thread(
+            self._calendar_settings_repo.get, project_id
+        )
+        if settings is None:
+            return None
+        project_tz = ZoneInfo(settings.project_timezone)
+        dates_text = intent.dates if isinstance(intent.dates, str) else None
+        if not dates_text:
+            return None
+        requested_start = extract_requested_start(
+            text=dates_text, now=ctx.now, project_tz=project_tz
+        )
+        if requested_start is None:
+            return None
+        rules = await asyncio.to_thread(
+            self._calendar_settings_repo.list_service_rules, project_id
+        )
+        active = [rule for rule in rules if getattr(rule, "name", None)]
+        if len(active) != 1:
+            return None
+        operator = settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        return await check_requested_availability(
+            project_id=project_id,
+            requested_start=requested_start,
+            operator=operator,
+            operator_chat_id=operator_chat_id,
+            service_rule=active[0],
+            token_provider=self._calendar_token_provider,
+            freebusy_client=self._calendar_freebusy_client,
+            now=ctx.now,
+            project_tz=project_tz,
+            lookahead_days=settings.lookahead_days,
+            country_code=ctx.country_code,
+            trace_id=ctx.trace_id,
+        )
+
+    async def _propose_alternative_or_handoff(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        stage_before: str,
+        alternative: datetime | None,
+        base_metadata: dict[str, Any],
+        dispatch_fallback: bool,
+    ) -> AnswerResult:
+        """Requested time is busy — tell the customer + hand off to a human.
+
+        When the calendar yields a nearest free slot we name it in the same
+        message; either way we open a HITL ticket carrying the collected intent
+        so the operator confirms / books (autonomous booking is out of scope).
+        """
+        if alternative is not None:
+            slot = (
+                f" Ближайшее свободное время — {alternative.day} "
+                f"{_MONTHS_GENITIVE[alternative.month]}, "
+                f"{alternative.strftime('%H:%M')}."
+            )
+            turn_kind = "scoping_complete_busy_alternative"
+        else:
+            slot = f" {SCOPING_COMPLETE_HANDOFF_LINE}"
+            turn_kind = "scoping_complete_busy_no_slot"
+        text = f"{SLOT_BUSY_LINE}{slot}"
+        if dispatch_fallback:
+            text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_PITCHING, intent=intent
+        )
         logger.info(
             "sales_answerer_handled",
             extra={
                 "trace_id": ctx.trace_id,
-                "stage_before": STAGE_SCOPING,
-                "stage_after": stage_after,
-                "fields_extracted": sorted(
-                    name
-                    for name, value in extracted.items()
-                    if value is not None
-                ),
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": turn_kind,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
             },
         )
         return AnswerResult(
             handled=True,
-            text=final_text,
+            text=text,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
             metadata={
                 "answerer": NAME,
-                "stage_before": STAGE_SCOPING,
-                "stage_after": stage_after,
-                **media_metadata,
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": turn_kind,
+                "escalate": True,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+                "escalation_context": _format_intent_summary(intent),
+                **base_metadata,
+            },
+        )
+
+    async def _handoff_after_scoping(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        stage_before: str,
+        free: bool,
+        base_metadata: dict[str, Any],
+        dispatch_fallback: bool,
+    ) -> AnswerResult:
+        """Confirm the booking + open a HITL ticket carrying the collected intent."""
+        text = SLOT_FREE_HANDOFF_LINE if free else SCOPING_COMPLETE_HANDOFF_LINE
+        if dispatch_fallback:
+            text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_PITCHING, intent=intent
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": "scoping_complete",
+                "slot_free": free,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": "scoping_complete",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+                "escalation_context": _format_intent_summary(intent),
+                **base_metadata,
             },
         )
 
@@ -1673,6 +1947,7 @@ __all__ = [
     "HITL_REASON_PRICE_UNKNOWN",
     "HITL_REASON_PROPOSAL_DRIFT",
     "HITL_REASON_PROPOSAL_FAILED",
+    "HITL_REASON_SCOPING_COMPLETE",
     "LlmSchemaViolation",
     "MATERIAL_DISPATCH_FALLBACK_LINE",
     "MaterialDispatcher",
@@ -1682,6 +1957,9 @@ __all__ = [
     "PROPOSAL_FALLBACK_CALENDAR_DISABLED",
     "PROPOSAL_FALLBACK_UNAVAILABLE",
     "RESPONSE_MODE_SALES_ESCALATION",
+    "SCOPING_COMPLETE_HANDOFF_LINE",
+    "SLOT_BUSY_LINE",
+    "SLOT_FREE_HANDOFF_LINE",
     "STAGE_AWAITING_OPERATOR_PRICE",
     "STAGE_CLOSING",
     "STAGE_PITCHING",

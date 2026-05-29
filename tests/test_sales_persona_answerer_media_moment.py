@@ -30,6 +30,7 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.sales.client_materials_repository import ClientMaterial
 from services.api.app.sales.sales_persona_answerer import (
+    SCOPING_COMPLETE_HANDOFF_LINE,
     STAGE_PITCHING,
     STAGE_SCOPING,
     SalesPersonaAnswerer,
@@ -244,8 +245,10 @@ async def test_scoping_completion_dispatches_tour_preview_material() -> None:
             "caption_override": None,
         }
     ]
-    # Textual pitch is returned as usual.
-    assert "Готовлю программу" in (result.text or "")
+    # The filler LLM question is dropped; completion confirms + hands off,
+    # while the tour-preview media still dispatches on the same turn.
+    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+    assert result.metadata["sales_material_dispatched"] is True
 
 
 @pytest.mark.asyncio
@@ -301,7 +304,7 @@ async def test_scoping_completion_dispatch_failure_appends_fallback() -> None:
     assert result.handled is True
     # Textual fallback line appended so the customer is not left silent.
     text = result.text or ""
-    assert "Принято" in text
+    assert SCOPING_COMPLETE_HANDOFF_LINE in text
     assert "фото" in text.lower() or "позже" in text.lower() or "коллег" in text.lower()
 
 
@@ -525,7 +528,7 @@ async def test_dispatcher_exception_appends_fallback_line() -> None:
     )
     assert result.handled is True
     text = result.text or ""
-    assert "Принято" in text
+    assert SCOPING_COMPLETE_HANDOFF_LINE in text
     assert "позже" in text.lower() or "коллег" in text.lower()
 
 

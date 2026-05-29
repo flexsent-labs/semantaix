@@ -2,8 +2,8 @@
 
 Scoping is the loop in `scoping` until all 5 intent fields are populated.
 Order: dates → headcount → vehicle_count → difficulty → drivers. Once all
-five are present the next turn transitions to `pitching` and v1 of this
-story `_skip`s pitching with `stage_not_implemented_yet`.
+five are present the answerer stops asking (no filler "wishes" question) and
+confirms + hands off to a human (Epic-12.10).
 """
 
 from __future__ import annotations
@@ -16,7 +16,12 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
-from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.sales_persona_answerer import (
+    HITL_REASON_SCOPING_COMPLETE,
+    RESPONSE_MODE_SALES_ESCALATION,
+    SCOPING_COMPLETE_HANDOFF_LINE,
+    SalesPersonaAnswerer,
+)
 
 
 class _FakeStateRepo:
@@ -87,7 +92,7 @@ def _build() -> tuple[SalesPersonaAnswerer, _FakeStateRepo, _FakeOpenRouter]:
 
 
 @pytest.mark.asyncio
-async def test_full_scoping_run_then_pitching_is_skipped() -> None:
+async def test_full_scoping_run_then_completion_handoff() -> None:
     answerer, state_repo, openrouter = _build()
     # Turn 1 — greeting (new → scoping), customer mentions dates.
     openrouter.queue_response(
@@ -117,16 +122,15 @@ async def test_full_scoping_run_then_pitching_is_skipped() -> None:
             "next_question": "Кто за рулем? Опыт есть?",
         }
     )
-    # Turn 5 — scoping, customer answers drivers — last field; the turn
-    # itself still asks the question (the bot replied before the LLM saw
-    # the new value), so this turn just records the field and remains in
-    # scoping. The transition to pitching happens on the NEXT customer
-    # turn, where the answerer detects all 5 are present and skips with
-    # `stage_not_implemented_yet`.
+    # Turn 5 — scoping, customer answers drivers — the last field. On this turn
+    # the LLM still emits a filler "next_question" (it was prompted to ask the
+    # topmost missing field), but with all 5 fields now present the answerer
+    # IGNORES it and instead confirms + hands off to a human. No calendar is
+    # wired here, so the requested time is not checked.
     openrouter.queue_response(
         {
             "extracted_fields": {"drivers": "мужчины 30+, опыт"},
-            "next_question": "",
+            "next_question": "Какие ещё пожелания?",
         }
     )
 
@@ -141,6 +145,15 @@ async def test_full_scoping_run_then_pitching_is_skipped() -> None:
         result = await answerer.try_answer(question=question, ctx=_ctx())
         assert result.handled is True
 
+    # The completing turn never forwards the filler question — it confirms and
+    # escalates to a human, carrying the collected booking in escalation_context.
+    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+    assert "Какие ещё пожелания" not in (result.text or "")
+    assert result.response_mode == RESPONSE_MODE_SALES_ESCALATION
+    assert result.metadata["escalate"] is True
+    assert result.metadata["hitl_reason"] == HITL_REASON_SCOPING_COMPLETE
+    assert "drivers=мужчины 30+, опыт" in result.metadata["escalation_context"]
+
     # All five upserts went through; state ends with full intent +
     # current_stage='pitching' (transition recorded once all 5 fields hit).
     assert len(state_repo.upsert_calls) == 5
@@ -154,10 +167,13 @@ async def test_full_scoping_run_then_pitching_is_skipped() -> None:
     ).to_dict()
     assert last["current_stage"] == "pitching"
 
-    # Sixth turn — resume from `pitching` state → skip per the v1 contract.
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
-    assert result.handled is False
-    assert result.metadata.get("skip_reason") == "stage_not_implemented_yet"
+    # Sixth turn — a follow-up in `pitching` ("всё") is recognised as closure
+    # and gets a graceful confirm/handoff, NOT a vague fall-through.
+    result = await answerer.try_answer(question="всё", ctx=_ctx())
+    assert result.handled is True
+    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+    assert result.response_mode == RESPONSE_MODE_SALES_ESCALATION
+    assert result.metadata.get("sales_closure_detected") is True
 
 
 @pytest.mark.asyncio

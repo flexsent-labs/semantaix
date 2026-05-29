@@ -25,6 +25,7 @@ from services.api.app.sales.client_materials_selector import (
     ClientMaterialsSelector,
 )
 from services.api.app.sales.sales_persona_answerer import (
+    SCOPING_COMPLETE_HANDOFF_LINE,
     SalesPersonaAnswerer,
 )
 from services.api.app.sales.state_repository import StateRepository
@@ -189,7 +190,9 @@ async def test_scoping_completion_dispatches_and_caches_file_id(
 
     result = await answerer.try_answer(question="1 водитель", ctx=_ctx())
     assert result.handled is True
-    assert "Готовлю программу" in (result.text or "")
+    # Completion confirms + hands off (no calendar wired here); the filler LLM
+    # question is dropped, but the tour-preview media still dispatches.
+    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
     # Fresh upload: disk was read once.
     assert sender.disk_reads == [video_path]
     # Cached on the row.

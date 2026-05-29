@@ -1,0 +1,16 @@
+# Sales-closure seed lemmas — "I have nothing more to add".
+# Consulted ONLY in the pitching / completion context, never mid-scoping
+# (where "нет" could be a field answer). Matched against
+# `RussianNormalizer.lemmas(question)` overlap so the reply survives
+# inflection and slang substitution. One phrase per line.
+всё
+ничего
+достаточно
+хватит
+готово
+нет
+это всё
+больше ничего
+больше нет
+нет пожеланий
+на этом всё

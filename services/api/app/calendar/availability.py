@@ -268,6 +268,44 @@ def compute_availability(
     return AvailabilityResult.available_result()
 
 
+def find_earliest_slot(
+    *,
+    now: datetime,
+    window: tuple[date, date],
+    busy: tuple[BusyInterval, ...],
+    service_rule: AvailabilityServiceRule,
+    project_tz: ZoneInfo,
+) -> datetime | None:
+    """First available start instant within ``window`` (inclusive), or ``None``.
+
+    Pure scan that reuses :func:`compute_availability` for every correctness
+    check (past / look-ahead / closed-date / service-day / working-hours /
+    busy), so the two stay in lock-step. Candidate starts are spaced by the
+    service duration across each day's working windows; the first that
+    ``compute_availability`` accepts wins.
+    """
+    duration = timedelta(minutes=service_rule.duration_minutes)
+    day = window[0]
+    while day <= window[1]:
+        windows = service_rule.working_hours.get(day.weekday(), ())
+        for win in windows:
+            candidate = datetime.combine(day, win.start, tzinfo=project_tz)
+            window_end = datetime.combine(day, win.end, tzinfo=project_tz)
+            while candidate + duration <= window_end:
+                result = compute_availability(
+                    now=now,
+                    requested_start=candidate,
+                    busy=busy,
+                    service_rule=service_rule,
+                    project_tz=project_tz,
+                )
+                if result.available:
+                    return candidate
+                candidate += duration
+        day += timedelta(days=1)
+    return None
+
+
 def _fits_in_a_window(
     block_start: datetime,
     block_end: datetime,
