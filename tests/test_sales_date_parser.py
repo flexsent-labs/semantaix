@@ -52,6 +52,44 @@ def test_parses_within_sentence() -> None:
     ) == (date(2026, 5, 2), date(2026, 5, 2))
 
 
+def test_parses_segodnya() -> None:
+    assert parse_russian_date_span("сегодня", now=_NOW) == (
+        date(2026, 5, 1),
+        date(2026, 5, 1),
+    )
+
+
+def test_parses_zavtra() -> None:
+    assert parse_russian_date_span("завтра", now=_NOW) == (
+        date(2026, 5, 2),
+        date(2026, 5, 2),
+    )
+
+
+def test_parses_poslezavtra() -> None:
+    assert parse_russian_date_span("послезавтра", now=_NOW) == (
+        date(2026, 5, 3),
+        date(2026, 5, 3),
+    )
+
+
+def test_parses_relative_date_with_time_suffix() -> None:
+    # "завтра в 14:00" — the trailing time must not block the relative match;
+    # the date resolves and the time is ignored (slot time comes from Epic 11).
+    assert parse_russian_date_span("завтра в 14:00", now=_NOW) == (
+        date(2026, 5, 2),
+        date(2026, 5, 2),
+    )
+
+
+def test_relative_match_wins_over_trailing_explicit_date() -> None:
+    # A relative keyword takes precedence — it appears first in the function.
+    assert parse_russian_date_span("давайте завтра", now=_NOW) == (
+        date(2026, 5, 2),
+        date(2026, 5, 2),
+    )
+
+
 def test_rejects_relative_phrase() -> None:
     assert parse_russian_date_span("следующая суббота", now=_NOW) is None
 

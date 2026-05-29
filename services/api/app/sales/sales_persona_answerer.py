@@ -335,8 +335,10 @@ def _intent_to_tags(intent: Intent) -> list[str]:
     return out
 
 
-def _build_greeting_prompt(*, persona: str) -> str:
-    return _GREETING_PROMPT_TEMPLATE.format(persona=persona)
+def _build_greeting_prompt() -> str:
+    # The greeting no longer states a name, so the persona is not interpolated
+    # here — ``.format()`` only resolves the escaped JSON braces.
+    return _GREETING_PROMPT_TEMPLATE.format()
 
 
 def _build_scoping_prompt(*, persona: str, intent: Intent) -> str:
@@ -479,8 +481,7 @@ class SalesPersonaAnswerer:
     async def _handle_greeting(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        persona = self._persona_getter()
-        system = _build_greeting_prompt(persona=persona)
+        system = _build_greeting_prompt()
         user = f"Сообщение клиента:\n{question}"
 
         try:
