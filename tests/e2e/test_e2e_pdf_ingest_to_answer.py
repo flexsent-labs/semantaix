@@ -160,8 +160,8 @@ def test_pdf_ingest_dedupes_on_sha256(tmp_path, monkeypatch):
     assert body["candidate_id"] == first
 
 
-def test_buggy_tour_query_without_ingest_escalates(tmp_path, monkeypatch):
-    """Lock in the empty-KB contract: no chunks -> escalate to human.
+def test_buggy_tour_query_without_ingest_declines(tmp_path, monkeypatch):
+    """Lock in the empty-KB contract: no chunks -> scope guard polite decline.
 
     Catches a future change that lowers the grounding threshold to 0 or
     starts answering ungrounded.
@@ -182,5 +182,7 @@ def test_buggy_tour_query_without_ingest_escalates(tmp_path, monkeypatch):
     )
     assert inbound.status_code == 200, inbound.text
     body = inbound.json()
-    assert body["escalated"] is True, body
-    assert body["response_mode"] == "human_only", body
+    from services.api.app.answerers.scope_guard import RESPONSE_MODE_SCOPE_DECLINE
+    assert body["delivered"] is True, body
+    assert body["escalated"] is False, body
+    assert body["response_mode"] == RESPONSE_MODE_SCOPE_DECLINE, body

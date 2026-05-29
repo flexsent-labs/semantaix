@@ -40,6 +40,7 @@ from services.api.app.admin_rag_inspect import wire_admin_rag_inspect_routes
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
+from services.api.app.answerers.scope_guard import ScopeGuardAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
 from services.api.app.calendar.access_token_cache import AccessTokenProvider
@@ -154,6 +155,7 @@ from services.api.app.sales.followup_queue_repository import (
     FollowupRow,
 )
 from services.api.app.sales.price_lookup import PriceLookup
+from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.sales_persona_answerer import (
     RESPONSE_MODE_SALES_ESCALATION,
     SalesPersonaAnswerer,
@@ -446,6 +448,13 @@ def _effective_sales_persona_name() -> str:
     return f"{first} {last}".strip() if last else first
 
 
+def _effective_scope_decline_messages() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("scope_decline_messages")
+        or settings.scope_decline_messages
+    )
+
+
 # Epic 12 story 12.01: bootstrap every sales DB table + index in a single
 # call so the schema is fully shaped before any repository handle opens
 # the file. The repositories below still run their own per-table
@@ -616,6 +625,10 @@ answer_pipeline = AnswerPipeline(
             weather_client=weather_client,
             project_services_reader=project_services_repository,
         ),
+        # Scope guard is always last: catches anything the above answerers could
+        # not handle and replies with a short random decline phrase instead of
+        # escalating to HITL. Keeps operator queue clean of off-topic messages.
+        ScopeGuardAnswerer(phrases_getter=_effective_scope_decline_messages),
     ]
 )
 
@@ -1574,6 +1587,27 @@ def _effective_inbound_ack_message(project_id: int | None = None) -> str:
     )
 
 
+def _effective_inbound_interim_message() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("inbound_interim_message")
+        or settings.inbound_interim_message
+    )
+
+
+def _should_send_interim(*, text: str, chat_id: int | None) -> bool:
+    """True when the message is on a slow sales path.
+
+    A message warrants an interim ack when there is already an active sales
+    state (ongoing booking conversation) OR the text matches a sales-intent
+    pattern (new booking / service enquiry). Both checks are cheap: one
+    synchronous SQLite read and one in-memory regex scan.
+    """
+    if chat_id is not None:
+        if sales_state_repository.get(chat_id) is not None:
+            return True
+    return is_sales_intent(text, normalizer=get_russian_normalizer())
+
+
 def _effective_default_country() -> str:
     return (
         hitl_ticket_repository.get_runtime_config("default_country_code")
@@ -2255,7 +2289,68 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         now=now,
     )
 
-    pipeline_result = await answer_pipeline.run(question=request.text, ctx=ctx)
+    if request.chat_id is not None and _should_send_interim(
+        text=request.text, chat_id=request.chat_id
+    ):
+        await _safe_send_message(
+            chat_id=request.chat_id,
+            text=_effective_inbound_interim_message(),
+            failure_summary="Interim ack delivery failed",
+            failure_kind="inbound_interim_failed",
+        )
+
+    try:
+        pipeline_result = await answer_pipeline.run(question=request.text, ctx=ctx)
+    except Exception as exc:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.exception(
+            "answer_pipeline_unhandled_error",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": request.chat_id,
+                "error": str(exc),
+            },
+        )
+        ack_message = _effective_inbound_ack_message(project_id=ctx.project_id)
+        if request.chat_id is not None:
+            await _safe_send_message(
+                chat_id=request.chat_id,
+                text=ack_message,
+                failure_summary="Pipeline-error ack delivery failed",
+                failure_kind="inbound_pipeline_error_ack_failed",
+            )
+        ticket = hitl_ticket_repository.create(
+            conversation_ref=request.text[:120],
+            reason="pipeline_error",
+            target_chat_id=request.chat_id,
+        )
+        assignee = _pick_assignee_for_chat(request.chat_id)
+        hitl_ticket_repository.assign(ticket_id=ticket.id, operator_username=assignee)
+        await _notify_hitl_operator_with_question(
+            ticket_id=ticket.id,
+            question=request.text,
+            customer_username=request.customer_username,
+        )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode="human_only",
+            guardrail_outcome="pipeline_error",
+            guardrail_reasons=[str(exc)],
+            guardrail_score=None,
+            retrieval=[],
+            latency_ms=latency_ms,
+            limitations=["pipeline_error"],
+            hitl_ticket_id=ticket.id,
+        )
+        return {
+            "delivered": False,
+            "escalated": True,
+            "response_mode": "human_only",
+            "hitl_ticket_id": ticket.id,
+            "hitl_operator_username": assignee,
+            "trace_id": persisted_trace_id,
+        }
     latency_ms = int((time.perf_counter() - started_at) * 1000)
 
     if (

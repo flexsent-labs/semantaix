@@ -31,6 +31,7 @@ def env(
     sales_db = tmp_path / "sales.sqlite3"
     followup_repo = FollowupQueueRepository(db_path=str(sales_db))
     monkeypatch.setattr(api_main, "sales_followup_repository", followup_repo)
+    monkeypatch.setattr(api_main, "_should_send_interim", lambda text, chat_id: False)
     yield {"client": TestClient(api_app), "repo": followup_repo}
 
 

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+import services.api.app.main as main_mod
 from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
     answer_pipeline,
@@ -16,6 +17,18 @@ from services.api.app.main import (
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
+
+
+@pytest.fixture(autouse=True)
+def _no_interim(monkeypatch):
+    """Suppress interim ack in all tests in this file.
+
+    These tests cover HITL/escalation/dedup flows. The interim message
+    is tested separately in test_inbound_interim_ack.py; disabling it here
+    keeps call-count assertions stable regardless of which texts happen to
+    match sales-intent phrases.
+    """
+    monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
 
 
 def _wire(tmp_path) -> None:
@@ -252,6 +265,8 @@ def test_inbound_replaying_same_trace_id_does_not_resend_ack_or_create_ticket(
     pairs with the bot_gateway dedup short-circuit — together they make
     triple-ack impossible regardless of which layer the duplicate hits."""
     _wire(tmp_path)
+    import services.api.app.main as main_mod
+    monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
     settings.hitl_primary_operator_username = "@op"
     settings.hitl_primary_operator_chat_id = "555"
     send_mock = AsyncMock(return_value=1)
@@ -292,6 +307,8 @@ def test_inbound_followup_question_coalesces_to_active_ticket(tmp_path, monkeypa
     must NOT re-ack the customer. The operator gets a follow-up DM tagged
     with the existing ticket id."""
     _wire(tmp_path)
+    import services.api.app.main as main_mod
+    monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
     settings.hitl_primary_operator_username = "@op"
     settings.hitl_primary_operator_chat_id = "555"
     send_mock = AsyncMock(return_value=1)
