@@ -1,5 +1,5 @@
 # generated: 2026-05-23
-# last_updated: 2026-05-27
+# last_updated: 2026-05-29
 # project: Semantaix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -40,7 +40,7 @@
 #   13-03 ∥ 13-04 after 13-02; 13-05 after 13-04.
 
 generated: 2026-05-23
-last_updated: 2026-05-27
+last_updated: 2026-05-29
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -105,4 +105,5 @@ development_status:
   12-07-date-proposal-turn: backlog
   12-08-proactive-followup: backlog
   12-09-pipeline-wiring-and-e2e-signoff: in-progress
+  12-10-ask-for-time-when-booking-has-no-time: ready-for-dev
   epic-12-retrospective: optional

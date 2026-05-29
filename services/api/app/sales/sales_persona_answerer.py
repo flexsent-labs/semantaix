@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
@@ -74,6 +74,10 @@ STAGE_AWAITING_OPERATOR_PRICE = "awaiting_operator_price"
 STAGE_PROPOSING = "proposing"
 STAGE_CLOSING = "closing"
 STAGE_DORMANT = "dormant"
+# Story 12.10 — scoping is complete but the booking carries no concrete time and
+# the calendar can actually check it: we ask for the date+time and park here for
+# exactly one turn (the stage itself is the "already asked" marker).
+STAGE_AWAITING_TIME = "awaiting_time"
 
 RESPONSE_MODE_SALES_ESCALATION = "sales_escalation"
 
@@ -111,6 +115,14 @@ SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
 )
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
+# Story 12.10 — asked when scoping is complete but no concrete date+time was
+# given AND the calendar can check it. We ask for date+time TOGETHER (not just
+# the time) because ``intent_merge`` REPLACES the ``dates`` field — a bare
+# follow-up time would otherwise drop a previously-collected date.
+ASK_FOR_TIME_LINE = (
+    "Уточните, пожалуйста, желаемые дату и время — проверю по календарю "
+    "и подтвержу."
+)
 
 # Story 12.05 — equipment-question lemma triggers. Lowercase lemma roots
 # matched against ``RussianNormalizer.lemmas(question)``; any overlap fires
@@ -140,6 +152,7 @@ _HANDLED_STAGES: frozenset[str] = frozenset(
         STAGE_AWAITING_OPERATOR_PRICE,
         STAGE_PROPOSING,
         STAGE_CLOSING,
+        STAGE_AWAITING_TIME,
     }
 )
 # Stages where mid-funnel asides (catalog / concept / price) are intercepted
@@ -186,6 +199,22 @@ _CATALOG_PROMPT_TEMPLATE = _read_prompt(_CATALOG_PROMPT_PATH)
 _CONCEPT_RAG_PROMPT_TEMPLATE = _read_prompt(_CONCEPT_RAG_PROMPT_PATH)
 _PROPOSAL_PROMPT_TEMPLATE = _read_prompt(_PROPOSAL_PROMPT_PATH)
 _PRICING_HIT_PROMPT_TEMPLATE = _read_prompt(_PRICING_HIT_PROMPT_PATH)
+
+
+@dataclass(frozen=True)
+class _CalBookingCtx:
+    """Resolved "this booking is calendar-actionable" context.
+
+    Present only when the project has calendar enabled, a settings row, and
+    EXACTLY ONE active service to anchor the slot duration — the precise
+    precondition shared by ``_check_requested_slot`` (does the requested time
+    fit?) and ``_should_ask_for_time`` (no time given — worth asking?).
+    """
+
+    project_id: int
+    settings: Any
+    project_tz: ZoneInfo
+    service_rule: Any
 
 
 def _format_proposal_date(date_iso: str) -> str:
@@ -482,6 +511,11 @@ class SalesPersonaAnswerer:
                 question=question, ctx=ctx, state=state
             )
 
+        if current_stage == STAGE_AWAITING_TIME:
+            return await self._handle_awaiting_time(
+                question=question, ctx=ctx, state=state
+            )
+
         if current_stage == STAGE_PROPOSING:
             if self._date_proposer is None:
                 return _skip("stage_not_implemented_yet")
@@ -592,18 +626,26 @@ class SalesPersonaAnswerer:
             },
         )
 
-    async def _handle_scoping(
+    async def _extract_and_merge(
         self,
         *,
         question: str,
         ctx: AnswerContext,
         state: dict[str, Any],
-    ) -> AnswerResult:
+        stage_label: str,
+    ) -> tuple[Intent, str, dict[str, Any]] | AnswerResult:
+        """Run the scoping LLM extraction and merge it into the stored intent.
+
+        Returns ``(merged_intent, next_question, extracted_fields)`` on success,
+        or a ``_skip`` ``AnswerResult`` when the LLM response is unusable (schema
+        violation / transport error) so the caller falls through. Shared by the
+        scoping turn and the awaiting-time follow-up — both re-extract the
+        customer's latest message identically.
+        """
         persona = self._persona_getter()
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
         system = _build_scoping_prompt(persona=persona, intent=existing_intent)
         user = f"Сообщение клиента:\n{question}"
-
         try:
             payload = await self._openrouter.complete_json(
                 system=system, user=user
@@ -614,7 +656,7 @@ class SalesPersonaAnswerer:
                 "sales_llm_schema_violation",
                 extra={
                     "trace_id": ctx.trace_id,
-                    "stage": STAGE_SCOPING,
+                    "stage": stage_label,
                     "reason": str(exc),
                 },
             )
@@ -624,13 +666,26 @@ class SalesPersonaAnswerer:
                 "sales_llm_transport_error",
                 extra={
                     "trace_id": ctx.trace_id,
-                    "stage": STAGE_SCOPING,
+                    "stage": stage_label,
                     "error": repr(exc),
                 },
             )
             return _skip("llm_transport_error")
+        return intent_merge(existing_intent, extracted), next_question, extracted
 
-        merged = intent_merge(existing_intent, extracted)
+    async def _handle_scoping(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> AnswerResult:
+        outcome = await self._extract_and_merge(
+            question=question, ctx=ctx, state=state, stage_label=STAGE_SCOPING
+        )
+        if isinstance(outcome, AnswerResult):
+            return outcome
+        merged, next_question, extracted = outcome
         # Not complete → keep scoping: forward the LLM's next-field question.
         if not merged.is_complete():
             await self._persist(
@@ -676,6 +731,36 @@ class SalesPersonaAnswerer:
             dispatch_fallback=dispatch_fallback,
         )
 
+    async def _handle_awaiting_time(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> AnswerResult:
+        """Follow-up after we asked for the date+time (Story 12.10).
+
+        Re-extracts the customer's reply (so a concrete date+time is merged in)
+        and re-runs completion. We already asked once, so ``_complete_booking``
+        does NOT ask again (``stage_before == STAGE_AWAITING_TIME``): a present
+        time runs the slot check (confirm / offer alternative); still no time
+        hands off to a human — never a second ask.
+        """
+        outcome = await self._extract_and_merge(
+            question=question,
+            ctx=ctx,
+            state=state,
+            stage_label=STAGE_AWAITING_TIME,
+        )
+        if isinstance(outcome, AnswerResult):
+            return outcome
+        merged, _next_question, _extracted = outcome
+        return await self._complete_booking(
+            ctx=ctx,
+            intent=merged,
+            stage_before=STAGE_AWAITING_TIME,
+        )
+
     async def _handle_pitching(
         self,
         *,
@@ -719,6 +804,19 @@ class SalesPersonaAnswerer:
             off with the generic completion line (a human picks up).
         """
         base_metadata = base_metadata or {}
+        # Story 12.10 — no concrete time yet, but the calendar can check one:
+        # ask for date+time instead of a blind hand off. Bounded to one ask —
+        # the follow-up arrives with stage_before == STAGE_AWAITING_TIME.
+        if stage_before != STAGE_AWAITING_TIME and await self._should_ask_for_time(
+            ctx=ctx, intent=intent
+        ):
+            return await self._ask_for_time(
+                ctx=ctx,
+                intent=intent,
+                stage_before=stage_before,
+                base_metadata=base_metadata,
+                dispatch_fallback=dispatch_fallback,
+            )
         requested = await self._check_requested_slot(ctx=ctx, intent=intent)
         if requested is not None and requested.status == STATUS_UNAVAILABLE:
             return await self._propose_alternative_or_handoff(
@@ -739,15 +837,57 @@ class SalesPersonaAnswerer:
             dispatch_fallback=dispatch_fallback,
         )
 
-    async def _check_requested_slot(
-        self, *, ctx: AnswerContext, intent: Intent
-    ) -> Any | None:
-        """Validate the customer's concrete requested time, or ``None``.
+    async def _ask_for_time(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        stage_before: str,
+        base_metadata: dict[str, Any],
+        dispatch_fallback: bool,
+    ) -> AnswerResult:
+        """Ask the customer for the desired date+time; park in awaiting_time.
 
-        Returns ``None`` (→ plain hand off) whenever the calendar cannot give a
-        confident verdict: calendar wired-off / disabled, no parseable
-        date+time in ``intent.dates``, or no single active service to anchor the
-        duration. Otherwise returns a ``RequestedAvailability``.
+        A plain handled reply (no escalation / HITL ticket). The stage
+        transition is what bounds the ask to a single round.
+        """
+        text = ASK_FOR_TIME_LINE
+        if dispatch_fallback:
+            text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_AWAITING_TIME, intent=intent
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": STAGE_AWAITING_TIME,
+                "sales_turn_kind": "awaiting_time_prompt",
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_AWAITING_TIME,
+                "sales_turn_kind": "awaiting_time_prompt",
+                **base_metadata,
+            },
+        )
+
+    async def _calendar_booking_context(
+        self, *, ctx: AnswerContext
+    ) -> _CalBookingCtx | None:
+        """Resolve the calendar-actionable context, or ``None``.
+
+        ``None`` whenever the booking cannot be checked against the calendar:
+        no calendar repo / project, calendar disabled, no settings row, or not
+        exactly one active service to anchor the slot duration. Shared by
+        ``_check_requested_slot`` and ``_should_ask_for_time`` so the gate never
+        drifts between them.
         """
         if self._calendar_settings_repo is None or ctx.project_id is None:
             return None
@@ -762,38 +902,80 @@ class SalesPersonaAnswerer:
         )
         if settings is None:
             return None
-        project_tz = ZoneInfo(settings.project_timezone)
-        dates_text = intent.dates if isinstance(intent.dates, str) else None
-        if not dates_text:
-            return None
-        requested_start = extract_requested_start(
-            text=dates_text, now=ctx.now, project_tz=project_tz
-        )
-        if requested_start is None:
-            return None
         rules = await asyncio.to_thread(
             self._calendar_settings_repo.list_service_rules, project_id
         )
         active = [rule for rule in rules if getattr(rule, "name", None)]
         if len(active) != 1:
             return None
-        operator = settings.calendar_operator
+        return _CalBookingCtx(
+            project_id=project_id,
+            settings=settings,
+            project_tz=ZoneInfo(settings.project_timezone),
+            service_rule=active[0],
+        )
+
+    async def _should_ask_for_time(
+        self, *, ctx: AnswerContext, intent: Intent
+    ) -> bool:
+        """True iff the booking is calendar-actionable but has no concrete time.
+
+        Exactly the case where asking for a date+time is worthwhile: calendar
+        enabled with one anchoring service, yet ``intent.dates`` carries no
+        parseable date+time. When the calendar can't check (disabled / no single
+        service / no project) we return False and the caller hands off as before.
+        """
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return False
+        dates_text = intent.dates if isinstance(intent.dates, str) else None
+        requested_start = (
+            extract_requested_start(
+                text=dates_text, now=ctx.now, project_tz=cal.project_tz
+            )
+            if dates_text
+            else None
+        )
+        return requested_start is None
+
+    async def _check_requested_slot(
+        self, *, ctx: AnswerContext, intent: Intent
+    ) -> Any | None:
+        """Validate the customer's concrete requested time, or ``None``.
+
+        Returns ``None`` (→ plain hand off) whenever the calendar cannot give a
+        confident verdict: calendar wired-off / disabled / no single active
+        service, or no parseable date+time in ``intent.dates``. Otherwise
+        returns a ``RequestedAvailability``.
+        """
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        dates_text = intent.dates if isinstance(intent.dates, str) else None
+        if not dates_text:
+            return None
+        requested_start = extract_requested_start(
+            text=dates_text, now=ctx.now, project_tz=cal.project_tz
+        )
+        if requested_start is None:
+            return None
+        operator = cal.settings.calendar_operator
         operator_chat_id = (
             self._operator_chat_resolver(operator)
             if operator and self._operator_chat_resolver is not None
             else None
         )
         return await check_requested_availability(
-            project_id=project_id,
+            project_id=cal.project_id,
             requested_start=requested_start,
             operator=operator,
             operator_chat_id=operator_chat_id,
-            service_rule=active[0],
+            service_rule=cal.service_rule,
             token_provider=self._calendar_token_provider,
             freebusy_client=self._calendar_freebusy_client,
             now=ctx.now,
-            project_tz=project_tz,
-            lookahead_days=settings.lookahead_days,
+            project_tz=cal.project_tz,
+            lookahead_days=cal.settings.lookahead_days,
             country_code=ctx.country_code,
             trace_id=ctx.trace_id,
         )
