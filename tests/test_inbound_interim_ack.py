@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
+    _effective_inbound_interim_delay,
     _effective_inbound_interim_message,
     _should_send_interim,
     answer_pipeline,
@@ -100,6 +101,33 @@ def test_effective_inbound_interim_message_returns_settings_default(tmp_path, mo
     assert _effective_inbound_interim_message() == "Тестовое сообщение"
 
 
+def test_effective_inbound_interim_delay_runtime_override(tmp_path, monkeypatch):
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    hitl_ticket_repository.set_runtime_config(
+        key="inbound_interim_delay_seconds", value="1.5", updated_by="@t"
+    )
+    try:
+        assert _effective_inbound_interim_delay() == 1.5
+    finally:
+        hitl_ticket_repository.set_runtime_config(
+            key="inbound_interim_delay_seconds", value="", updated_by="@t"
+        )
+
+
+def test_effective_inbound_interim_delay_invalid_falls_back(tmp_path, monkeypatch):
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    hitl_ticket_repository.set_runtime_config(
+        key="inbound_interim_delay_seconds", value="не число", updated_by="@t"
+    )
+    monkeypatch.setattr(settings, "inbound_interim_delay_seconds", 3.0)
+    try:
+        assert _effective_inbound_interim_delay() == 3.0
+    finally:
+        hitl_ticket_repository.set_runtime_config(
+            key="inbound_interim_delay_seconds", value="", updated_by="@t"
+        )
+
+
 def test_effective_inbound_interim_message_runtime_config_overrides(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     hitl_ticket_repository.set_runtime_config(
@@ -119,7 +147,9 @@ def test_effective_inbound_interim_message_runtime_config_overrides(tmp_path, mo
 # ---------------------------------------------------------------------------
 
 
-def test_interim_sent_before_pipeline_for_sales_intent(tmp_path, monkeypatch):
+def test_interim_sent_when_pipeline_is_slow(tmp_path, monkeypatch):
+    # Story 12.13 — eligible message whose pipeline exceeds the delay → the
+    # interim ack is sent, then the real answer.
     _wire(tmp_path)
     send_calls: list[tuple] = []
 
@@ -129,14 +159,19 @@ def test_interim_sent_before_pipeline_for_sales_intent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(telegram_bot_sender, "send_message", _fake_send)
     monkeypatch.setattr(settings, "inbound_interim_message", "Проверяю…")
-    # Simulate sales intent detected
+    monkeypatch.setattr(settings, "inbound_interim_delay_seconds", 0.02)
     import services.api.app.main as main_mod
     monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: True)
 
-    _stub_pipeline(
-        monkeypatch,
-        AnswerResult(handled=True, text="Слот свободен!", response_mode="sales_booking"),
-    )
+    async def _slow_run(**_kwargs):
+        import asyncio
+
+        await asyncio.sleep(0.15)
+        return AnswerResult(
+            handled=True, text="Слот свободен!", response_mode="sales_booking"
+        )
+
+    monkeypatch.setattr(answer_pipeline, "run", _slow_run)
 
     client = TestClient(api_app)
     resp = client.post(
@@ -145,10 +180,37 @@ def test_interim_sent_before_pipeline_for_sales_intent(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["delivered"] is True
-    # Interim is first, final answer is second
     assert len(send_calls) == 2
     assert send_calls[0] == (777, "Проверяю…")
     assert send_calls[1][1] == "Слот свободен!"
+
+
+def test_interim_not_sent_when_pipeline_is_fast(tmp_path, monkeypatch):
+    # Story 12.13 — eligible but fast (returns within the delay) → no interim.
+    _wire(tmp_path)
+    send_calls: list[tuple] = []
+
+    async def _fake_send(*, chat_id: int, text: str) -> int:
+        send_calls.append((chat_id, text))
+        return len(send_calls)
+
+    monkeypatch.setattr(telegram_bot_sender, "send_message", _fake_send)
+    monkeypatch.setattr(settings, "inbound_interim_delay_seconds", 5.0)
+    import services.api.app.main as main_mod
+    monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: True)
+    _stub_pipeline(
+        monkeypatch,
+        AnswerResult(handled=True, text="Готово!", response_mode="sales_booking"),
+    )
+
+    client = TestClient(api_app)
+    resp = client.post(
+        "/conversations/inbound",
+        json={"text": "хочу забронировать багги", "chat_id": 777},
+    )
+    assert resp.status_code == 200
+    assert len(send_calls) == 1  # only the real answer — no "минуточку"
+    assert send_calls[0][1] == "Готово!"
 
 
 def test_interim_not_sent_for_non_sales_message(tmp_path, monkeypatch):

@@ -37,12 +37,20 @@ class Intent:
     difficulty: str | int | None = None
     drivers: str | int | None = None
 
-    def missing_fields(self) -> list[str]:
-        """Field names whose value is still ``None``, in canonical order."""
-        return [name for name in _FIELD_NAMES if getattr(self, name) is None]
+    def missing_fields(
+        self, required: tuple[str, ...] | None = None
+    ) -> list[str]:
+        """Required field names whose value is still ``None``, in order.
 
-    def is_complete(self) -> bool:
-        return not self.missing_fields()
+        ``required`` (Story 12.12) scopes completeness to a configured subset
+        (e.g. drop ``drivers``/``difficulty`` for a plain rental). ``None``
+        keeps the legacy behaviour — all five fields.
+        """
+        names = required if required is not None else _FIELD_NAMES
+        return [name for name in names if getattr(self, name) is None]
+
+    def is_complete(self, required: tuple[str, ...] | None = None) -> bool:
+        return not self.missing_fields(required)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

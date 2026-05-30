@@ -52,7 +52,8 @@ from services.api.app.sales.date_proposer import (
     NoProposal,
     Proposal,
 )
-from services.api.app.sales.intent import Intent, intent_merge
+from services.api.app.sales.decline import is_decline
+from services.api.app.sales.intent import _FIELD_NAMES, Intent, intent_merge
 from services.api.app.sales.price_lookup import (
     PriceFound,
     PriceMissing,
@@ -115,6 +116,21 @@ SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
 )
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
+# Story 12.11 — when the customer declines the field just asked ("не нужно",
+# "0", "без водителей"), record this sentinel so the funnel advances instead of
+# re-asking forever. Non-None → satisfies completeness; reads cleanly in the
+# operator's booking summary ("drivers: не требуется").
+SCOPING_DECLINED_SENTINEL = "не требуется"
+# Deterministic fallback questions used only when a decline auto-fills a
+# non-final field and we must ask the NEXT one (the LLM's question was for the
+# field we just filled). Mirrors the scoping field order.
+_SCOPING_FIELD_QUESTIONS: dict[str, str] = {
+    "dates": "На какую дату планируете?",
+    "headcount": "Сколько человек поедет?",
+    "vehicle_count": "Сколько багги нужно?",
+    "difficulty": "Какой сложности маршрут предпочитаете?",
+    "drivers": "Сколько нужно водителей?",
+}
 # Story 12.10 — asked when scoping is complete but no concrete date+time was
 # given AND the calendar can check it. We ask for date+time TOGETHER (not just
 # the time) because ``intent_merge`` REPLACES the ``dates`` field — a bare
@@ -353,8 +369,10 @@ def _format_known_fields(intent: Intent) -> str:
     return "\n".join(items) if items else "(пока ничего)"
 
 
-def _format_missing_fields(intent: Intent) -> str:
-    missing = intent.missing_fields()
+def _format_missing_fields(
+    intent: Intent, required: tuple[str, ...] | None = None
+) -> str:
+    missing = intent.missing_fields(required)
     return "\n".join(f"- {name}" for name in missing) if missing else "(все собраны)"
 
 
@@ -409,11 +427,13 @@ def _build_greeting_prompt() -> str:
     return _GREETING_PROMPT_TEMPLATE.format()
 
 
-def _build_scoping_prompt(*, persona: str, intent: Intent) -> str:
+def _build_scoping_prompt(
+    *, persona: str, intent: Intent, required: tuple[str, ...] | None = None
+) -> str:
     return _SCOPING_PROMPT_TEMPLATE.format(
         persona=persona,
         known_fields=_format_known_fields(intent),
-        missing_fields=_format_missing_fields(intent),
+        missing_fields=_format_missing_fields(intent, required),
     )
 
 
@@ -440,7 +460,9 @@ class SalesPersonaAnswerer:
         calendar_token_provider: Any | None = None,
         calendar_freebusy_client: Any | None = None,
         operator_chat_resolver: Callable[[str], int | None] | None = None,
+        scoping_required_fields_getter: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
+        self._required_fields_getter = scoping_required_fields_getter
         self._state_repo = state_repo
         self._services_repo = services_repo
         self._openrouter = openrouter
@@ -458,6 +480,17 @@ class SalesPersonaAnswerer:
         self._calendar_token_provider = calendar_token_provider
         self._calendar_freebusy_client = calendar_freebusy_client
         self._operator_chat_resolver = operator_chat_resolver
+
+    def _required_fields(self) -> tuple[str, ...]:
+        """The scoping fields that must be collected (Story 12.12).
+
+        Resolved per turn from the injected getter (runtime-config driven);
+        falls back to all five when unset, and to all five if the getter ever
+        returns an empty tuple, so the funnel never has nothing to ask.
+        """
+        if self._required_fields_getter is None:
+            return _FIELD_NAMES
+        return tuple(self._required_fields_getter()) or _FIELD_NAMES
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -633,6 +666,7 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         state: dict[str, Any],
         stage_label: str,
+        required: tuple[str, ...] | None = None,
     ) -> tuple[Intent, str, dict[str, Any]] | AnswerResult:
         """Run the scoping LLM extraction and merge it into the stored intent.
 
@@ -644,7 +678,9 @@ class SalesPersonaAnswerer:
         """
         persona = self._persona_getter()
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
-        system = _build_scoping_prompt(persona=persona, intent=existing_intent)
+        system = _build_scoping_prompt(
+            persona=persona, intent=existing_intent, required=required
+        )
         user = f"Сообщение клиента:\n{question}"
         try:
             payload = await self._openrouter.complete_json(
@@ -680,14 +716,36 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         state: dict[str, Any],
     ) -> AnswerResult:
+        required = self._required_fields()
         outcome = await self._extract_and_merge(
-            question=question, ctx=ctx, state=state, stage_label=STAGE_SCOPING
+            question=question,
+            ctx=ctx,
+            state=state,
+            stage_label=STAGE_SCOPING,
+            required=required,
         )
         if isinstance(outcome, AnswerResult):
             return outcome
         merged, next_question, extracted = outcome
-        # Not complete → keep scoping: forward the LLM's next-field question.
-        if not merged.is_complete():
+        # Story 12.11 — the customer declined the field just asked ("не нужно",
+        # "0", "без водителей"). The declined field is the topmost-missing one
+        # (a decline fills nothing), so record a sentinel for it and advance
+        # instead of re-asking forever. If that completes scoping we fall
+        # through to the completion path; otherwise we ask the NEXT field with a
+        # deterministic question (the LLM's was for the field we just filled).
+        if not merged.is_complete(required) and is_decline(
+            question, normalizer=self._normalizer
+        ):
+            declined_field = merged.missing_fields(required)[0]
+            merged = replace(
+                merged, **{declined_field: SCOPING_DECLINED_SENTINEL}
+            )
+            if not merged.is_complete(required):
+                next_question = _SCOPING_FIELD_QUESTIONS[
+                    merged.missing_fields(required)[0]
+                ]
+        # Not complete → keep scoping: forward the next-field question.
+        if not merged.is_complete(required):
             await self._persist(
                 ctx=ctx, current_stage=STAGE_SCOPING, intent=merged
             )
@@ -751,6 +809,7 @@ class SalesPersonaAnswerer:
             ctx=ctx,
             state=state,
             stage_label=STAGE_AWAITING_TIME,
+            required=self._required_fields(),
         )
         if isinstance(outcome, AnswerResult):
             return outcome
