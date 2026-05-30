@@ -1,15 +1,22 @@
-"""Typed sales `Intent` + merge helper (Epic 12, Story 12.03).
+"""Typed sales `Intent` + merge helper (Epic 12, Story 12.03 / 12.15).
 
-`Intent` is a frozen dataclass with exactly the five fields the Дарья
-dialog establishes during scoping. `intent_merge` is the only helper that
-mutates an `Intent` shape — callers feed it the LLM's `extracted_fields`
-dict and get back a new `Intent` with absent / `None` values ignored, so
-the merge never propagates `None` over a populated field.
+`Intent` collects the fields a sales conversation establishes during scoping.
+The five transfer fields (dates, headcount, vehicle_count, difficulty, drivers)
+are first-class attributes for back-compat and for the consumers that read them
+by name (calendar reads ``dates``; the material selector reads ``difficulty``).
+A per-service anketa (Story 12.15) may collect OTHER keys — those live in the
+``extra`` map and round-trip through state alongside the legacy five.
+
+`intent_merge` is the only helper that folds the LLM's ``extracted_fields`` dict
+into an `Intent`: absent / ``None`` values are ignored (never clobber a populated
+field), and — when an ``allowed`` key set is given — only those keys are taken,
+so a custom schema admits its own fields without letting stray keys leak in.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 _FIELD_NAMES: tuple[str, ...] = (
@@ -23,12 +30,12 @@ _FIELD_NAMES: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class Intent:
-    """Five typed fields collected during scoping.
+    """Collected scoping fields — the five typed transfer fields plus ``extra``.
 
     Each value is ``str | int | None`` per the schema in story 12.01. The
     answerer accepts whichever shape the LLM produced (Russian free-form
     strings for dates / drivers; ints for headcount / vehicle_count;
-    short tags for difficulty).
+    short tags for difficulty). Custom per-service fields land in ``extra``.
     """
 
     dates: str | int | None = None
@@ -36,57 +43,86 @@ class Intent:
     vehicle_count: str | int | None = None
     difficulty: str | int | None = None
     drivers: str | int | None = None
+    # Story 12.15 — arbitrary per-service fields, keyed by their schema key.
+    # Excluded from __hash__ (a dict is unhashable) but kept in equality so
+    # state round-trips compare correctly.
+    extra: dict[str, str | int | None] = field(default_factory=dict, hash=False)
+
+    def get(self, name: str) -> str | int | None:
+        """Value for any field — legacy attribute or custom ``extra`` key."""
+        if name in _FIELD_NAMES:
+            return getattr(self, name)
+        return self.extra.get(name)
+
+    def with_field(self, name: str, value: str | int | None) -> Intent:
+        """Return a new Intent with one field set (legacy or custom)."""
+        if name in _FIELD_NAMES:
+            return replace(self, **{name: value})
+        return replace(self, extra={**self.extra, name: value})
 
     def missing_fields(
-        self, required: tuple[str, ...] | None = None
+        self, required: Iterable[str] | None = None
     ) -> list[str]:
         """Required field names whose value is still ``None``, in order.
 
-        ``required`` (Story 12.12) scopes completeness to a configured subset
-        (e.g. drop ``drivers``/``difficulty`` for a plain rental). ``None``
-        keeps the legacy behaviour — all five fields.
+        ``required`` (Story 12.12 / 12.15) scopes completeness to a configured
+        field set (the active anketa). ``None`` keeps the legacy behaviour —
+        all five transfer fields.
         """
-        names = required if required is not None else _FIELD_NAMES
-        return [name for name in names if getattr(self, name) is None]
+        names = tuple(required) if required is not None else _FIELD_NAMES
+        return [name for name in names if self.get(name) is None]
 
-    def is_complete(self, required: tuple[str, ...] | None = None) -> bool:
+    def is_complete(self, required: Iterable[str] | None = None) -> bool:
         return not self.missing_fields(required)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data: dict[str, Any] = {
+            name: getattr(self, name) for name in _FIELD_NAMES
+        }
+        data.update(self.extra)
+        return data
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> Intent:
+    def from_dict(cls, payload: Mapping[str, Any]) -> Intent:
         """Build an Intent from a dict (e.g. JSON-decoded state row).
 
-        Unknown keys are silently ignored — the wire format only carries
-        the canonical five fields, but tests and migrations may include
-        extras.
+        Canonical five keys become attributes; every other key is retained in
+        ``extra`` (Story 12.15 — custom per-service fields survive a round-trip).
         """
-        kwargs = {
+        legacy = {
             name: payload.get(name)
             for name in _FIELD_NAMES
             if name in payload
         }
-        return cls(**kwargs)
+        extra = {
+            key: value
+            for key, value in payload.items()
+            if key not in _FIELD_NAMES
+        }
+        return cls(**legacy, extra=extra)
 
 
-def intent_merge(existing: Intent, extracted: dict[str, Any]) -> Intent:
+def intent_merge(
+    existing: Intent,
+    extracted: Mapping[str, Any],
+    *,
+    allowed: Iterable[str] | None = None,
+) -> Intent:
     """Return a new Intent with extracted fields merged in.
 
     Rules:
-      * Unknown keys are ignored.
-      * `None` values are ignored (never overwrite a populated field).
+      * Only keys in ``allowed`` are considered; ``None`` defaults to the
+        canonical five (back-compat — stray keys are ignored).
+      * ``None`` values are ignored (never overwrite a populated field).
       * Explicit non-None values replace the existing field.
     """
-    updates: dict[str, Any] = {}
-    for name in _FIELD_NAMES:
+    keys = tuple(allowed) if allowed is not None else _FIELD_NAMES
+    result = existing
+    for name in keys:
         if name not in extracted:
             continue
         value = extracted[name]
         if value is None:
             continue
-        updates[name] = value
-    if not updates:
-        return existing
-    return replace(existing, **updates)
+        result = result.with_field(name, value)
+    return result

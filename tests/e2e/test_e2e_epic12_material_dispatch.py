@@ -159,15 +159,26 @@ def stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(
         api_main.sales_followup_repository, "db_path", str(paths["sales_db"])
     )
+    monkeypatch.setattr(
+        api_main.scoping_schema_repository, "db_path", str(paths["sales_db"])
+    )
     # Re-init schema on the fresh sales DB so the round-trip writes/reads work.
     from services.api.app.sales.client_materials_repository import (
         init_schema as init_cm_schema,
+    )
+    from services.api.app.sales.scoping_schema_repository import (
+        init_schema as init_scoping_schema,
+    )
+    from services.api.app.sales.services_repository import (
+        init_schema as init_services_schema,
     )
     from services.api.app.sales.state_repository import (
         init_schema as init_state_schema,
     )
 
     init_cm_schema(str(paths["sales_db"]))
+    init_scoping_schema(str(paths["sales_db"]))
+    init_services_schema(str(paths["sales_db"]))
     init_state_schema(str(paths["sales_db"]))
 
     # Spy sender on the api side. The in-process dispatcher reads
