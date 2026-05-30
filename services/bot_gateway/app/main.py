@@ -12,7 +12,14 @@ from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.projects import ProjectRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.scoping_schema import SCHEMA_PRESETS
+from services.api.app.sales.scoping_schema_repository import (
+    PROJECT_DEFAULT_SERVICE_ID,
+    ScopingSchemaRepository,
+)
+from services.api.app.sales.services_repository import ServicesRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
 from services.bot_gateway.app.admin_nl_dialog import handle_admin_nl_dialog
@@ -67,6 +74,11 @@ app = create_service_app("bot_gateway")
 logger = logging.getLogger(__name__)
 settings = get_settings()
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
+# Story 12.18 — shared sales DBs (same SQLite files as the api) so the
+# `/scoping` admin command writes anketas the api reads at request time.
+_scoping_schema_repository = ScopingSchemaRepository(db_path=settings.sales_db_path)
+_sales_services_repository = ServicesRepository(db_path=settings.sales_db_path)
+_project_repository = ProjectRepository(db_path=settings.projects_db_path)
 kb_session_repository = OperatorKbSessionRepository(settings.hitl_ticket_db_path)
 operator_file_repository = OperatorFileRepository(settings.operator_files_db_path)
 media_group_buffer = MediaGroupBuffer(settings.hitl_ticket_db_path)
@@ -162,6 +174,8 @@ _HELP_TEXT = (
     "⚙️ Маршрутизация HITL (админ)\n"
     "• /hitl_config @username chat_id — назначить оператора "
     "и чат для алертов.\n"
+    "• /scoping <услуга|default> <transfer|consultation> — набор вопросов "
+    "анкеты для услуги или проекта (админ).\n"
     "\n"
     "📅 Календарь\n"
     "• /connect_calendar — подключить свой календарь "
@@ -185,6 +199,47 @@ def _effective_operator_username() -> str:
         hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
         or settings.hitl_primary_operator_username
     )
+
+
+def _handle_admin_scoping_command(
+    *, username: str | None, text: str
+) -> dict[str, str] | None:
+    """Story 12.18 — set a service's (or the project-default) scoping anketa.
+
+    ``/scoping <услуга|default> <transfer|consultation>`` — admin only. Applies
+    a built-in preset to the named service of the default project, or to the
+    project-wide default when the target is ``default`` (multi-word service
+    names are supported — the last token is the preset).
+    """
+    if not text.startswith("/scoping"):
+        return None
+    if username != settings.hitl_config_admin_username:
+        return {"status": "ignored", "reason": "unauthorized_scoping"}
+    parts = text.split()
+    if len(parts) < 3:
+        return {"status": "ignored", "reason": "invalid_scoping_format"}
+    preset_name = parts[-1]
+    target = " ".join(parts[1:-1])
+    schema = SCHEMA_PRESETS.get(preset_name)
+    if schema is None:
+        return {"status": "ignored", "reason": "unknown_preset"}
+    project_id = _project_repository.ensure_default_project().id
+    if target.lower() == "default":
+        service_id = PROJECT_DEFAULT_SERVICE_ID
+    else:
+        service = _sales_services_repository.get_by_name(
+            project_id=project_id, name=target
+        )
+        if service is None:
+            return {"status": "ignored", "reason": "unknown_service"}
+        service_id = service.id
+    _scoping_schema_repository.set_schema(
+        project_id=project_id,
+        service_id=service_id,
+        schema=schema,
+        updated_by=username or "",
+    )
+    return {"status": "configured", "scope": target, "preset": preset_name}
 
 
 def _handle_admin_hitl_command(*, username: str | None, text: str) -> dict[str, str] | None:
@@ -2401,6 +2456,15 @@ async def _process_telegram_update(
     if admin_command_result is not None:
         response = {"trace_id": trace_id}
         response.update(admin_command_result)
+        return response
+
+    scoping_command_result = _handle_admin_scoping_command(
+        username=normalized.username,
+        text=normalized.text,
+    )
+    if scoping_command_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(scoping_command_result)
         return response
 
     calendar_command_result = await handle_calendar_command(

@@ -98,9 +98,12 @@ def test_intent_to_dict_round_trip() -> None:
     assert Intent.from_dict(payload) == intent
 
 
-def test_intent_from_dict_ignores_unknown_keys() -> None:
-    intent = Intent.from_dict({"dates": "1 мая", "extraneous": "x"})
-    assert intent == Intent(dates="1 мая")
+def test_intent_from_dict_retains_custom_keys() -> None:
+    # Story 12.15 — per-service custom fields survive the round-trip via `extra`
+    # (the canonical five still map to attributes).
+    intent = Intent.from_dict({"dates": "1 мая", "topic": "ипотека"})
+    assert intent.dates == "1 мая"
+    assert intent.get("topic") == "ипотека"
 
 
 def test_intent_from_dict_with_none_values_round_trips() -> None:

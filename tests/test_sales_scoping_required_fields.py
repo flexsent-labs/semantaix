@@ -10,7 +10,10 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.main import (
     _effective_scoping_required_fields,
+    _effective_scoping_schema,
     hitl_ticket_repository,
+    sales_services_repository,
+    scoping_schema_repository,
     settings,
 )
 from services.api.app.russian_text import get_russian_normalizer
@@ -18,6 +21,17 @@ from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     SCOPING_COMPLETE_HANDOFF_LINE,
     SalesPersonaAnswerer,
+)
+from services.api.app.sales.scoping_schema import (
+    TRANSFER_SCHEMA,
+    ScopingField,
+    ScopingSchema,
+)
+from services.api.app.sales.scoping_schema_repository import (
+    PROJECT_DEFAULT_SERVICE_ID,
+)
+from services.api.app.sales.scoping_schema_repository import (
+    init_schema as init_scoping_schema,
 )
 
 _NOW = datetime(2026, 5, 30, 9, 0, tzinfo=UTC)
@@ -74,6 +88,46 @@ def test_resolver_all_invalid_falls_back_to_all_five(tmp_path, monkeypatch) -> N
     assert _effective_scoping_required_fields() == (
         "dates", "headcount", "vehicle_count", "difficulty", "drivers"
     )
+
+
+# --- _effective_scoping_schema (Story 12.16) --------------------------------
+
+
+def _schema_ctx(project_id: int | None) -> AnswerContext:
+    return AnswerContext(
+        chat_id=7, customer_username="@a", trace_id="t",
+        now=_NOW, project_id=project_id,
+    )
+
+
+def test_effective_schema_without_project_uses_narrowed_transfer(
+    tmp_path, monkeypatch
+) -> None:
+    _wire_hitl(tmp_path)
+    monkeypatch.setattr(settings, "scoping_required_fields", "dates,headcount")
+    schema = _effective_scoping_schema(_schema_ctx(None))
+    assert schema.required_keys() == ("dates", "headcount")
+    assert schema.keys() == TRANSFER_SCHEMA.keys()
+
+
+def test_effective_schema_returns_configured_project_default(
+    tmp_path, monkeypatch
+) -> None:
+    scoping_schema_repository.db_path = str(tmp_path / "sch.db")
+    init_scoping_schema(scoping_schema_repository.db_path)
+    custom = ScopingSchema(
+        (ScopingField("dates", "Когда?"), ScopingField("topic", "Тема?"))
+    )
+    scoping_schema_repository.set_schema(
+        project_id=1,
+        service_id=PROJECT_DEFAULT_SERVICE_ID,
+        schema=custom,
+        updated_by="@t",
+    )
+    monkeypatch.setattr(
+        sales_services_repository, "list_for_project", lambda *, project_id: []
+    )
+    assert _effective_scoping_schema(_schema_ctx(1)) == custom
 
 
 # --- answerer honours the configured set ------------------------------------

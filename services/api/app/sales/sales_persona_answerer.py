@@ -60,6 +60,10 @@ from services.api.app.sales.price_lookup import (
     extract_price_tokens,
 )
 from services.api.app.sales.russian_sales_intent import is_sales_intent
+from services.api.app.sales.scoping_schema import (
+    TRANSFER_SCHEMA,
+    ScopingSchema,
+)
 from services.api.app.sales.turn_intent import classify_turn
 
 logger = logging.getLogger(__name__)
@@ -121,16 +125,9 @@ SLOT_BUSY_LINE = "К сожалению, это время уже занято."
 # re-asking forever. Non-None → satisfies completeness; reads cleanly in the
 # operator's booking summary ("drivers: не требуется").
 SCOPING_DECLINED_SENTINEL = "не требуется"
-# Deterministic fallback questions used only when a decline auto-fills a
-# non-final field and we must ask the NEXT one (the LLM's question was for the
-# field we just filled). Mirrors the scoping field order.
-_SCOPING_FIELD_QUESTIONS: dict[str, str] = {
-    "dates": "На какую дату планируете?",
-    "headcount": "Сколько человек поедет?",
-    "vehicle_count": "Сколько багги нужно?",
-    "difficulty": "Какой сложности маршрут предпочитаете?",
-    "drivers": "Сколько нужно водителей?",
-}
+# Story 12.15 — the deterministic fallback questions and the numeric-field set
+# now come from the active `ScopingSchema` (`question_for` / `numeric_keys`), so
+# a per-service anketa drives them instead of these hardcoded transfer fields.
 # Story 12.10 — asked when scoping is complete but no concrete date+time was
 # given AND the calendar can check it. We ask for date+time TOGETHER (not just
 # the time) because ``intent_merge`` REPLACES the ``dates`` field — a bare
@@ -369,11 +366,13 @@ def _format_known_fields(intent: Intent) -> str:
     return "\n".join(items) if items else "(пока ничего)"
 
 
-def _format_missing_fields(
-    intent: Intent, required: tuple[str, ...] | None = None
-) -> str:
-    missing = intent.missing_fields(required)
-    return "\n".join(f"- {name}" for name in missing) if missing else "(все собраны)"
+def _format_missing_fields(intent: Intent, schema: ScopingSchema) -> str:
+    """Missing required fields, each annotated with its question so the LLM
+    knows what a bare key like ``topic`` means for a custom anketa."""
+    missing = intent.missing_fields(schema.required_keys())
+    if not missing:
+        return "(все собраны)"
+    return "\n".join(f"- {key}: {schema.question_for(key)}" for key in missing)
 
 
 def _format_intent_summary(intent: Intent) -> str:
@@ -427,13 +426,64 @@ def _build_greeting_prompt() -> str:
     return _GREETING_PROMPT_TEMPLATE.format()
 
 
+def _parse_count(text: str) -> int | None:
+    """Story 12.14 — the count in a terse reply ("1" → 1, "троих" → None).
+
+    Only digits are bound here; "0" is caught upstream by the decline path, and
+    word-numerals stay the LLM's job (Layer A). Returns ``None`` when the reply
+    carries no digit so the caller leaves the field unbound.
+    """
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else None
+
+
+def _format_pending_instruction(
+    intent: Intent, required: tuple[str, ...] | None = None
+) -> str:
+    """Story 12.14 — name the field the customer is answering this turn.
+
+    The stateless extractor otherwise sees only the bare reply ("1") and, told
+    not to invent values, drops it — so the funnel re-asks the same field
+    forever. Naming the top-missing field lets the LLM bind a terse value.
+    Empty string when nothing is missing (the awaiting-time follow-up reuses
+    this prompt with a complete intent).
+    """
+    missing = intent.missing_fields(required)
+    if not missing:
+        return ""
+    pending = missing[0]
+    return (
+        f"Клиент сейчас отвечает на вопрос о поле «{pending}». Если его реплика — "
+        f"это значение для этого поля (например, просто число «1» или «2»), "
+        f'обязательно запиши его в extracted_fields["{pending}"].'
+    )
+
+
+def _format_extracted_fields_spec(schema: ScopingSchema) -> str:
+    """Generate the ``extracted_fields`` JSON keys block from the schema, so the
+    LLM extracts exactly the active anketa's fields (number vs string typed)."""
+    lines = []
+    for field in schema.fields:
+        placeholder = (
+            "<число или опусти ключ>"
+            if field.kind == "number"
+            else '"<строка или опусти ключ>"'
+        )
+        lines.append(f'    "{field.key}": {placeholder}')
+    return ",\n".join(lines)
+
+
 def _build_scoping_prompt(
-    *, persona: str, intent: Intent, required: tuple[str, ...] | None = None
+    *, persona: str, intent: Intent, schema: ScopingSchema
 ) -> str:
     return _SCOPING_PROMPT_TEMPLATE.format(
         persona=persona,
         known_fields=_format_known_fields(intent),
-        missing_fields=_format_missing_fields(intent, required),
+        missing_fields=_format_missing_fields(intent, schema),
+        pending_instruction=_format_pending_instruction(
+            intent, schema.required_keys()
+        ),
+        extracted_fields_spec=_format_extracted_fields_spec(schema),
     )
 
 
@@ -461,8 +511,10 @@ class SalesPersonaAnswerer:
         calendar_freebusy_client: Any | None = None,
         operator_chat_resolver: Callable[[str], int | None] | None = None,
         scoping_required_fields_getter: Callable[[], tuple[str, ...]] | None = None,
+        scoping_schema_getter: Callable[[AnswerContext], ScopingSchema] | None = None,
     ) -> None:
         self._required_fields_getter = scoping_required_fields_getter
+        self._schema_getter = scoping_schema_getter
         self._state_repo = state_repo
         self._services_repo = services_repo
         self._openrouter = openrouter
@@ -491,6 +543,17 @@ class SalesPersonaAnswerer:
         if self._required_fields_getter is None:
             return _FIELD_NAMES
         return tuple(self._required_fields_getter()) or _FIELD_NAMES
+
+    def _resolve_schema(self, ctx: AnswerContext) -> ScopingSchema:
+        """The anketa for this turn (Story 12.15).
+
+        A per-service schema getter wins when wired (Story 12.16); otherwise the
+        built-in transfer schema, narrowed to the legacy ``required`` subset so
+        the existing ``scoping_required_fields`` config keeps working unchanged.
+        """
+        if self._schema_getter is not None:
+            return self._schema_getter(ctx)
+        return TRANSFER_SCHEMA.with_required(self._required_fields())
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -666,7 +729,7 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         state: dict[str, Any],
         stage_label: str,
-        required: tuple[str, ...] | None = None,
+        schema: ScopingSchema,
     ) -> tuple[Intent, str, dict[str, Any]] | AnswerResult:
         """Run the scoping LLM extraction and merge it into the stored intent.
 
@@ -679,7 +742,7 @@ class SalesPersonaAnswerer:
         persona = self._persona_getter()
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
         system = _build_scoping_prompt(
-            persona=persona, intent=existing_intent, required=required
+            persona=persona, intent=existing_intent, schema=schema
         )
         user = f"Сообщение клиента:\n{question}"
         try:
@@ -707,7 +770,11 @@ class SalesPersonaAnswerer:
                 },
             )
             return _skip("llm_transport_error")
-        return intent_merge(existing_intent, extracted), next_question, extracted
+        return (
+            intent_merge(existing_intent, extracted, allowed=schema.keys()),
+            next_question,
+            extracted,
+        )
 
     async def _handle_scoping(
         self,
@@ -716,13 +783,20 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         state: dict[str, Any],
     ) -> AnswerResult:
-        required = self._required_fields()
+        schema = self._resolve_schema(ctx)
+        required = schema.required_keys()
+        # Story 12.14 — the field we asked last turn is the top-missing field of
+        # the intent we resume with. Captured BEFORE the merge so we can tell
+        # whether the customer's reply actually advanced it.
+        existing = Intent.from_dict(state.get("collected_intent") or {})
+        pre_missing = existing.missing_fields(required)
+        pending_field = pre_missing[0] if pre_missing else None
         outcome = await self._extract_and_merge(
             question=question,
             ctx=ctx,
             state=state,
             stage_label=STAGE_SCOPING,
-            required=required,
+            schema=schema,
         )
         if isinstance(outcome, AnswerResult):
             return outcome
@@ -737,13 +811,29 @@ class SalesPersonaAnswerer:
             question, normalizer=self._normalizer
         ):
             declined_field = merged.missing_fields(required)[0]
-            merged = replace(
-                merged, **{declined_field: SCOPING_DECLINED_SENTINEL}
-            )
+            merged = merged.with_field(declined_field, SCOPING_DECLINED_SENTINEL)
             if not merged.is_complete(required):
-                next_question = _SCOPING_FIELD_QUESTIONS[
+                next_question = schema.question_for(
                     merged.missing_fields(required)[0]
-                ]
+                )
+        # Story 12.14 — the LLM still didn't bind the customer's reply to the
+        # field we just asked. For a numeric field, capture a plain count
+        # deterministically ("1" → vehicle_count=1) so the funnel advances
+        # instead of re-asking the same question forever. Declines are already
+        # handled above; non-numeric fields keep relying on the LLM (Layer A).
+        if (
+            pending_field is not None
+            and pending_field in schema.numeric_keys()
+            and merged.get(pending_field) is None
+            and not is_decline(question, normalizer=self._normalizer)
+        ):
+            count = _parse_count(question)
+            if count is not None:
+                merged = merged.with_field(pending_field, count)
+                if not merged.is_complete(required):
+                    next_question = schema.question_for(
+                        merged.missing_fields(required)[0]
+                    )
         # Not complete → keep scoping: forward the next-field question.
         if not merged.is_complete(required):
             await self._persist(
@@ -809,7 +899,7 @@ class SalesPersonaAnswerer:
             ctx=ctx,
             state=state,
             stage_label=STAGE_AWAITING_TIME,
-            required=self._required_fields(),
+            schema=self._resolve_schema(ctx),
         )
         if isinstance(outcome, AnswerResult):
             return outcome

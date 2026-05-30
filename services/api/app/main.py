@@ -161,6 +161,11 @@ from services.api.app.sales.sales_persona_answerer import (
     RESPONSE_MODE_SALES_ESCALATION,
     SalesPersonaAnswerer,
 )
+from services.api.app.sales.scoping_schema import TRANSFER_SCHEMA, ScopingSchema
+from services.api.app.sales.scoping_schema_repository import (
+    ScopingSchemaRepository,
+    resolve_scoping_schema,
+)
 from services.api.app.sales.services_extractor import (
     ExtractionOutcome,
     ServicesExtractor,
@@ -472,6 +477,27 @@ def _effective_scoping_required_fields() -> tuple[str, ...]:
     return valid or _FIELD_NAMES
 
 
+def _effective_scoping_schema(ctx: AnswerContext) -> ScopingSchema:
+    """Resolve the active scoping anketa for this turn (Story 12.16).
+
+    A per-service or project-default schema from `scoping_schema_repository`
+    wins; otherwise the built-in transfer schema narrowed by the legacy
+    `scoping_required_fields` config, so unconfigured projects behave exactly as
+    before.
+    """
+    fallback = TRANSFER_SCHEMA.with_required(
+        _effective_scoping_required_fields()
+    )
+    if ctx.project_id is None:
+        return fallback
+    return resolve_scoping_schema(
+        scoping_schema_repository,
+        sales_services_repository,
+        project_id=ctx.project_id,
+        transfer_fallback=fallback,
+    )
+
+
 # Epic 12 story 12.01: bootstrap every sales DB table + index in a single
 # call so the schema is fully shaped before any repository handle opens
 # the file. The repositories below still run their own per-table
@@ -486,6 +512,7 @@ sales_bootstrap_init_schema(settings.sales_db_path)
 # regex match) handles dormancy without consulting the services catalog.
 sales_state_repository = SalesStateRepository(db_path=settings.sales_db_path)
 sales_services_repository = ServicesRepository(db_path=settings.sales_db_path)
+scoping_schema_repository = ScopingSchemaRepository(db_path=settings.sales_db_path)
 sales_followup_repository = FollowupQueueRepository(
     db_path=settings.sales_db_path
 )
@@ -546,9 +573,10 @@ sales_persona_answerer = SalesPersonaAnswerer(
     calendar_token_provider=calendar_token_provider,
     calendar_freebusy_client=calendar_freebusy_client,
     operator_chat_resolver=_resolve_calendar_operator_chat_id,
-    # Epic-12.12 — configurable required scoping fields (default drops tour-only
-    # difficulty/drivers so a plain rental asks only date/people/buggies).
-    scoping_required_fields_getter=_effective_scoping_required_fields,
+    # Epic-12.16 — per-service / project-default anketa resolution. The schema
+    # getter wins; its fallback still honours the legacy `scoping_required_fields`
+    # config (Epic-12.12) so unconfigured projects are unchanged.
+    scoping_schema_getter=_effective_scoping_schema,
 )
 client_materials_analyzer = ClientMaterialsAnalyzer(
     openrouter=openrouter_client,
