@@ -52,6 +52,7 @@ from services.api.app.sales.date_proposer import (
     NoProposal,
     Proposal,
 )
+from services.api.app.sales.decline import is_decline
 from services.api.app.sales.intent import Intent, intent_merge
 from services.api.app.sales.price_lookup import (
     PriceFound,
@@ -115,6 +116,21 @@ SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
 )
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
+# Story 12.11 — when the customer declines the field just asked ("не нужно",
+# "0", "без водителей"), record this sentinel so the funnel advances instead of
+# re-asking forever. Non-None → satisfies completeness; reads cleanly in the
+# operator's booking summary ("drivers: не требуется").
+SCOPING_DECLINED_SENTINEL = "не требуется"
+# Deterministic fallback questions used only when a decline auto-fills a
+# non-final field and we must ask the NEXT one (the LLM's question was for the
+# field we just filled). Mirrors the scoping field order.
+_SCOPING_FIELD_QUESTIONS: dict[str, str] = {
+    "dates": "На какую дату планируете?",
+    "headcount": "Сколько человек поедет?",
+    "vehicle_count": "Сколько багги нужно?",
+    "difficulty": "Какой сложности маршрут предпочитаете?",
+    "drivers": "Сколько нужно водителей?",
+}
 # Story 12.10 — asked when scoping is complete but no concrete date+time was
 # given AND the calendar can check it. We ask for date+time TOGETHER (not just
 # the time) because ``intent_merge`` REPLACES the ``dates`` field — a bare
@@ -686,7 +702,24 @@ class SalesPersonaAnswerer:
         if isinstance(outcome, AnswerResult):
             return outcome
         merged, next_question, extracted = outcome
-        # Not complete → keep scoping: forward the LLM's next-field question.
+        # Story 12.11 — the customer declined the field just asked ("не нужно",
+        # "0", "без водителей"). The declined field is the topmost-missing one
+        # (a decline fills nothing), so record a sentinel for it and advance
+        # instead of re-asking forever. If that completes scoping we fall
+        # through to the completion path; otherwise we ask the NEXT field with a
+        # deterministic question (the LLM's was for the field we just filled).
+        if not merged.is_complete() and is_decline(
+            question, normalizer=self._normalizer
+        ):
+            declined_field = merged.missing_fields()[0]
+            merged = replace(
+                merged, **{declined_field: SCOPING_DECLINED_SENTINEL}
+            )
+            if not merged.is_complete():
+                next_question = _SCOPING_FIELD_QUESTIONS[
+                    merged.missing_fields()[0]
+                ]
+        # Not complete → keep scoping: forward the next-field question.
         if not merged.is_complete():
             await self._persist(
                 ctx=ctx, current_stage=STAGE_SCOPING, intent=merged

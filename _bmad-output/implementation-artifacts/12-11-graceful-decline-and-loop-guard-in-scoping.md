@@ -44,6 +44,17 @@ so that **I'm never stuck re-answering the same question forever**.
 
 ### Agent Model Used
 
+claude-opus-4-7 (Claude Code)
+
 ### Completion Notes List
 
+- **Shipped: decline handling (AC 1, 3, 4, 5).** New `decline.is_decline` (lemma-based, grounded against the live normalizer): drops field-name/"need" filler lemmas, then requires every remaining content lemma to be a negation/zero word — so "не нужно", "0", "без водителей" decline, but "нет, троих" / "не знаю" do **not** (real value kept). `_handle_scoping` fills the topmost-missing field (the one just asked — a decline fills nothing, so it stays topmost) with `SCOPING_DECLINED_SENTINEL = "не требуется"`; if that completes scoping it flows to completion, else it asks the next field via a deterministic `_SCOPING_FIELD_QUESTIONS` fallback (the LLM's question was for the field just filled). Sentinel surfaces in `escalation_context`.
+- **Deferred: the counter-based loop guard (AC 2)** — needs a `last_asked_field`/`ask_count` column on `sales_conversation_state` (schema migration). Decline detection already resolves the reported live bug (drivers loop on "не нужно"/"0"); the counter guard (for repeated *non-decline* non-answers) is a fast-follow to avoid a live-DB migration in this slice. Tracked.
+- ruff clean; full suite **2976 passed at 100% coverage** (decline.py 14/14, sales_persona_answerer.py 579/579).
+
 ### File List
+
+- `services/api/app/sales/decline.py` (new)
+- `services/api/app/sales/sales_persona_answerer.py` (modified — `_handle_scoping` decline branch, sentinel + fallback questions)
+- `tests/test_sales_decline.py` (new)
+- `tests/test_sales_persona_answerer_scoping_decline.py` (new)
