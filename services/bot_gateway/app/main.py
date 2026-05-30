@@ -1980,6 +1980,51 @@ async def _forward_inbound_safe(
         return False
 
 
+def _pending_forward_retry_delays() -> list[float]:
+    """First attempt immediate (``0.0``) + the configured backoff delays."""
+    delays: list[float] = []
+    for token in str(settings.pending_forward_retry_delays_seconds).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        if value > 0:
+            delays.append(value)
+    return [0.0, *delays]
+
+
+async def _forward_inbound_with_retry(
+    *,
+    text: str,
+    chat_id: int,
+    customer_username: str | None,
+    trace_id: str,
+) -> bool:
+    """Forward to the api, retrying with bounded backoff on failure.
+
+    A single failed attempt used to strand the message in the pending-forward
+    outbox until the next restart (the outbox is swept only at startup). The
+    retries let it ride out a transient api outage — e.g. the api container
+    recreating during a rebuild — and still deliver the answer.
+    """
+    forwarded = False
+    for delay in _pending_forward_retry_delays():
+        if delay:
+            await asyncio.sleep(delay)
+        forwarded = await _forward_inbound_safe(
+            text=text,
+            chat_id=chat_id,
+            customer_username=customer_username,
+            trace_id=trace_id,
+        )
+        if forwarded:
+            return True
+    return forwarded
+
+
 async def _forward_live_and_clear_pending(
     *,
     text: str,
@@ -1994,7 +2039,7 @@ async def _forward_live_and_clear_pending(
     the 200 OK), so a crash mid-forward leaves the row for startup recovery.
     On a confirmed forward we drop the row; on failure we leave it.
     """
-    forwarded = await _forward_inbound_safe(
+    forwarded = await _forward_inbound_with_retry(
         text=text,
         chat_id=chat_id,
         customer_username=customer_username,
@@ -2146,7 +2191,7 @@ async def _replay_pending_forward(*, chat_id: int) -> None:
                 "context_count": len(preceding),
             },
         )
-        forwarded = await _forward_inbound_safe(
+        forwarded = await _forward_inbound_with_retry(
             text=text,
             chat_id=chat_id,
             customer_username=latest.customer_username,

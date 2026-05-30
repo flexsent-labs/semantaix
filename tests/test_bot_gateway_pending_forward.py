@@ -25,6 +25,11 @@ def _isolate(tmp_path, monkeypatch):
         "pending_forward_outbox",
         PendingForwardOutbox(str(tmp_path / "pending.sqlite3")),
     )
+    # Default to a single forward attempt (no backoff retries) so failure-path
+    # tests don't sleep for real; retry tests override this explicitly.
+    monkeypatch.setattr(
+        bot_main.settings, "pending_forward_retry_delays_seconds", ""
+    )
     yield
     get_settings.cache_clear()
 
@@ -204,3 +209,60 @@ async def test_replay_swallows_unexpected_error(monkeypatch):
     await bot_main._replay_pending_forward(chat_id=76)
 
     forward.assert_not_awaited()
+
+
+# --- retry-with-backoff on transient forward failure ------------------------
+
+
+def test_pending_forward_retry_delays_parsing(monkeypatch):
+    monkeypatch.setattr(
+        bot_main.settings, "pending_forward_retry_delays_seconds", "2, 0, abc, 5"
+    )
+    # First attempt immediate (0.0); 0/non-numeric tokens dropped.
+    assert bot_main._pending_forward_retry_delays() == [0.0, 2.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_live_forward_retries_transient_failure_then_clears(monkeypatch):
+    # The api is briefly unreachable (e.g. recreating during a rebuild): the
+    # first forward fails, the retry succeeds → the message is delivered and the
+    # outbox row cleared, instead of stranding until the next restart.
+    monkeypatch.setattr(
+        bot_main.settings, "pending_forward_retry_delays_seconds", "0.01"
+    )
+    forward = AsyncMock(side_effect=[RuntimeError("api recreating"), {}])
+    monkeypatch.setattr(api_client, "forward_inbound", forward)
+    bot_main.pending_forward_outbox.mark_pending(
+        chat_id=90, update_id=1, source_message_id=1,
+        customer_username="@c", text="нет, хочу на квадрациклах", trace_id="t90",
+    )
+
+    await bot_main._forward_live_and_clear_pending(
+        text="нет, хочу на квадрациклах", chat_id=90, update_id=1,
+        customer_username="@c", trace_id="t90",
+    )
+
+    assert forward.await_count == 2  # retried after the first failure
+    assert bot_main.pending_forward_outbox.peek_chat(chat_id=90) == []  # cleared
+
+
+@pytest.mark.asyncio
+async def test_live_forward_all_retries_fail_keeps_row(monkeypatch):
+    monkeypatch.setattr(
+        bot_main.settings, "pending_forward_retry_delays_seconds", "0.01"
+    )
+    forward = AsyncMock(side_effect=RuntimeError("api down"))
+    monkeypatch.setattr(api_client, "forward_inbound", forward)
+    bot_main.pending_forward_outbox.mark_pending(
+        chat_id=91, update_id=2, source_message_id=2,
+        customer_username="@c", text="привет", trace_id="t91",
+    )
+
+    await bot_main._forward_live_and_clear_pending(
+        text="привет", chat_id=91, update_id=2,
+        customer_username="@c", trace_id="t91",
+    )
+
+    assert forward.await_count == 2  # [0.0, 0.01] → two attempts, both fail
+    # Not cleared — stays in the outbox for the startup recovery sweep.
+    assert len(bot_main.pending_forward_outbox.peek_chat(chat_id=91)) == 1

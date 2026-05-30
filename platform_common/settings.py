@@ -109,6 +109,11 @@ class AppSettings(BaseSettings):
     offline_backlog_poll_interval_seconds: float = 0.5
     offline_backlog_min_context_chars: int = 12
     offline_backlog_max_context_messages: int = 3
+    # Backoff delays (seconds, comma list) for retrying a failed inbound forward
+    # before it strands in the pending-forward outbox — survives a transient api
+    # outage (e.g. the api recreating during a rebuild) instead of dropping the
+    # customer's message until the next restart.
+    pending_forward_retry_delays_seconds: str = "2,5,10"
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50
