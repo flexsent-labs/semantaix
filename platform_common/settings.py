@@ -43,7 +43,7 @@ class AppSettings(BaseSettings):
     scoping_required_fields: str = "dates,headcount,vehicle_count"
     # Story 12.13 — send the interim ack only if the answer pipeline hasn't
     # returned within this many seconds (so quick turns get no "минуточку").
-    inbound_interim_delay_seconds: float = 2.0
+    inbound_interim_delay_seconds: float = 8.0
     scope_decline_messages: str = (
         "Этим не занимаюсь.\n"
         "Не моя тема 🙂\n"
