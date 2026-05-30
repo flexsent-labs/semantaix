@@ -43,6 +43,16 @@ so that **quick replies (like scoping questions) don't get a pointless "please w
 
 ### Agent Model Used
 
+claude-opus-4-7 (Claude Code)
+
 ### Completion Notes List
 
+- `/conversations/inbound` now runs the pipeline as a task and `asyncio.wait({task}, timeout=delay)`; the interim ack is sent only when the task is still pending after the delay. Eligibility gate (`_should_send_interim`) unchanged; failure handling preserved (`await pipeline_task` re-raises into the existing `except`).
+- `Settings.inbound_interim_delay_seconds` (default 2.0) + `_effective_inbound_interim_delay()` (runtime config / settings, ValueError-safe).
+- Existing "interim sent before pipeline" test replaced by two: slow pipeline → ack then answer; fast pipeline → answer only. ruff clean; full suite 100%.
+
 ### File List
+
+- `services/api/app/main.py` (timer race in the inbound handler + `_effective_inbound_interim_delay`)
+- `platform_common/settings.py`, `.env.example` (`inbound_interim_delay_seconds`)
+- `tests/test_inbound_interim_ack.py` (modified — slow/fast + delay-resolver tests)

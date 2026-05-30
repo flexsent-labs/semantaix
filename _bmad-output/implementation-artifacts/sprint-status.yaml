@@ -106,7 +106,7 @@ development_status:
   12-08-proactive-followup: backlog
   12-09-pipeline-wiring-and-e2e-signoff: in-progress
   12-10-ask-for-time-when-booking-has-no-time: done
-  12-11-graceful-decline-and-loop-guard-in-scoping: ready-for-dev
-  12-12-configurable-required-scoping-fields: ready-for-dev
-  12-13-deferred-interim-ack: ready-for-dev
+  12-11-graceful-decline-and-loop-guard-in-scoping: done
+  12-12-configurable-required-scoping-fields: done
+  12-13-deferred-interim-ack: done
   epic-12-retrospective: optional

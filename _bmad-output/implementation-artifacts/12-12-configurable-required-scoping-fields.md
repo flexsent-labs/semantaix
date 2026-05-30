@@ -43,6 +43,19 @@ so that **the funnel asks only what's relevant and doesn't force irrelevant ques
 
 ### Agent Model Used
 
+claude-opus-4-7 (Claude Code)
+
 ### Completion Notes List
 
+- `Intent.missing_fields`/`is_complete` now take an optional `required` tuple (default `None` = legacy all-five). `_build_scoping_prompt`/`_format_missing_fields` take `required` so the LLM only asks configured-missing fields.
+- `SalesPersonaAnswerer` gains `scoping_required_fields_getter` (injected); `_required_fields()` resolves it per turn (falls back to all five when unset or empty). Threaded through `_handle_scoping` (completeness + the 12.11 decline branch), `_extract_and_merge` (prompt), and `_handle_awaiting_time`.
+- `Settings.scoping_required_fields` default `"dates,headcount,vehicle_count"` (drops tour-only difficulty/drivers); `_effective_scoping_required_fields()` parses runtime config / settings, drops unknown names, enforces canonical order, falls back to all five.
+- Back-compat: tests that build the answerer without the getter keep all-five behavior, so no existing funnel test changed. ruff clean; full suite 100%.
+
 ### File List
+
+- `services/api/app/sales/intent.py` (parameterized completeness)
+- `services/api/app/sales/sales_persona_answerer.py` (required threading + getter)
+- `services/api/app/main.py` (`_effective_scoping_required_fields` + wiring)
+- `platform_common/settings.py`, `.env.example` (`scoping_required_fields`)
+- `tests/test_sales_scoping_required_fields.py` (new)

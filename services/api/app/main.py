@@ -154,6 +154,7 @@ from services.api.app.sales.followup_queue_repository import (
     FollowupQueueRepository,
     FollowupRow,
 )
+from services.api.app.sales.intent import _FIELD_NAMES
 from services.api.app.sales.price_lookup import PriceLookup
 from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.sales_persona_answerer import (
@@ -455,6 +456,22 @@ def _effective_scope_decline_messages() -> str:
     )
 
 
+def _effective_scoping_required_fields() -> tuple[str, ...]:
+    """Resolve which scoping fields a booking must collect (Story 12.12).
+
+    Runtime config overrides the `Settings` default (comma list). Unknown names
+    are dropped and the canonical order is enforced; an empty/all-invalid result
+    falls back to all five fields so the funnel always has something to ask.
+    """
+    raw = (
+        hitl_ticket_repository.get_runtime_config("scoping_required_fields")
+        or settings.scoping_required_fields
+    )
+    requested = {token.strip() for token in str(raw).split(",") if token.strip()}
+    valid = tuple(name for name in _FIELD_NAMES if name in requested)
+    return valid or _FIELD_NAMES
+
+
 # Epic 12 story 12.01: bootstrap every sales DB table + index in a single
 # call so the schema is fully shaped before any repository handle opens
 # the file. The repositories below still run their own per-table
@@ -529,6 +546,9 @@ sales_persona_answerer = SalesPersonaAnswerer(
     calendar_token_provider=calendar_token_provider,
     calendar_freebusy_client=calendar_freebusy_client,
     operator_chat_resolver=_resolve_calendar_operator_chat_id,
+    # Epic-12.12 — configurable required scoping fields (default drops tour-only
+    # difficulty/drivers so a plain rental asks only date/people/buggies).
+    scoping_required_fields_getter=_effective_scoping_required_fields,
 )
 client_materials_analyzer = ClientMaterialsAnalyzer(
     openrouter=openrouter_client,
@@ -1594,6 +1614,17 @@ def _effective_inbound_interim_message() -> str:
     )
 
 
+def _effective_inbound_interim_delay() -> float:
+    """Seconds to wait for the answer before sending the interim ack (12.13)."""
+    raw = hitl_ticket_repository.get_runtime_config("inbound_interim_delay_seconds")
+    if raw is None:
+        return settings.inbound_interim_delay_seconds
+    try:
+        return float(raw)
+    except ValueError:
+        return settings.inbound_interim_delay_seconds
+
+
 def _should_send_interim(*, text: str, chat_id: int | None) -> bool:
     """True when the message is on a slow sales path.
 
@@ -2289,18 +2320,30 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         now=now,
     )
 
-    if request.chat_id is not None and _should_send_interim(
+    # Story 12.13 — defer the interim ack: run the pipeline, and send
+    # "минуточку" only if it hasn't returned within the delay. Fast turns (a
+    # scoping question) finish first and get no ack; slow turns (RAG / calendar
+    # / price) cross the threshold and get one.
+    interim_eligible = request.chat_id is not None and _should_send_interim(
         text=request.text, chat_id=request.chat_id
-    ):
-        await _safe_send_message(
-            chat_id=request.chat_id,
-            text=_effective_inbound_interim_message(),
-            failure_summary="Interim ack delivery failed",
-            failure_kind="inbound_interim_failed",
+    )
+    pipeline_task = asyncio.create_task(
+        answer_pipeline.run(question=request.text, ctx=ctx)
+    )
+    if interim_eligible:
+        done, _pending = await asyncio.wait(
+            {pipeline_task}, timeout=_effective_inbound_interim_delay()
         )
+        if pipeline_task not in done:
+            await _safe_send_message(
+                chat_id=request.chat_id,
+                text=_effective_inbound_interim_message(),
+                failure_summary="Interim ack delivery failed",
+                failure_kind="inbound_interim_failed",
+            )
 
     try:
-        pipeline_result = await answer_pipeline.run(question=request.text, ctx=ctx)
+        pipeline_result = await pipeline_task
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         logger.exception(

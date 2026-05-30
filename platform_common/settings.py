@@ -37,6 +37,13 @@ class AppSettings(BaseSettings):
         "Минутку, уточню и вернусь с ответом."
     )
     inbound_interim_message: str = "Проверяю, минуточку… 🙂"
+    # Story 12.12 — scoping fields a booking must collect (comma list, canonical
+    # order). Default drops tour-only `difficulty`/`drivers` so a plain rental
+    # asks only date/people/buggies; tour projects re-add them via runtime config.
+    scoping_required_fields: str = "dates,headcount,vehicle_count"
+    # Story 12.13 — send the interim ack only if the answer pipeline hasn't
+    # returned within this many seconds (so quick turns get no "минуточку").
+    inbound_interim_delay_seconds: float = 2.0
     scope_decline_messages: str = (
         "Этим не занимаюсь.\n"
         "Не моя тема 🙂\n"
