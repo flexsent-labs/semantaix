@@ -195,6 +195,41 @@ async def test_counter_offer_with_new_date_re_proposes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_acceptance_lemma_with_new_date_re_proposes_not_closing() -> None:
+    """An acceptance lemma + a DIFFERENT parseable date is a counter-offer.
+
+    "давайте на 1 июня" carries the acceptance seed "давайте" AND a new
+    parseable date (1 June). The counter-offer must win — re-propose for the
+    new date — not be mis-accepted onto the already-proposed 1 May slot.
+    Mirrors the PITCHING ordering established in Story 12.19 (PR #99).
+    """
+    answerer, state_repo, openrouter, proposer = _build()
+    _seed_with_proposal(state_repo)
+    new_proposal = Proposal(
+        date_iso="2026-06-01",
+        start_time_iso="10:00",
+        end_time_iso="11:00",
+        service_id=42,
+        proposed_at="2026-04-25T09:00:00+00:00",
+    )
+    proposer.queue_result(new_proposal)
+    openrouter.queue_response(
+        {"text": "Предлагаю на 1 июня с началом в 10:00."}
+    )
+
+    result = await answerer.try_answer(question="давайте на 1 июня", ctx=_ctx())
+
+    assert result.handled is True
+    # Re-proposed for the counter-offer date — NOT closed on the prior slot.
+    assert result.metadata["stage_after"] == STAGE_PROPOSING
+    assert result.metadata.get("hitl_reason") != HITL_REASON_CLOSING_HANDOFF
+    assert "1 июня" in (result.text or "")
+    # The proposer ran and saw the counter-offer date.
+    assert proposer.calls, "date proposer should run for the counter-offer"
+    assert "1 июня" in (proposer.calls[-1]["intent"].dates or "")
+
+
+@pytest.mark.asyncio
 async def test_acceptance_only_triggers_when_prior_proposal_exists() -> None:
     """A bare 'да' on the FIRST proposing turn must not jump to closing.
 
