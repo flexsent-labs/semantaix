@@ -48,6 +48,60 @@ async def test_forward_inbound_posts_to_correct_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_inbound_passes_timeout_override(monkeypatch):
+    # Story 12.24 — a long per-call timeout so a slow sales-escalation turn
+    # isn't mistaken for a failure and retried mid-send.
+    captured: dict = {}
+    response = Mock()
+    response.json.return_value = {"ok": True}
+    response.raise_for_status = Mock()
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(return_value=response)
+    cm = AsyncMock()
+    cm.__aenter__.return_value = http_client
+    cm.__aexit__.return_value = None
+
+    def _factory(timeout):
+        captured["timeout"] = timeout
+        return cm
+
+    monkeypatch.setattr(
+        "services.bot_gateway.app.api_client.httpx.AsyncClient", _factory
+    )
+    client = ApiClient(base_url="http://api:8000", timeout_seconds=10)
+    await client.forward_inbound(
+        text="hi", chat_id=1, customer_username="@c", trace_id="t", timeout_seconds=45
+    )
+    assert captured["timeout"] == 45
+
+
+@pytest.mark.asyncio
+async def test_forward_inbound_defaults_to_client_timeout(monkeypatch):
+    captured: dict = {}
+    response = Mock()
+    response.json.return_value = {"ok": True}
+    response.raise_for_status = Mock()
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(return_value=response)
+    cm = AsyncMock()
+    cm.__aenter__.return_value = http_client
+    cm.__aexit__.return_value = None
+
+    def _factory(timeout):
+        captured["timeout"] = timeout
+        return cm
+
+    monkeypatch.setattr(
+        "services.bot_gateway.app.api_client.httpx.AsyncClient", _factory
+    )
+    client = ApiClient(base_url="http://api:8000", timeout_seconds=10)
+    await client.forward_inbound(
+        text="hi", chat_id=1, customer_username="@c", trace_id="t"
+    )
+    assert captured["timeout"] == 10
+
+
+@pytest.mark.asyncio
 async def test_deliver_operator_reply_posts_to_correct_endpoint(monkeypatch):
     http = _http_mock(monkeypatch, response_json={"delivered": True})
     client = ApiClient(base_url="http://api:8000/")

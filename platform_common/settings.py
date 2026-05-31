@@ -114,6 +114,14 @@ class AppSettings(BaseSettings):
     # outage (e.g. the api recreating during a rebuild) instead of dropping the
     # customer's message until the next restart.
     pending_forward_retry_delays_seconds: str = "2,5,10"
+    # Story 12.24 — timeout (seconds) for the bot_gateway → api inbound forward.
+    # A sales-escalation turn blocks the api response on synchronous Telegram
+    # sends and can exceed the 10s default, making bot_gateway time out and retry
+    # mid-flight (the live duplicate-send trigger). Set well above worst-case
+    # turn time; the api-side claim (Story 12.24) still dedups any retry that
+    # does occur. The webhook already 200s to Telegram first, so a long forward
+    # timeout never delays Telegram.
+    inbound_forward_timeout_seconds: int = 45
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50

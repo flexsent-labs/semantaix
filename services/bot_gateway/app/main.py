@@ -2025,6 +2025,7 @@ async def _forward_inbound_safe(
             chat_id=chat_id,
             customer_username=customer_username,
             trace_id=trace_id,
+            timeout_seconds=settings.inbound_forward_timeout_seconds,
         )
         return True
     except Exception as exc:  # broad: best-effort; api emits incidents on its side

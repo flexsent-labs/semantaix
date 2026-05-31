@@ -2330,6 +2330,26 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             "trace_id": existing_trace.trace_id,
         }
 
+    # Story 12.24 — atomically claim this trace BEFORE the (possibly slow)
+    # pipeline + Telegram sends. The finalized-trace gate above only catches a
+    # retry that arrives AFTER the first request wrote its trace; a retry that
+    # arrives WHILE the first is still in-flight (the live duplicate-send bug:
+    # bot_gateway's forward times out mid-send and retries) misses that gate.
+    # The claim closes that window — the loser is deduplicated here, before any
+    # side effect, so the customer line is never sent twice.
+    if not answer_trace_repository.claim_inbound(trace_id):
+        logger.info(
+            "inbound_idempotent_replay",
+            extra={"trace_id": trace_id, "reason": "in_flight_claim"},
+        )
+        return {
+            "deduplicated": True,
+            "delivered": False,
+            "escalated": False,
+            "response_mode": None,
+            "trace_id": trace_id,
+        }
+
     now = datetime.now(UTC)
     # Story 12.08: cancel any pending +1d nudge BEFORE the pipeline runs so a
     # reply arriving at the same instant the queue fires never double-notifies.

@@ -301,6 +301,45 @@ def test_inbound_replaying_same_trace_id_does_not_resend_ack_or_create_ticket(
     settings.hitl_primary_operator_chat_id = None
 
 
+def test_inbound_inflight_duplicate_is_deduped_without_processing(tmp_path, monkeypatch):
+    """Story 12.24 — a retry that arrives while the first request is still
+    in-flight (claim taken, trace not yet finalized) must be deduplicated
+    BEFORE the pipeline runs, so the customer line is never sent twice.
+
+    Pre-claiming the trace simulates the first (slow) request having claimed
+    but not yet written its answer trace — exactly the window the live
+    duplicate-send bug exploited.
+    """
+    _wire(tmp_path)
+    send_mock = AsyncMock(return_value=1)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
+    pipeline_mock = _stub_pipeline(
+        monkeypatch,
+        AnswerResult(handled=True, text="привет", response_mode="x", metadata={}),
+    )
+    # First request claimed this trace_id and is still processing (no finalized
+    # answer_trace row yet) — find_by_trace_id would miss, so the claim is the
+    # only guard.
+    assert answer_trace_repository.claim_inbound("tg-update-inflight") is True
+    client = TestClient(api_app)
+
+    body = client.post(
+        "/conversations/inbound",
+        json={
+            "text": "хочу забронировать багги",
+            "chat_id": 9100,
+            "trace_id": "tg-update-inflight",
+        },
+    ).json()
+
+    assert body.get("deduplicated") is True
+    assert body["delivered"] is False
+    assert body["trace_id"] == "tg-update-inflight"
+    # Short-circuited before any side effects: no pipeline run, no send.
+    pipeline_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+
+
 def test_inbound_followup_question_coalesces_to_active_ticket(tmp_path, monkeypatch):
     """A customer's second unhandled question (different trace_id) while
     they already have an active ticket must NOT spawn a second ticket and

@@ -54,6 +54,19 @@ def init_schema(db_path: str) -> None:
             connection.execute(
                 "ALTER TABLE answer_traces ADD COLUMN hitl_ticket_id INTEGER"
             )
+        # Story 12.24 — inbound idempotency lock. Claimed at the START of
+        # /conversations/inbound (before the slow pipeline + Telegram sends) so a
+        # retried forward arriving while the first is still in-flight is
+        # deduplicated instead of reprocessed (which re-sends the customer line).
+        # Separate from answer_traces, whose row is written only at the END.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inbound_claims (
+                trace_id TEXT PRIMARY KEY,
+                claimed_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 @dataclass(frozen=True)
@@ -167,6 +180,27 @@ class AnswerTraceRepository:
                 ),
             )
             return self._fetch(connection, int(cursor.lastrowid))
+
+    def claim_inbound(self, trace_id: str) -> bool:
+        """Atomically claim ``trace_id`` for inbound processing (Story 12.24).
+
+        Returns ``True`` when THIS caller won the claim (first to see the
+        trace), ``False`` when it was already claimed — i.e. a retry or a
+        concurrent duplicate the endpoint must deduplicate instead of
+        reprocessing. The claim persists (named-volume / restart parity); a
+        genuine api-outage retry never reaches here (no 200 response), so the
+        bot_gateway retry still delivers once the api is back.
+        """
+        if not trace_id:
+            raise ValueError("trace_id_required")
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO inbound_claims (trace_id, claimed_at) "
+                "VALUES (?, ?)",
+                (trace_id, _now().isoformat()),
+            )
+            return cursor.rowcount == 1
 
     def get_by_trace_id(self, trace_id: str) -> AnswerTrace:
         init_schema(self.db_path)
