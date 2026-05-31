@@ -226,6 +226,78 @@ def test_now_in_other_tz_is_converted_to_project_tz() -> None:
     assert result == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
 
 
+# --- absolute "<day> <month>" calendar dates --------------------------------
+# Regression for the booking busy-check gap: the scoping LLM often resolves a
+# relative reference ("в понедельник", "завтра") to an absolute date before it
+# reaches the extractor. Those must parse too, else the slot skips the calendar
+# check and is handed off as bookable even when the time is busy.
+
+
+def test_parses_absolute_date_with_time() -> None:
+    # _NOW is 2026-06-05; "2 июня" is earlier this year -> rolls to next year.
+    result = extract_requested_start(
+        text="2 июня в 11:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2027, 6, 2, 11, 0, tzinfo=MOSCOW)
+
+
+def test_parses_absolute_date_later_this_year() -> None:
+    result = extract_requested_start(
+        text="на 15 сентября в 9:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 9, 15, 9, 0, tzinfo=MOSCOW)
+
+
+def test_absolute_date_today_is_accepted() -> None:
+    # Same calendar day as _NOW (5 июня) is not "past" — keep current year.
+    result = extract_requested_start(
+        text="5 июня в 18:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 5, 18, 0, tzinfo=MOSCOW)
+
+
+def test_absolute_date_inflected_month_resolves() -> None:
+    # Genitive "июля" matches by prefix; clock via the час-form.
+    result = extract_requested_start(
+        text="1 июля в 3 часа", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 7, 1, 3, 0, tzinfo=MOSCOW)
+
+
+def test_absolute_date_without_time_is_none() -> None:
+    assert (
+        extract_requested_start(text="2 июня", now=_NOW, project_tz=MOSCOW) is None
+    )
+
+
+def test_day_with_non_month_word_is_none() -> None:
+    # A day number followed by a non-month word is not a date.
+    assert (
+        extract_requested_start(
+            text="нас 4 человека в 11:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_invalid_absolute_day_is_none() -> None:
+    # 31 апреля is not a real date -> no rollover salvages it -> None.
+    assert (
+        extract_requested_start(
+            text="31 апреля в 12:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_relative_anchor_still_wins_over_absolute_date() -> None:
+    # "завтра" present alongside an absolute date -> relative offset is used.
+    result = extract_requested_start(
+        text="завтра, не 20 июня, в 10:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 6, 10, 0, tzinfo=MOSCOW)
+
+
 # --- copy constants ---------------------------------------------------------
 
 

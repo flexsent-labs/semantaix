@@ -67,6 +67,14 @@ _VERIFIER_SYSTEM_PROMPT = (
 )
 
 
+# Story 12.30 — the booking funnel's structured extraction (``complete_json``)
+# and the grounding verifier (``verify_grounding``) must be reproducible: the
+# same customer message must yield the same scoping question and the same
+# deliver-vs-escalate verdict. They are hard-pinned here, independent of the
+# configurable ``openrouter_temperature`` default used for generative answers.
+_DETERMINISTIC_TEMPERATURE = 0.0
+
+
 @dataclass(frozen=True)
 class GroundingVerdict:
     label: str  # "GROUNDED" or "NOT_GROUNDED"
@@ -101,13 +109,26 @@ class OpenRouterClient:
         self.api_key = settings.openrouter_api_key
         self.base_url = settings.openrouter_base_url.rstrip("/")
         self.grounding_model = settings.openrouter_grounding_model
+        # Story 12.30 — default temperature for generative calls; 0.0 unless
+        # raised in config. Funnel/verifier override this per-call.
+        self.temperature = settings.openrouter_temperature
 
     async def _chat(
-        self, *, model: str, messages: list[dict[str, Any]]
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
     ) -> str:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
-        payload = {"model": model, "messages": messages}
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": (
+                self.temperature if temperature is None else temperature
+            ),
+        }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -206,6 +227,8 @@ class OpenRouterClient:
             "model": model or self.grounding_model,
             "messages": messages,
             "response_format": {"type": "json_object"},
+            # Story 12.30 — structured funnel extraction is deterministic.
+            "temperature": _DETERMINISTIC_TEMPERATURE,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -258,7 +281,9 @@ class OpenRouterClient:
             {"role": "user", "content": user_block},
         ]
         raw = await self._chat(
-            model=model or self.grounding_model, messages=messages
+            model=model or self.grounding_model,
+            messages=messages,
+            temperature=_DETERMINISTIC_TEMPERATURE,
         )
         return _parse_verdict(raw)
 

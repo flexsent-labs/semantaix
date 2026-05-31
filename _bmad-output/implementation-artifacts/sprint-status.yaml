@@ -116,4 +116,10 @@ development_status:
   12-23-reset-stale-closing-on-new-booking: review
   12-24-idempotent-inbound-delivery: review
   12-25-early-busy-check-during-scoping: review
+  12-26-absolute-date-parsing-in-busy-check: review
+  12-27-cancellation-intent-route-to-human: review
+  12-28-first-turn-price-intercept: review
+  12-29-off-hours-wording-vs-busy: review
+  12-30-deterministic-llm-sampling: review
+  12-31-operator-command-webhook-dedup: backlog
   epic-12-retrospective: optional

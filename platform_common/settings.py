@@ -27,6 +27,12 @@ class AppSettings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
     openrouter_grounding_model: str = "google/gemini-2.0-flash-lite-001"
+    # Story 12.30 — default sampling temperature for generative LLM calls (the
+    # grounded answer, catalog digest). 0.0 = deterministic. The booking funnel's
+    # structured extraction and the grounding verifier are hard-pinned to 0 in
+    # OpenRouterClient regardless of this value; raise it only to add phrasing
+    # variety to grounded answers.
+    openrouter_temperature: float = 0.0
     incident_db_path: str = ".data/semantaix_incidents.db"
     incident_dedup_window_seconds: int = 300
     telegram_alert_debounce_seconds: int = 300

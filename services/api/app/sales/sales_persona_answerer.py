@@ -33,6 +33,12 @@ from typing import Any, Awaitable, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from services.api.app.answerers import AnswerContext, AnswerResult
+from services.api.app.calendar.availability import (
+    REASON_DATE_EXCEPTION,
+    REASON_IN_PAST,
+    REASON_OUTSIDE_WORKING_HOURS,
+    REASON_WRONG_SERVICE_DAY,
+)
 from services.api.app.calendar.requested_time_check import (
     STATUS_AVAILABLE,
     STATUS_UNAVAILABLE,
@@ -41,6 +47,7 @@ from services.api.app.calendar.requested_time_check import (
 from services.api.app.calendar.service_resolver import extract_requested_start
 from services.api.app.rag import RagChunk
 from services.api.app.sales.acceptance import is_acceptance
+from services.api.app.sales.cancel_intent import is_cancellation
 from services.api.app.sales.client_materials_repository import ClientMaterial
 from services.api.app.sales.closure import is_no_more
 from services.api.app.sales.date_parser import parse_russian_date_span
@@ -93,6 +100,10 @@ HITL_REASON_CLOSING_HANDOFF = "sales_closing_handoff"
 HITL_REASON_PRICE_UNKNOWN = "price_unknown"
 HITL_REASON_EMPTY_CATALOG = "catalog_empty"
 HITL_REASON_SCOPING_COMPLETE = "sales_scoping_complete"
+# Story 12.27 — a customer asking to cancel a booking. There is no
+# booking-of-record the bot can cancel autonomously (operators finalize
+# bookings), so the request is acknowledged and routed to a human.
+HITL_REASON_CANCELLATION = "sales_cancellation_request"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -101,6 +112,13 @@ PROPOSAL_FALLBACK_CALENDAR_DISABLED = "Дату подтвержу у колле
 PROPOSAL_FALLBACK_UNAVAILABLE = "Уточню свободные даты и сразу сообщу."
 PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER = "На каком туре остановимся?"
 CLOSING_HANDOFF_LINE = "Передам коллегам для подтверждения, на связи."
+# Story 12.27 — cancellation request. The customer-facing line does not presume
+# the cancellation is done (a human confirms it); the operator-facing context
+# tags the ticket so the human sees it's an отмена, not a new booking.
+CANCELLATION_HANDOFF_LINE = (
+    "Передам вашу просьбу об отмене коллеге — свяжутся с вами."
+)
+CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 # Story 12.05 — appended to the textual reply when a media dispatch failed
@@ -120,6 +138,21 @@ SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
 )
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
+# Story 12.29 — the availability engine already distinguishes *why* a slot is
+# unavailable; surface that as distinct customer copy instead of mislabeling
+# every unavailable slot "занято" (busy). A 23:00 request is outside working
+# hours, not booked by someone else. Unmapped reasons (plain `busy`, the rare
+# `outside_lookahead`, or `None`) keep SLOT_BUSY_LINE as the safe default.
+SLOT_OFF_HOURS_LINE = "К сожалению, это время вне рабочих часов."
+SLOT_WRONG_DAY_LINE = "К сожалению, в этот день услуга недоступна."
+SLOT_CLOSED_DATE_LINE = "К сожалению, в этот день мы не работаем."
+SLOT_IN_PAST_LINE = "К сожалению, это время уже прошло."
+_UNAVAILABLE_LEAD_LINES: dict[str, str] = {
+    REASON_OUTSIDE_WORKING_HOURS: SLOT_OFF_HOURS_LINE,
+    REASON_WRONG_SERVICE_DAY: SLOT_WRONG_DAY_LINE,
+    REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE,
+    REASON_IN_PAST: SLOT_IN_PAST_LINE,
+}
 # Story 12.11 — when the customer declines the field just asked ("не нужно",
 # "0", "без водителей"), record this sentinel so the funnel advances instead of
 # re-asking forever. Non-None → satisfies completeness; reads cleanly in the
@@ -567,7 +600,14 @@ class SalesPersonaAnswerer:
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
         result = await self._dispatch(question=question, ctx=ctx)
-        if result.handled and ctx.chat_id is not None:
+        # Story 12.27 — a cancellation turn suppresses the +24h nudge so the
+        # customer isn't asked "still thinking about booking?" a day after asking
+        # to cancel. Any other handled turn schedules one nudge as before.
+        if (
+            result.handled
+            and ctx.chat_id is not None
+            and not result.metadata.get("suppress_followup")
+        ):
             await self._enqueue_followup(ctx=ctx)
         return result
 
@@ -578,6 +618,16 @@ class SalesPersonaAnswerer:
             return _skip("no_chat_id")
 
         state = await asyncio.to_thread(self._state_repo.get, ctx.chat_id)
+
+        # Story 12.27 — a cancellation request is its own intent. Catch it before
+        # the booking funnel (whose бронь/запись seeds would pull "хочу отменить
+        # запись" into scoping) and before the not-sales-intent skip (so a bare
+        # "можно отменить?" routes to a human instead of falling through to
+        # generic RAG/HITL). Fires in any state/stage.
+        if is_cancellation(question, normalizer=self._normalizer):
+            return await self._handle_cancellation(
+                question=question, ctx=ctx, state=state
+            )
 
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
@@ -719,6 +769,18 @@ class SalesPersonaAnswerer:
         )
         if intercept is not None:
             return intercept
+        # Story 12.28 — a first-contact opener that asks a price ("8 человек,
+        # сколько стоит?") must be answered, not dropped. ``classify_turn``
+        # already tags it a price ask; route to pricing BEFORE the funnel
+        # advances to asking for a date. The fields the greeting LLM just
+        # extracted (e.g. headcount) ride along so they inform the quote and
+        # are not re-asked. Falls through (``None``) on a non-price opener or
+        # when pricing isn't configured.
+        price_intercept = await self._maybe_intercept_price_ask(
+            question=question, ctx=ctx, merged=merged
+        )
+        if price_intercept is not None:
+            return price_intercept
         # Greeting always transitions into scoping. Even if the customer
         # already supplied every field in the opener (unlikely), the next
         # turn handles the pitching transition cleanly.
@@ -748,6 +810,55 @@ class SalesPersonaAnswerer:
                 "answerer": NAME,
                 "stage_before": STAGE_NEW,
                 "stage_after": stage_after,
+            },
+        )
+
+    async def _handle_cancellation(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any] | None,
+    ) -> AnswerResult:
+        """Route a cancellation request to a human (Story 12.27).
+
+        No booking-of-record exists to cancel autonomously (operators finalize
+        bookings), so we acknowledge with a cancellation-specific line and open a
+        HITL ticket tagged ``sales_cancellation_request`` carrying the customer's
+        verbatim message (via ``escalation_context``). The funnel is parked at
+        the terminal ``closing`` stage — a human owns it now; a later fresh
+        booking intent re-greets via Story 12.23. The +24h nudge is suppressed
+        for this turn (the inbound route already cancelled any pending one when
+        the customer replied).
+        """
+        intent = Intent.from_dict((state or {}).get("collected_intent") or {})
+        stage_before = str((state or {}).get("current_stage") or STAGE_NEW)
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_CLOSING, intent=intent
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": "cancellation_request",
+                "hitl_reason": HITL_REASON_CANCELLATION,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=CANCELLATION_HANDOFF_LINE,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": "cancellation_request",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_CANCELLATION,
+                "escalation_context": CANCELLATION_ESCALATION_CONTEXT,
+                "suppress_followup": True,
             },
         )
 
@@ -1133,6 +1244,7 @@ class SalesPersonaAnswerer:
                 alternative=requested.alternative,
                 base_metadata=base_metadata,
                 dispatch_fallback=dispatch_fallback,
+                reason=requested.reason,
             )
         free = requested is not None and requested.status == STATUS_AVAILABLE
         return await self._handoff_after_scoping(
@@ -1296,8 +1408,9 @@ class SalesPersonaAnswerer:
         alternative: datetime | None,
         base_metadata: dict[str, Any],
         dispatch_fallback: bool,
+        reason: str | None = None,
     ) -> AnswerResult:
-        """Requested time is busy — offer an alternative or hand off.
+        """Requested time is unavailable — offer an alternative or hand off.
 
         Story 12.22 — when we can name a nearest free slot we offer it and
         park in ``pitching`` so ``_handle_pitching`` can interpret the
@@ -1319,7 +1432,10 @@ class SalesPersonaAnswerer:
         else:
             slot = f" {SCOPING_COMPLETE_HANDOFF_LINE}"
             turn_kind = "scoping_complete_busy_no_slot"
-        text = f"{SLOT_BUSY_LINE}{slot}"
+        # Story 12.29 — lead line reflects *why* the slot is unavailable; the
+        # alternative-offer / handoff tail and stage transition are unchanged.
+        lead_line = _UNAVAILABLE_LEAD_LINES.get(reason, SLOT_BUSY_LINE)
+        text = f"{lead_line}{slot}"
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         # Story 12.19 — remember the offered slot so a confirmation next turn
@@ -1462,6 +1578,35 @@ class SalesPersonaAnswerer:
             alternative=availability.alternative,
             base_metadata={},
             dispatch_fallback=False,
+            reason=availability.reason,
+        )
+
+    async def _maybe_intercept_price_ask(
+        self, *, question: str, ctx: AnswerContext, merged: Intent
+    ) -> AnswerResult | None:
+        """Answer a price ask that lands on the first (greeting) turn.
+
+        Story 12.28 — ``classify_turn`` already recognises a price ask, but it
+        was only consulted mid-funnel (scoping / pitching) via
+        ``_maybe_handle_aside``. On first contact ``state is None`` so the
+        greeting handler ran instead, extracted the fields, was forbidden to
+        quote a price, and asked for a date — silently dropping the customer's
+        question. Routes to the existing ``_handle_pricing`` with a synthetic
+        state carrying the just-extracted ``merged`` intent, so headcount/etc.
+        inform the quote and are persisted (never re-asked). ``None`` when
+        pricing is not configured or the turn is not a price ask — the greeting
+        flow then continues unchanged.
+        """
+        if self._price_lookup is None:
+            return None
+        if classify_turn(question, normalizer=self._normalizer).kind != "price_ask":
+            return None
+        synthetic_state = {
+            "current_stage": STAGE_NEW,
+            "collected_intent": merged.to_dict(),
+        }
+        return await self._handle_pricing(
+            question=question, ctx=ctx, state=synthetic_state
         )
 
     async def _handoff_after_scoping(

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from services.api.app.russian_text import get_russian_normalizer
@@ -130,6 +130,33 @@ _HH_CLOCK = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Absolute calendar dates: "1 июня", "2 июня", "15 сентября". The scoping LLM
+# frequently *resolves* a relative reference ("в понедельник", even "завтра")
+# into an absolute date before it reaches us, so the busy check must accept
+# this shape too — otherwise an absolute date silently parses to ``None`` and
+# the slot is handed off WITHOUT a calendar check. Month lookup is by prefix
+# (one prefix covers every grammatical case: "июн" → "июня"/"июне"/"июнь").
+_MONTH_PREFIXES: tuple[tuple[str, int], ...] = (
+    ("январ", 1),
+    ("феврал", 2),
+    ("март", 3),
+    ("апрел", 4),
+    ("мая", 5),
+    ("мае", 5),
+    ("май", 5),
+    ("июн", 6),
+    ("июл", 7),
+    ("август", 8),
+    ("сентябр", 9),
+    ("октябр", 10),
+    ("ноябр", 11),
+    ("декабр", 12),
+)
+_ABS_DATE_RE = re.compile(
+    r"\b(\d{1,2})\s+([а-яё]+)",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 def _extract_clock(text: str) -> tuple[int, int] | None:
     """Return ``(hour, minute)`` if exactly one valid clock time is present.
@@ -150,6 +177,44 @@ def _extract_clock(text: str) -> tuple[int, int] | None:
             return hour, 0
         return None
     return None
+
+
+def _month_from_token(token: str) -> int | None:
+    lowered = token.lower()
+    for prefix, month in _MONTH_PREFIXES:
+        if lowered.startswith(prefix):
+            return month
+    return None
+
+
+def _extract_absolute_date(text: str, today: date) -> date | None:
+    """Resolve an explicit ``"<day> <month>"`` date, or ``None``.
+
+    Conservative, like the rest of the extractor: only commits when a day
+    number pairs with a recognisable Russian month word and forms a valid
+    date. The year defaults to ``today.year`` but rolls to the next year when
+    the bare day/month has already passed locally — a customer naming "5 января"
+    in December means the upcoming January, not a date eight months gone.
+    """
+    for match in _ABS_DATE_RE.finditer(text):
+        month = _month_from_token(match.group(2))
+        if month is None:
+            continue
+        day = int(match.group(1))
+        candidate = _safe_date(year=today.year, month=month, day=day)
+        if candidate is None:
+            continue
+        if candidate < today:
+            candidate = _safe_date(year=today.year + 1, month=month, day=day)
+        return candidate
+    return None
+
+
+def _safe_date(*, year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 def _extract_day_offset(lemmas: list[str], today_weekday: int) -> int | None:
@@ -177,11 +242,15 @@ def extract_requested_start(
 ) -> datetime | None:
     """Best-effort parse of a requested start instant from Russian ``text``.
 
-    Returns a tz-aware ``datetime`` in ``project_tz`` only when BOTH an explicit
-    day anchor and a concrete clock time are present and in range; otherwise
-    ``None``. Intentionally narrow — it does not attempt relative offsets like
-    "через час", bare times without a day, or calendar dates — those return
-    ``None`` so 11.07 asks or escalates rather than guessing.
+    Returns a tz-aware ``datetime`` in ``project_tz`` only when BOTH a day
+    anchor and a concrete clock time are present and in range; otherwise
+    ``None``. A day anchor is a relative word ("сегодня"/"завтра"/
+    "послезавтра"), a named weekday, OR an explicit "<day> <month>" calendar
+    date ("2 июня") — the last because the scoping LLM often resolves a
+    relative reference to an absolute date before it reaches us, and that
+    resolved date must still reach the availability check. Still intentionally
+    narrow: bare times without a day and fuzzy offsets like "через час" return
+    ``None`` so the caller asks or escalates rather than guessing.
 
     Lemmatization reuses the shared :class:`RussianNormalizer` singleton (no
     parallel tokenizer); the clock is matched on the raw text since the
@@ -194,11 +263,16 @@ def extract_requested_start(
     local_now = now.astimezone(project_tz)
     lemmas = get_russian_normalizer().lemmas(text)
     offset = _extract_day_offset(lemmas, local_now.weekday())
-    if offset is None:
-        return None
+    if offset is not None:
+        target_date = (local_now + timedelta(days=offset)).date()
+    else:
+        # No relative/weekday anchor — accept an explicit "<day> <month>" date
+        # so an LLM-resolved absolute date still reaches the calendar check.
+        target_date = _extract_absolute_date(text.lower(), local_now.date())
+        if target_date is None:
+            return None
 
     hour, minute = clock
-    target_date = (local_now + timedelta(days=offset)).date()
     return datetime(
         target_date.year,
         target_date.month,

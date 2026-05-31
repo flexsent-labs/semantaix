@@ -299,6 +299,58 @@ async def test_verify_grounding_uses_overridden_system_prompt(monkeypatch):
     assert system == "Use only YES or NO."
 
 
+# --- Story 12.30: deterministic sampling -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_default_temperature_comes_from_settings():
+    """A fresh client reads openrouter_temperature from settings (default 0.0)."""
+    client = OpenRouterClient()
+    assert client.temperature == 0.0
+
+
+@pytest.mark.asyncio
+async def test_chat_sends_configured_temperature(monkeypatch):
+    """Generative calls (answer_grounded) use the configurable default temperature."""
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    client.temperature = 0.7
+    await client.answer_grounded(
+        question="q",
+        snippets=[_snippet()],
+        today_iso="2026-05-11",
+        persona_first_name="Анна",
+        persona_last_name="Иванова",
+    )
+    assert http_client.post.call_args.kwargs["json"]["temperature"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_complete_json_pins_temperature_to_zero(monkeypatch):
+    """The booking funnel's structured extraction is deterministic regardless of
+    the configured generative default."""
+    http_client = _http_mock(monkeypatch, content='{"a": 1}')
+    client = OpenRouterClient()
+    client.api_key = "token"
+    client.temperature = 0.9  # generative default raised …
+    await client.complete_json(system="sys", user="user")
+    assert http_client.post.call_args.kwargs["json"]["temperature"] == 0.0  # … funnel 0
+
+
+@pytest.mark.asyncio
+async def test_verify_grounding_pins_temperature_to_zero(monkeypatch):
+    """The grounding verifier verdict is deterministic regardless of the default."""
+    http_client = _http_mock(monkeypatch, content="GROUNDED: ok.")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    client.temperature = 0.9
+    await client.verify_grounding(
+        question="q", answer="a", snippets=[_snippet()]
+    )
+    assert http_client.post.call_args.kwargs["json"]["temperature"] == 0.0
+
+
 @pytest.mark.asyncio
 async def test_complete_json_requires_api_key():
     client = OpenRouterClient()
