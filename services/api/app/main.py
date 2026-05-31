@@ -2350,47 +2350,55 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             "trace_id": trace_id,
         }
 
-    now = datetime.now(UTC)
-    # Story 12.08: cancel any pending +1d nudge BEFORE the pipeline runs so a
-    # reply arriving at the same instant the queue fires never double-notifies.
-    # The hook is a no-op when chat_id is None.
-    await asyncio.to_thread(
-        maybe_cancel,
-        repo=sales_followup_repository,
-        chat_id=request.chat_id,
-        now=now,
-        trace_id=trace_id,
-    )
-    ctx = _build_answer_context(
-        chat_id=request.chat_id,
-        customer_username=request.customer_username,
-        trace_id=trace_id,
-        now=now,
-    )
-
-    # Story 12.13 — defer the interim ack: run the pipeline, and send
-    # "минуточку" only if it hasn't returned within the delay. Fast turns (a
-    # scoping question) finish first and get no ack; slow turns (RAG / calendar
-    # / price) cross the threshold and get one.
-    interim_eligible = request.chat_id is not None and _should_send_interim(
-        text=request.text, chat_id=request.chat_id
-    )
-    pipeline_task = asyncio.create_task(
-        answer_pipeline.run(question=request.text, ctx=ctx)
-    )
-    if interim_eligible:
-        done, _pending = await asyncio.wait(
-            {pipeline_task}, timeout=_effective_inbound_interim_delay()
-        )
-        if pipeline_task not in done:
-            await _safe_send_message(
-                chat_id=request.chat_id,
-                text=_effective_inbound_interim_message(),
-                failure_summary="Interim ack delivery failed",
-                failure_kind="inbound_interim_failed",
-            )
-
+    # Story 12.24 hardening — EVERYTHING after the (permanent) claim runs under
+    # the try/except below. A failure between the claim and the pipeline (a
+    # transient sqlite lock in maybe_cancel / context build / the
+    # _should_send_interim state read, an interim-ack hiccup, or the pipeline
+    # itself) must still deliver an ack instead of 500-ing AFTER the claim is
+    # durable — otherwise the bot_gateway's same-trace retry is deduplicated
+    # into permanent customer silence (the "ничего не ответил" bug).
+    ctx: AnswerContext | None = None
     try:
+        now = datetime.now(UTC)
+        # Story 12.08: cancel any pending +1d nudge BEFORE the pipeline runs so a
+        # reply arriving at the same instant the queue fires never double-notifies.
+        # The hook is a no-op when chat_id is None.
+        await asyncio.to_thread(
+            maybe_cancel,
+            repo=sales_followup_repository,
+            chat_id=request.chat_id,
+            now=now,
+            trace_id=trace_id,
+        )
+        ctx = _build_answer_context(
+            chat_id=request.chat_id,
+            customer_username=request.customer_username,
+            trace_id=trace_id,
+            now=now,
+        )
+
+        # Story 12.13 — defer the interim ack: run the pipeline, and send
+        # "минуточку" only if it hasn't returned within the delay. Fast turns (a
+        # scoping question) finish first and get no ack; slow turns (RAG / calendar
+        # / price) cross the threshold and get one.
+        interim_eligible = request.chat_id is not None and _should_send_interim(
+            text=request.text, chat_id=request.chat_id
+        )
+        pipeline_task = asyncio.create_task(
+            answer_pipeline.run(question=request.text, ctx=ctx)
+        )
+        if interim_eligible:
+            done, _pending = await asyncio.wait(
+                {pipeline_task}, timeout=_effective_inbound_interim_delay()
+            )
+            if pipeline_task not in done:
+                await _safe_send_message(
+                    chat_id=request.chat_id,
+                    text=_effective_inbound_interim_message(),
+                    failure_summary="Interim ack delivery failed",
+                    failure_kind="inbound_interim_failed",
+                )
+
         pipeline_result = await pipeline_task
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
@@ -2402,7 +2410,9 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 "error": str(exc),
             },
         )
-        ack_message = _effective_inbound_ack_message(project_id=ctx.project_id)
+        ack_message = _effective_inbound_ack_message(
+            project_id=ctx.project_id if ctx is not None else None
+        )
         if request.chat_id is not None:
             await _safe_send_message(
                 chat_id=request.chat_id,
