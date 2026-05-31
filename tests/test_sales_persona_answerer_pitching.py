@@ -1,9 +1,11 @@
-"""Pitching / completion-stage tests for ``SalesPersonaAnswerer`` (Epic-12.10).
+"""Pitching completion tests for ``SalesPersonaAnswerer`` (Epic-12.10 / 12.19).
 
-Once scoping is complete the answerer enters ``pitching`` and runs the
-completion logic: check the customer's concrete requested time against the
-calendar, then either confirm + hand off (free / can't-verify) or report the
-slot busy and offer the nearest free alternative.
+In ``pitching`` a customer COUNTER-OFFER (a reply carrying a parseable
+date/time) re-runs the completion logic: check the requested time against the
+calendar, then confirm + hand off (free / can't-verify) or report the slot busy
+and offer the nearest free alternative. Acceptance of the offered slot, closure,
+and the no-loop guarantee live in
+``test_sales_persona_answerer_pitching_reask_guard``.
 """
 
 from __future__ import annotations
@@ -176,13 +178,15 @@ def _build(
 
 @pytest.mark.asyncio
 async def test_requested_time_free_confirms_and_hands_off() -> None:
+    # A counter-offer in pitching (customer states a concrete time) is
+    # re-verified; a free slot confirms + hands off.
     answerer, _ = _build(
-        state=_state(dates="завтра в 14:00"),
+        state=_state(dates=None),
         cal_settings=_FakeCalSettings(),
         token_provider=_TokenProvider(),
         freebusy=_FreeBusy(busy=()),
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     assert result.text == SLOT_FREE_HANDOFF_LINE
     assert result.response_mode == "sales_escalation"
     assert result.metadata["hitl_reason"] == "sales_scoping_complete"
@@ -196,13 +200,13 @@ async def test_requested_time_busy_offers_alternative() -> None:
             end=datetime(2026, 5, 30, 15, 0, tzinfo=ZoneInfo("Europe/Moscow")),
         ),
     )
-    answerer, _ = _build(
-        state=_state(dates="завтра в 14:00"),
+    answerer, state_repo = _build(
+        state=_state(dates=None),
         cal_settings=_FakeCalSettings(),
         token_provider=_TokenProvider(),
         freebusy=_FreeBusy(busy=busy),
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     text = result.text or ""
     assert SLOT_BUSY_LINE in text
     assert "Ближайшее свободное время" in text
@@ -211,32 +215,39 @@ async def test_requested_time_busy_offers_alternative() -> None:
     assert (
         result.metadata["sales_turn_kind"] == "scoping_complete_busy_alternative"
     )
+    # Story 12.19 — the offered slot is remembered so the next turn can accept it.
+    assert state_repo.upserts[-1]["last_proposal"] == {
+        "alternative_iso": "2026-05-30T09:00:00+03:00"
+    }
 
 
 @pytest.mark.asyncio
 async def test_requested_time_busy_no_alternative_hands_off() -> None:
     # A rule with no working hours → requested time unavailable AND no slot
     # anywhere in the window.
-    answerer, _ = _build(
-        state=_state(dates="завтра в 14:00"),
+    answerer, state_repo = _build(
+        state=_state(dates=None),
         cal_settings=_FakeCalSettings(rules=[_rule(working=False)]),
         token_provider=_TokenProvider(),
         freebusy=_FreeBusy(busy=()),
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     text = result.text or ""
     assert SLOT_BUSY_LINE in text
     assert SCOPING_COMPLETE_HANDOFF_LINE in text
     assert result.metadata["sales_turn_kind"] == "scoping_complete_busy_no_slot"
+    # No slot was offered → nothing to accept onto next turn.
+    assert state_repo.upserts[-1]["last_proposal"] is None
 
 
 @pytest.mark.asyncio
 async def test_calendar_disabled_plain_handoff() -> None:
+    # A counter-offer with calendar disabled can't be verified → plain handoff.
     answerer, _ = _build(
-        state=_state(dates="завтра в 14:00"),
+        state=_state(dates=None),
         cal_settings=_FakeCalSettings(enabled=False),
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
 
 
@@ -244,19 +255,19 @@ async def test_calendar_disabled_plain_handoff() -> None:
 async def test_settings_missing_plain_handoff() -> None:
     cal = _FakeCalSettings()
     cal._settings = None  # enabled but no settings row
-    answerer, _ = _build(state=_state(dates="завтра в 14:00"), cal_settings=cal)
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    answerer, _ = _build(state=_state(dates=None), cal_settings=cal)
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
 
 
 @pytest.mark.asyncio
-async def test_no_time_asks_for_date_and_time() -> None:
-    # Story 12.10 — calendar-actionable booking with no date/time at all:
-    # ask for it (→ awaiting_time) instead of a blind hand off.
+async def test_counter_offer_whole_month_without_time_asks() -> None:
+    # A counter-offer that names a month but no clock time → ask for the time
+    # (→ awaiting_time) instead of a blind hand off.
     answerer, state_repo = _build(
         state=_state(dates=None), cal_settings=_FakeCalSettings()
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="в мае", ctx=_ctx())
     assert result.text == ASK_FOR_TIME_LINE
     assert result.metadata["sales_turn_kind"] == "awaiting_time_prompt"
     assert result.metadata.get("escalate") is not True
@@ -264,12 +275,12 @@ async def test_no_time_asks_for_date_and_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dates_without_concrete_time_asks_for_date_and_time() -> None:
-    # "скоро" has no clock time → not a concrete requested start → ask.
+async def test_counter_offer_single_date_without_time_asks() -> None:
+    # "1 июня" parses to a date but carries no clock time → ask for the time.
     answerer, state_repo = _build(
-        state=_state(dates="скоро"), cal_settings=_FakeCalSettings()
+        state=_state(dates=None), cal_settings=_FakeCalSettings()
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="1 июня", ctx=_ctx())
     assert result.text == ASK_FOR_TIME_LINE
     assert state_repo.upserts[-1]["current_stage"] == STAGE_AWAITING_TIME
 
@@ -299,10 +310,10 @@ async def test_busy_alternative_appends_media_fallback_line() -> None:
 async def test_multiple_services_cannot_pin_plain_handoff() -> None:
     two = _FakeCalSettings(rules=[_rule(), _rule()])
     answerer, _ = _build(
-        state=_state(dates="завтра в 14:00"),
+        state=_state(dates=None),
         cal_settings=two,
         token_provider=_TokenProvider(),
         freebusy=_FreeBusy(),
     )
-    result = await answerer.try_answer(question="ну что?", ctx=_ctx())
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     assert result.text == SCOPING_COMPLETE_HANDOFF_LINE

@@ -40,7 +40,7 @@
 #   13-03 ∥ 13-04 after 13-02; 13-05 after 13-04.
 
 generated: 2026-05-23
-last_updated: 2026-05-29
+last_updated: 2026-05-31
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -109,4 +109,6 @@ development_status:
   12-11-graceful-decline-and-loop-guard-in-scoping: done
   12-12-configurable-required-scoping-fields: done
   12-13-deferred-interim-ack: done
+  12-19-recognize-slot-confirmation-and-stop-pitching-reask-loop: review
+  12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: ready-for-dev
   epic-12-retrospective: optional

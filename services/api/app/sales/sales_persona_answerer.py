@@ -136,6 +136,13 @@ ASK_FOR_TIME_LINE = (
     "Уточните, пожалуйста, желаемые дату и время — проверю по календарю "
     "и подтвержу."
 )
+# Story 12.19 — confirmation when the customer accepts the offered alternative
+# slot in pitching ("да" / "давайте на 31-ое в 8"). Names the slot so the
+# customer sees what was confirmed; the operator (already escalated) books it.
+# ``{day_month}`` = "31 мая", ``{time}`` = "08:00".
+PITCHING_ACCEPT_CONFIRM_LINE = (
+    "Отлично, передаю детали коллеге — подтвердят {day_month} на {time}."
+)
 
 # Story 12.05 — equipment-question lemma triggers. Lowercase lemma roots
 # matched against ``RussianNormalizer.lemmas(question)``; any overlap fires
@@ -917,21 +924,138 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         state: dict[str, Any],
     ) -> AnswerResult:
-        """Follow-up turns after scoping completed.
+        """Interpret a follow-up after an offer/handoff parked us in pitching.
 
-        A bare closure word ("всё", "нет", "больше ничего") means the customer
-        has nothing more to add — recognised via :func:`is_no_more` so it is
-        never mistaken for a new request. Either way the booking is complete,
-        so we re-run the completion logic (confirm + hand off, or — if a
-        requested time turns out busy — offer the nearest free slot).
+        Priority (Story 12.19): (a) a parseable date in the reply is a
+        counter-offer — re-run completion against the NEW time; (b) an
+        acceptance of the slot we just offered confirms it (naming it) and
+        closes; (c) closure or any other reply hands off to the operator
+        WITHOUT re-checking the stale slot, so the bot never repeats the
+        "time busy" line on every turn.
         """
         intent = Intent.from_dict(state.get("collected_intent") or {})
+        last_proposal = state.get("last_proposal")
+        now = self._clock()
+
+        # (a) Counter-offer — a new parseable date overrides the stale one.
+        merged = self._merge_dates_from_customer_message(
+            existing_intent=intent, question=question, now=now
+        )
+        if merged.dates != intent.dates:
+            return await self._complete_booking(
+                ctx=ctx, intent=merged, stage_before=STAGE_PITCHING
+            )
+
+        # (b) Acceptance of the slot we offered → confirm it (named) and close.
+        if isinstance(last_proposal, dict) and is_acceptance(
+            question, normalizer=self._normalizer
+        ):
+            iso = last_proposal.get("alternative_iso")
+            slot_dt = datetime.fromisoformat(iso) if iso else None
+            return await self._confirm_slot(ctx=ctx, intent=intent, slot_dt=slot_dt)
+
+        # (c) Closure / anything else → hand off; never repeat the busy line.
         closure = is_no_more(question, normalizer=self._normalizer)
-        return await self._complete_booking(
+        return await self._handoff_after_pitching_followup(
+            ctx=ctx, intent=intent, closure=closure
+        )
+
+    async def _confirm_slot(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        slot_dt: datetime | None,
+    ) -> AnswerResult:
+        """Confirm an accepted slot (naming it) + hand off; park in closing.
+
+        ``slot_dt`` names the confirmed time; ``None`` (accepted but no concrete
+        slot to name) falls back to the generic completion line. Autonomous
+        booking is out of scope — the operator (already escalated) finalises.
+        """
+        if slot_dt is not None:
+            text = PITCHING_ACCEPT_CONFIRM_LINE.format(
+                day_month=f"{slot_dt.day} {_MONTHS_GENITIVE[slot_dt.month]}",
+                time=slot_dt.strftime("%H:%M"),
+            )
+            turn_kind = "pitching_accept_confirmed"
+        else:
+            text = SCOPING_COMPLETE_HANDOFF_LINE
+            turn_kind = "pitching_accept_no_slot"
+        await self._persist(
             ctx=ctx,
+            current_stage=STAGE_CLOSING,
             intent=intent,
-            stage_before=STAGE_PITCHING,
-            base_metadata={"sales_closure_detected": closure},
+            last_proposal=None,
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": STAGE_PITCHING,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": turn_kind,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": STAGE_PITCHING,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": turn_kind,
+                "escalate": True,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+                "escalation_context": _format_intent_summary(intent),
+            },
+        )
+
+    async def _handoff_after_pitching_followup(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        closure: bool,
+    ) -> AnswerResult:
+        """A pitching reply that is neither a counter-offer nor an acceptance.
+
+        Speaks the generic completion line (NEVER the busy line) and parks in
+        closing so a further reply stays handed off — the re-ask loop is dead.
+        """
+        await self._persist(
+            ctx=ctx,
+            current_stage=STAGE_CLOSING,
+            intent=intent,
+            last_proposal=None,
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": STAGE_PITCHING,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": "pitching_followup",
+                "sales_closure_detected": closure,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=SCOPING_COMPLETE_HANDOFF_LINE,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": STAGE_PITCHING,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": "pitching_followup",
+                "sales_closure_detected": closure,
+                "escalate": True,
+                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
+                "escalation_context": _format_intent_summary(intent),
+            },
         )
 
     async def _complete_booking(
@@ -1158,8 +1282,18 @@ class SalesPersonaAnswerer:
         text = f"{SLOT_BUSY_LINE}{slot}"
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        # Story 12.19 — remember the offered slot so a confirmation next turn
+        # (``_handle_pitching``) can recognise it; ``None`` when no slot was
+        # offered (nothing to accept onto).
         await self._persist(
-            ctx=ctx, current_stage=STAGE_PITCHING, intent=intent
+            ctx=ctx,
+            current_stage=STAGE_PITCHING,
+            intent=intent,
+            last_proposal=(
+                {"alternative_iso": alternative.isoformat()}
+                if alternative is not None
+                else None
+            ),
         )
         logger.info(
             "sales_answerer_handled",
@@ -1201,8 +1335,12 @@ class SalesPersonaAnswerer:
         text = SLOT_FREE_HANDOFF_LINE if free else SCOPING_COMPLETE_HANDOFF_LINE
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        # Story 12.19 — the free / can't-verify handoff offers no slot to accept.
         await self._persist(
-            ctx=ctx, current_stage=STAGE_PITCHING, intent=intent
+            ctx=ctx,
+            current_stage=STAGE_PITCHING,
+            intent=intent,
+            last_proposal=None,
         )
         logger.info(
             "sales_answerer_handled",
@@ -2283,6 +2421,7 @@ __all__ = [
     "MATERIAL_DISPATCH_FALLBACK_LINE",
     "MaterialDispatcher",
     "NAME",
+    "PITCHING_ACCEPT_CONFIRM_LINE",
     "PRICING_MISS_FALLBACK",
     "PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER",
     "PROPOSAL_FALLBACK_CALENDAR_DISABLED",
