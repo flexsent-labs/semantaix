@@ -73,6 +73,7 @@ class ApiClient:
         chat_id: int,
         customer_username: str | None,
         trace_id: str,
+        timeout_seconds: int | None = None,
     ) -> dict:
         payload = {
             "text": text,
@@ -80,7 +81,12 @@ class ApiClient:
             "customer_username": customer_username,
             "trace_id": trace_id,
         }
-        return await self._post("/conversations/inbound", payload)
+        # Story 12.24 — a sales-escalation turn can outlast the default 10s
+        # client timeout; the caller passes a longer one so a slow-but-successful
+        # forward isn't mistaken for a failure and retried mid-send.
+        return await self._post(
+            "/conversations/inbound", payload, timeout_override=timeout_seconds
+        )
 
     async def deliver_operator_reply(
         self, *, ticket_id: int, operator_username: str, reply_text: str

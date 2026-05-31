@@ -191,7 +191,9 @@ def test_e2e_full_hitl_journey_via_bot_gateway(tmp_path, monkeypatch):
     }
     # The bot_gateway will try to forward to api over httpx — short-circuit
     # by patching api_client.forward_inbound to call the api app directly.
-    async def _forward(*, text, chat_id, customer_username, trace_id):
+    async def _forward(
+        *, text, chat_id, customer_username, trace_id, timeout_seconds=None
+    ):
         return api_client.post(
             "/conversations/inbound",
             json={
