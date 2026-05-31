@@ -627,6 +627,14 @@ class SalesPersonaAnswerer:
             )
 
         if current_stage == STAGE_CLOSING:
+            # Story 12.23 — a returning customer whose prior booking was already
+            # handed off (terminal ``closing``) and who now sends a FRESH sales
+            # intent restarts the funnel from greeting; ``_handle_greeting`` builds
+            # a clean ``Intent`` and (via ``_persist`` with no ``last_proposal``)
+            # clears the stale offered slot. A non-sales reply ("спасибо") keeps
+            # the sticky handoff — the human still owns the conversation.
+            if is_sales_intent(question, normalizer=self._normalizer):
+                return await self._handle_greeting(question=question, ctx=ctx)
             return await self._handle_closing(
                 question=question, ctx=ctx, state=state
             )
