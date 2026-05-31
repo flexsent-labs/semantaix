@@ -112,4 +112,5 @@ development_status:
   12-19-recognize-slot-confirmation-and-stop-pitching-reask-loop: review
   12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: ready-for-dev
   12-21-proposing-counter-offer-before-acceptance: review
+  12-22-defer-hitl-until-alternative-accepted: review
   epic-12-retrospective: optional
