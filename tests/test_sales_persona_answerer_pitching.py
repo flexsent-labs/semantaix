@@ -27,6 +27,7 @@ from services.api.app.sales.sales_persona_answerer import (
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
     SLOT_FREE_HANDOFF_LINE,
+    SLOT_WRONG_DAY_LINE,
     STAGE_AWAITING_TIME,
     SalesPersonaAnswerer,
 )
@@ -227,9 +228,10 @@ async def test_requested_time_busy_offers_alternative() -> None:
 
 
 @pytest.mark.asyncio
-async def test_requested_time_busy_no_alternative_hands_off() -> None:
-    # A rule with no working hours → requested time unavailable AND no slot
-    # anywhere in the window.
+async def test_requested_time_unavailable_no_alternative_hands_off() -> None:
+    # A rule with no service days / working hours → requested time unavailable
+    # AND no slot anywhere in the window. Story 12.29: the lead line reflects the
+    # actual reason (service doesn't run that day → "недоступна"), not "занято".
     answerer, state_repo = _build(
         state=_state(dates=None),
         cal_settings=_FakeCalSettings(rules=[_rule(working=False)]),
@@ -238,7 +240,8 @@ async def test_requested_time_busy_no_alternative_hands_off() -> None:
     )
     result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
     text = result.text or ""
-    assert SLOT_BUSY_LINE in text
+    assert SLOT_WRONG_DAY_LINE in text
+    assert SLOT_BUSY_LINE not in text
     assert SCOPING_COMPLETE_HANDOFF_LINE in text
     assert result.metadata["sales_turn_kind"] == "scoping_complete_busy_no_slot"
     # Story 12.22 — the no-alternative path keeps escalating: the customer

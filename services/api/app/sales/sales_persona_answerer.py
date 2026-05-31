@@ -33,6 +33,12 @@ from typing import Any, Awaitable, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from services.api.app.answerers import AnswerContext, AnswerResult
+from services.api.app.calendar.availability import (
+    REASON_DATE_EXCEPTION,
+    REASON_IN_PAST,
+    REASON_OUTSIDE_WORKING_HOURS,
+    REASON_WRONG_SERVICE_DAY,
+)
 from services.api.app.calendar.requested_time_check import (
     STATUS_AVAILABLE,
     STATUS_UNAVAILABLE,
@@ -120,6 +126,21 @@ SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
 )
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
+# Story 12.29 — the availability engine already distinguishes *why* a slot is
+# unavailable; surface that as distinct customer copy instead of mislabeling
+# every unavailable slot "занято" (busy). A 23:00 request is outside working
+# hours, not booked by someone else. Unmapped reasons (plain `busy`, the rare
+# `outside_lookahead`, or `None`) keep SLOT_BUSY_LINE as the safe default.
+SLOT_OFF_HOURS_LINE = "К сожалению, это время вне рабочих часов."
+SLOT_WRONG_DAY_LINE = "К сожалению, в этот день услуга недоступна."
+SLOT_CLOSED_DATE_LINE = "К сожалению, в этот день мы не работаем."
+SLOT_IN_PAST_LINE = "К сожалению, это время уже прошло."
+_UNAVAILABLE_LEAD_LINES: dict[str, str] = {
+    REASON_OUTSIDE_WORKING_HOURS: SLOT_OFF_HOURS_LINE,
+    REASON_WRONG_SERVICE_DAY: SLOT_WRONG_DAY_LINE,
+    REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE,
+    REASON_IN_PAST: SLOT_IN_PAST_LINE,
+}
 # Story 12.11 — when the customer declines the field just asked ("не нужно",
 # "0", "без водителей"), record this sentinel so the funnel advances instead of
 # re-asking forever. Non-None → satisfies completeness; reads cleanly in the
@@ -1133,6 +1154,7 @@ class SalesPersonaAnswerer:
                 alternative=requested.alternative,
                 base_metadata=base_metadata,
                 dispatch_fallback=dispatch_fallback,
+                reason=requested.reason,
             )
         free = requested is not None and requested.status == STATUS_AVAILABLE
         return await self._handoff_after_scoping(
@@ -1296,8 +1318,9 @@ class SalesPersonaAnswerer:
         alternative: datetime | None,
         base_metadata: dict[str, Any],
         dispatch_fallback: bool,
+        reason: str | None = None,
     ) -> AnswerResult:
-        """Requested time is busy — offer an alternative or hand off.
+        """Requested time is unavailable — offer an alternative or hand off.
 
         Story 12.22 — when we can name a nearest free slot we offer it and
         park in ``pitching`` so ``_handle_pitching`` can interpret the
@@ -1319,7 +1342,10 @@ class SalesPersonaAnswerer:
         else:
             slot = f" {SCOPING_COMPLETE_HANDOFF_LINE}"
             turn_kind = "scoping_complete_busy_no_slot"
-        text = f"{SLOT_BUSY_LINE}{slot}"
+        # Story 12.29 — lead line reflects *why* the slot is unavailable; the
+        # alternative-offer / handoff tail and stage transition are unchanged.
+        lead_line = _UNAVAILABLE_LEAD_LINES.get(reason, SLOT_BUSY_LINE)
+        text = f"{lead_line}{slot}"
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         # Story 12.19 — remember the offered slot so a confirmation next turn
@@ -1462,6 +1488,7 @@ class SalesPersonaAnswerer:
             alternative=availability.alternative,
             base_metadata={},
             dispatch_fallback=False,
+            reason=availability.reason,
         )
 
     async def _handoff_after_scoping(
