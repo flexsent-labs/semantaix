@@ -115,4 +115,5 @@ development_status:
   12-22-defer-hitl-until-alternative-accepted: review
   12-23-reset-stale-closing-on-new-booking: review
   12-24-idempotent-inbound-delivery: review
+  12-25-early-busy-check-during-scoping: review
   epic-12-retrospective: optional

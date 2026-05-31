@@ -705,6 +705,19 @@ class SalesPersonaAnswerer:
             return _skip("llm_transport_error")
 
         merged = intent_merge(Intent(), extracted)
+        # Story 12.25 — if the opener carries a concrete date+time and the
+        # slot is already busy, surface it now: customers should not be
+        # asked logistics questions about a slot that was never going to
+        # happen at that time. Falls through (returns ``None``) on free /
+        # not-connected / error / calendar-disabled / multi-service.
+        intercept = await self._maybe_intercept_busy_slot(
+            ctx=ctx,
+            existing_intent=Intent(),
+            merged_intent=merged,
+            stage_before=STAGE_NEW,
+        )
+        if intercept is not None:
+            return intercept
         # Greeting always transitions into scoping. Even if the customer
         # already supplied every field in the opener (unlikely), the next
         # turn handles the pitching transition cleanly.
@@ -851,6 +864,18 @@ class SalesPersonaAnswerer:
                     )
         # Not complete → keep scoping: forward the next-field question.
         if not merged.is_complete(required):
+            # Story 12.25 — when this turn introduced a concrete date+time
+            # (greeting opener with no time + first scoping reply, or a
+            # customer changing their requested time mid-funnel), verify
+            # the slot now instead of finishing scoping first.
+            intercept = await self._maybe_intercept_busy_slot(
+                ctx=ctx,
+                existing_intent=existing,
+                merged_intent=merged,
+                stage_before=STAGE_SCOPING,
+            )
+            if intercept is not None:
+                return intercept
             await self._persist(
                 ctx=ctx, current_stage=STAGE_SCOPING, intent=merged
             )
@@ -1339,6 +1364,103 @@ class SalesPersonaAnswerer:
             text=text,
             response_mode=RESPONSE_MODE_SALES_ESCALATION,
             metadata=metadata,
+        )
+
+    async def _maybe_intercept_busy_slot(
+        self,
+        *,
+        ctx: AnswerContext,
+        existing_intent: Intent,
+        merged_intent: Intent,
+        stage_before: str,
+    ) -> AnswerResult | None:
+        """Verify a newly-concrete requested time and offer alternatives early.
+
+        Story 12.25 — closes the gap between Story 12.22's busy-check (fires
+        at scoping completion in ``_complete_booking``) and the customer's
+        first turn carrying a concrete date+time. Fires only when the
+        parsed ``requested_start`` from ``merged_intent.dates`` is concrete
+        AND different from the prior turn's parse — so we don't re-check
+        the same time on every scoping turn. ``None`` whenever the calendar
+        cannot give a confident verdict (disabled / multi-service / no
+        single active rule / not connected / error) — the eventual
+        ``_complete_booking`` re-runs the same check.
+        """
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        existing_dates_text = (
+            existing_intent.dates
+            if isinstance(existing_intent.dates, str)
+            else None
+        )
+        merged_dates_text = (
+            merged_intent.dates if isinstance(merged_intent.dates, str) else None
+        )
+        existing_start = (
+            extract_requested_start(
+                text=existing_dates_text, now=ctx.now, project_tz=cal.project_tz
+            )
+            if existing_dates_text
+            else None
+        )
+        new_start = (
+            extract_requested_start(
+                text=merged_dates_text, now=ctx.now, project_tz=cal.project_tz
+            )
+            if merged_dates_text
+            else None
+        )
+        # Compare parsed datetimes, not strings: "14:00 завтра" and
+        # "завтра в 14:00" parse the same but differ as strings.
+        if new_start is None or new_start == existing_start:
+            return None
+        operator = cal.settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        availability = await check_requested_availability(
+            project_id=cal.project_id,
+            requested_start=new_start,
+            operator=operator,
+            operator_chat_id=operator_chat_id,
+            service_rule=cal.service_rule,
+            token_provider=self._calendar_token_provider,
+            freebusy_client=self._calendar_freebusy_client,
+            now=ctx.now,
+            project_tz=cal.project_tz,
+            lookahead_days=cal.settings.lookahead_days,
+            country_code=ctx.country_code,
+            trace_id=ctx.trace_id,
+        )
+        # Mirror ``_complete_booking:1102`` — only ``STATUS_UNAVAILABLE``
+        # triggers a busy response. ``STATUS_NOT_CONNECTED`` / ``STATUS_ERROR``
+        # fall through silently so we never escalate from the early gate
+        # on infra hiccups.
+        if availability.status != STATUS_UNAVAILABLE:
+            return None
+        logger.info(
+            "sales_early_busy_intercepted",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "requested_start_iso": new_start.isoformat(),
+                "alternative_iso": (
+                    availability.alternative.isoformat()
+                    if availability.alternative is not None
+                    else None
+                ),
+            },
+        )
+        return await self._propose_alternative_or_handoff(
+            ctx=ctx,
+            intent=merged_intent,
+            stage_before=stage_before,
+            alternative=availability.alternative,
+            base_metadata={},
+            dispatch_fallback=False,
         )
 
     async def _handoff_after_scoping(
