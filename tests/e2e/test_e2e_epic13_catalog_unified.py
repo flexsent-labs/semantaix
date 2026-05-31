@@ -175,10 +175,17 @@ def _build_client(tmp_path, monkeypatch, *, llm_answer: str = ""):
     )
     # Replace through monkeypatch.setattr on the list so test teardown restores
     # the original answerer — avoids polluting later tests that import
-    # ``api_main.answer_pipeline`` at module scope.
+    # ``api_main.answer_pipeline`` at module scope. Swap the GroundedRagAnswerer
+    # by TYPE rather than by position: the full pipeline ends with the
+    # ScopeGuardAnswerer, so ``swapped[-1] = new_answerer`` would leave the
+    # original GroundedRagAnswerer (bound to the real ``.data/`` repos) ahead of
+    # ours and let leftover project_services rows for the default project leak
+    # into the catalog answer.
     original_answerers = list(api_main.answer_pipeline._answerers)
-    swapped = list(original_answerers)
-    swapped[-1] = new_answerer
+    swapped = [
+        new_answerer if isinstance(a, GroundedRagAnswerer) else a
+        for a in original_answerers
+    ]
     monkeypatch.setattr(api_main.answer_pipeline, "_answerers", swapped)
 
     return TestClient(api_main.app), captured, services_repo, digest_repo

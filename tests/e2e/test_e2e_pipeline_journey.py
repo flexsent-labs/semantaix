@@ -12,6 +12,8 @@ from services.api.app.answerers.weather_client import WeatherSummary
 from services.api.app.main import (
     answer_pipeline,
     answer_trace_repository,
+    calendar_clarify_state_repository,
+    calendar_settings_repository,
     hitl_ticket_repository,
     incident_repository,
     openrouter_client,
@@ -40,6 +42,20 @@ def _wire(tmp_path, monkeypatch):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     answer_trace_repository.db_path = str(tmp_path / "answer_traces.sqlite3")
+    # Isolate the calendar subsystem too. CalendarAvailabilityAnswerer runs
+    # BEFORE GroundedRagAnswerer and reads the shared calendar DB; a leftover
+    # calendar-enabled project there (e.g. from a live demo or signoff run)
+    # would make it own these scheduling questions and escalate to HITL instead
+    # of letting them fall through to RAG. A fresh tmp DB reads "calendar off"
+    # for every project, so the answerer is the intended no-op skip. We mutate
+    # db_path on the shared singletons (the pipeline's answerer holds these very
+    # instances) and re-init the schema at the tmp path; monkeypatch restores
+    # the real path at teardown so we never leak the tmp DB into later tests.
+    calendar_db = str(tmp_path / "calendar.sqlite3")
+    monkeypatch.setattr(calendar_settings_repository, "db_path", calendar_db)
+    calendar_settings_repository.init_schema()
+    monkeypatch.setattr(calendar_clarify_state_repository, "db_path", calendar_db)
+    calendar_clarify_state_repository.init_schema()
     # Isolate the bot_gateway persistence DB too: the gateway now
     # short-circuits on duplicate source_message_id, so leaking rows from
     # earlier test runs would make the first webhook in this test appear
