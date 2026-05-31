@@ -110,5 +110,5 @@ development_status:
   12-12-configurable-required-scoping-fields: done
   12-13-deferred-interim-ack: done
   12-19-recognize-slot-confirmation-and-stop-pitching-reask-loop: review
-  12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: ready-for-dev
+  12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: review
   epic-12-retrospective: optional

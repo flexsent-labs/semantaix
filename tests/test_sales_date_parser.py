@@ -145,6 +145,36 @@ def test_unknown_month_word_rejected() -> None:
     assert parse_russian_date_span("в среду", now=_NOW) is None
 
 
+# --- ordinal day-of-month (Story 12.20) -------------------------------------
+
+
+def test_parses_ordinal_day_oye() -> None:
+    assert parse_russian_date_span("31-ое", now=_NOW) == (
+        date(2026, 5, 31),
+        date(2026, 5, 31),
+    )
+
+
+def test_parses_ordinal_day_in_sentence() -> None:
+    assert parse_russian_date_span("давайте на 10-ое", now=_NOW) == (
+        date(2026, 5, 10),
+        date(2026, 5, 10),
+    )
+
+
+def test_parses_ordinal_forms_go_e_chisla() -> None:
+    for text in ("10-го", "10-е", "10 числа"):
+        assert parse_russian_date_span(text, now=_NOW) == (
+            date(2026, 5, 10),
+            date(2026, 5, 10),
+        ), text
+
+
+def test_ordinal_invalid_day_for_month_rejected() -> None:
+    # 31-ое in a 30-day month (April) → no valid date this month → None.
+    assert parse_russian_date_span("31-ое", now=date(2026, 4, 1)) is None
+
+
 @pytest.mark.parametrize(
     "text,expected_month",
     [

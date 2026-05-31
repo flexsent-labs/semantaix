@@ -24,10 +24,11 @@ from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     ASK_FOR_TIME_LINE,
     MATERIAL_DISPATCH_FALLBACK_LINE,
+    PITCHING_ACCEPT_CONFIRM_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
-    SLOT_FREE_HANDOFF_LINE,
     STAGE_AWAITING_TIME,
+    STAGE_CLOSING,
     SalesPersonaAnswerer,
 )
 
@@ -177,9 +178,10 @@ def _build(
 
 
 @pytest.mark.asyncio
-async def test_requested_time_free_confirms_and_hands_off() -> None:
+async def test_requested_time_free_confirms_by_name_and_closes() -> None:
     # A counter-offer in pitching (customer states a concrete time) is
-    # re-verified; a free slot confirms + hands off.
+    # re-verified; a free slot is confirmed BY NAME and parks in closing
+    # (Story 12.20).
     answerer, _ = _build(
         state=_state(dates=None),
         cal_settings=_FakeCalSettings(),
@@ -187,9 +189,12 @@ async def test_requested_time_free_confirms_and_hands_off() -> None:
         freebusy=_FreeBusy(busy=()),
     )
     result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
-    assert result.text == SLOT_FREE_HANDOFF_LINE
+    assert result.text == PITCHING_ACCEPT_CONFIRM_LINE.format(
+        day_month="30 мая", time="14:00"
+    )
     assert result.response_mode == "sales_escalation"
     assert result.metadata["hitl_reason"] == "sales_scoping_complete"
+    assert result.metadata["stage_after"] == STAGE_CLOSING
 
 
 @pytest.mark.asyncio

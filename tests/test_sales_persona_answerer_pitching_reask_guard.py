@@ -170,16 +170,30 @@ def _build(
 
 
 @pytest.mark.asyncio
-async def test_shorthand_confirm_accepts_offered_slot_and_closes() -> None:
-    # The reported case: "давайте на 31-ое в 8" confirms the offered slot.
+async def test_shorthand_confirm_reverifies_and_confirms_named() -> None:
+    # The reported case. With Story 12.20 parsing, "давайте на 31-ое в 8" is
+    # parsed (ordinal + bare hour) and re-verified; 31 May 08:00 is free → it is
+    # confirmed by name and closes (same user-visible outcome as 12.19).
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    early_rule = ServiceRule(
+        id=1,
+        project_id=_PROJECT_ID,
+        name="Багги",
+        duration_minutes=60,
+        working_hours={day: [["08:00", "20:00"]] for day in week},
+        service_days=week,
+        date_exceptions=[],
+        updated_at=None,
+    )
     answerer, state_repo = _build(
-        state=_state(dates="завтра в 14:00", last_proposal={"alternative_iso": _OFFERED_ISO}),
+        state=_state(
+            dates="завтра в 14:00", last_proposal={"alternative_iso": _OFFERED_ISO}
+        ),
+        cal_settings=_FakeCalSettings(rules=[early_rule]),
     )
     result = await answerer.try_answer(question="давайте на 31-ое в 8", ctx=_ctx())
     text = result.text or ""
     assert text == PITCHING_ACCEPT_CONFIRM_LINE.format(day_month="31 мая", time="08:00")
-    assert "31 мая" in text
-    assert "08:00" in text
     assert SLOT_BUSY_LINE not in text
     assert "Ближайшее свободное время" not in text
     assert result.response_mode == "sales_escalation"
@@ -292,6 +306,39 @@ async def test_free_handoff_resume_then_da_does_not_falsely_confirm() -> None:
 
 
 # --- the "accepted but nothing to name" branch ------------------------------
+
+
+# --- Story 12.20 — autonomous re-verify of a restated (ordinal) time --------
+
+
+@pytest.mark.asyncio
+async def test_ordinal_counter_offer_reverifies_free_slot_and_confirms_named() -> None:
+    # "давайте на 10-ое в 14:00" parses (ordinal + clock), re-verifies free
+    # against the calendar, and confirms it BY NAME (not the offered slot).
+    answerer, state_repo = _build(
+        state=_state(
+            dates="завтра в 14:00", last_proposal={"alternative_iso": _OFFERED_ISO}
+        ),
+        cal_settings=_FakeCalSettings(),
+    )
+    result = await answerer.try_answer(
+        question="давайте на 10-ое в 14:00", ctx=_ctx()
+    )
+    assert result.text == PITCHING_ACCEPT_CONFIRM_LINE.format(
+        day_month="10 июня", time="14:00"
+    )
+    assert result.metadata["stage_after"] == STAGE_CLOSING
+    assert result.metadata["sales_turn_kind"] == "pitching_accept_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_requested_start_for_without_calendar_is_none() -> None:
+    # Defensive guard: no calendar wired → cannot anchor a concrete start.
+    answerer, _ = _build(state=_state(dates="завтра в 14:00", last_proposal=None))
+    result = await answerer._requested_start_for(
+        ctx=_ctx(), intent=Intent(dates="завтра в 14:00")
+    )
+    assert result is None
 
 
 @pytest.mark.asyncio

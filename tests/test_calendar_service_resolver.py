@@ -226,6 +226,80 @@ def test_now_in_other_tz_is_converted_to_project_tz() -> None:
     assert result == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
 
 
+# --- bare hours + ordinal dates (Story 12.20) -------------------------------
+
+
+def test_bare_hour_with_relative_day() -> None:
+    result = extract_requested_start(text="завтра в 8", now=_NOW, project_tz=MOSCOW)
+    assert result == datetime(2026, 6, 6, 8, 0, tzinfo=MOSCOW)
+
+
+def test_bare_hour_utra_is_am() -> None:
+    result = extract_requested_start(
+        text="завтра в 8 утра", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 6, 8, 0, tzinfo=MOSCOW)
+
+
+def test_bare_hour_vechera_is_pm() -> None:
+    result = extract_requested_start(
+        text="завтра в 8 вечера", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 6, 20, 0, tzinfo=MOSCOW)
+
+
+def test_bare_hour_out_of_range_is_none() -> None:
+    assert (
+        extract_requested_start(text="завтра в 25", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_ordinal_day_with_clock() -> None:
+    # "10-ое" with now=5 June → 10 June (future, this month).
+    result = extract_requested_start(
+        text="10-ое в 14:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 10, 14, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_day_bare_hour() -> None:
+    # The reported "<ordinal> в <hour>" shape.
+    result = extract_requested_start(text="10-ое в 8", now=_NOW, project_tz=MOSCOW)
+    assert result == datetime(2026, 6, 10, 8, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_forms_go_and_chisla() -> None:
+    for text in ("10-го в 9", "10 числа в 9"):
+        result = extract_requested_start(text=text, now=_NOW, project_tz=MOSCOW)
+        assert result == datetime(2026, 6, 10, 9, 0, tzinfo=MOSCOW), text
+
+
+def test_ordinal_past_day_rolls_to_next_month() -> None:
+    # "3-ое" with now=5 June → 3 June is past → 3 July.
+    result = extract_requested_start(text="3-ое в 9", now=_NOW, project_tz=MOSCOW)
+    assert result == datetime(2026, 7, 3, 9, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_invalid_day_rolls_to_month_that_has_it() -> None:
+    # 31 June does not exist → roll forward to 31 July.
+    result = extract_requested_start(text="31-ое в 9", now=_NOW, project_tz=MOSCOW)
+    assert result == datetime(2026, 7, 31, 9, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_day_out_of_range_is_none() -> None:
+    assert (
+        extract_requested_start(text="40-ое в 9", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_ordinal_without_clock_is_none() -> None:
+    assert (
+        extract_requested_start(text="10-ое", now=_NOW, project_tz=MOSCOW) is None
+    )
+
+
 # --- copy constants ---------------------------------------------------------
 
 
