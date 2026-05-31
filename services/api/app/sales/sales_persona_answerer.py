@@ -47,6 +47,7 @@ from services.api.app.calendar.requested_time_check import (
 from services.api.app.calendar.service_resolver import extract_requested_start
 from services.api.app.rag import RagChunk
 from services.api.app.sales.acceptance import is_acceptance
+from services.api.app.sales.cancel_intent import is_cancellation
 from services.api.app.sales.client_materials_repository import ClientMaterial
 from services.api.app.sales.closure import is_no_more
 from services.api.app.sales.date_parser import parse_russian_date_span
@@ -99,6 +100,10 @@ HITL_REASON_CLOSING_HANDOFF = "sales_closing_handoff"
 HITL_REASON_PRICE_UNKNOWN = "price_unknown"
 HITL_REASON_EMPTY_CATALOG = "catalog_empty"
 HITL_REASON_SCOPING_COMPLETE = "sales_scoping_complete"
+# Story 12.27 — a customer asking to cancel a booking. There is no
+# booking-of-record the bot can cancel autonomously (operators finalize
+# bookings), so the request is acknowledged and routed to a human.
+HITL_REASON_CANCELLATION = "sales_cancellation_request"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -107,6 +112,13 @@ PROPOSAL_FALLBACK_CALENDAR_DISABLED = "Дату подтвержу у колле
 PROPOSAL_FALLBACK_UNAVAILABLE = "Уточню свободные даты и сразу сообщу."
 PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER = "На каком туре остановимся?"
 CLOSING_HANDOFF_LINE = "Передам коллегам для подтверждения, на связи."
+# Story 12.27 — cancellation request. The customer-facing line does not presume
+# the cancellation is done (a human confirms it); the operator-facing context
+# tags the ticket so the human sees it's an отмена, not a new booking.
+CANCELLATION_HANDOFF_LINE = (
+    "Передам вашу просьбу об отмене коллеге — свяжутся с вами."
+)
+CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 # Story 12.05 — appended to the textual reply when a media dispatch failed
@@ -588,7 +600,14 @@ class SalesPersonaAnswerer:
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
         result = await self._dispatch(question=question, ctx=ctx)
-        if result.handled and ctx.chat_id is not None:
+        # Story 12.27 — a cancellation turn suppresses the +24h nudge so the
+        # customer isn't asked "still thinking about booking?" a day after asking
+        # to cancel. Any other handled turn schedules one nudge as before.
+        if (
+            result.handled
+            and ctx.chat_id is not None
+            and not result.metadata.get("suppress_followup")
+        ):
             await self._enqueue_followup(ctx=ctx)
         return result
 
@@ -599,6 +618,16 @@ class SalesPersonaAnswerer:
             return _skip("no_chat_id")
 
         state = await asyncio.to_thread(self._state_repo.get, ctx.chat_id)
+
+        # Story 12.27 — a cancellation request is its own intent. Catch it before
+        # the booking funnel (whose бронь/запись seeds would pull "хочу отменить
+        # запись" into scoping) and before the not-sales-intent skip (so a bare
+        # "можно отменить?" routes to a human instead of falling through to
+        # generic RAG/HITL). Fires in any state/stage.
+        if is_cancellation(question, normalizer=self._normalizer):
+            return await self._handle_cancellation(
+                question=question, ctx=ctx, state=state
+            )
 
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
@@ -781,6 +810,55 @@ class SalesPersonaAnswerer:
                 "answerer": NAME,
                 "stage_before": STAGE_NEW,
                 "stage_after": stage_after,
+            },
+        )
+
+    async def _handle_cancellation(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any] | None,
+    ) -> AnswerResult:
+        """Route a cancellation request to a human (Story 12.27).
+
+        No booking-of-record exists to cancel autonomously (operators finalize
+        bookings), so we acknowledge with a cancellation-specific line and open a
+        HITL ticket tagged ``sales_cancellation_request`` carrying the customer's
+        verbatim message (via ``escalation_context``). The funnel is parked at
+        the terminal ``closing`` stage — a human owns it now; a later fresh
+        booking intent re-greets via Story 12.23. The +24h nudge is suppressed
+        for this turn (the inbound route already cancelled any pending one when
+        the customer replied).
+        """
+        intent = Intent.from_dict((state or {}).get("collected_intent") or {})
+        stage_before = str((state or {}).get("current_stage") or STAGE_NEW)
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_CLOSING, intent=intent
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": "cancellation_request",
+                "hitl_reason": HITL_REASON_CANCELLATION,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=CANCELLATION_HANDOFF_LINE,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_CLOSING,
+                "sales_turn_kind": "cancellation_request",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_CANCELLATION,
+                "escalation_context": CANCELLATION_ESCALATION_CONTEXT,
+                "suppress_followup": True,
             },
         )
 

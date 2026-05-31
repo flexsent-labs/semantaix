@@ -117,7 +117,7 @@ development_status:
   12-24-idempotent-inbound-delivery: review
   12-25-early-busy-check-during-scoping: review
   12-26-absolute-date-parsing-in-busy-check: review
-  12-27-cancellation-intent-route-to-human: backlog
+  12-27-cancellation-intent-route-to-human: review
   12-28-first-turn-price-intercept: review
   12-29-off-hours-wording-vs-busy: review
   12-30-deterministic-llm-and-dedup-hardening: backlog
