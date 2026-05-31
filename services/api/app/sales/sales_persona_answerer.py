@@ -2026,22 +2026,30 @@ class SalesPersonaAnswerer:
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
         last_proposal = state.get("last_proposal")
 
-        # Acceptance only makes sense when a prior proposal exists. Otherwise
-        # the customer's first sentence in ``proposing`` is the date hint, not
-        # a confirmation.
-        if last_proposal is not None and is_acceptance(
-            question, normalizer=self._normalizer
-        ):
-            return await self._transition_to_closing(
-                ctx=ctx, intent=existing_intent
-            )
-
         now = self._clock()
         merged_intent = self._merge_dates_from_customer_message(
             existing_intent=existing_intent,
             question=question,
             now=now,
         )
+
+        # Counter-offer beats acceptance (Story 12.21, mirroring 12.19's
+        # ``_handle_pitching`` ordering). A reply carrying a NEW/different
+        # parseable date ("давайте на 1 июня") is a counter-offer for that
+        # date — not a confirmation of the slot we already proposed — even
+        # though its acceptance lemma ("давайте") would match ``is_acceptance``.
+        # Treat the reply as acceptance only when it carries no new date
+        # (``merged_intent.dates == existing_intent.dates``) and a prior
+        # proposal exists — otherwise the first proposing turn is the date hint,
+        # not a confirmation. A new date falls through to ``propose`` below.
+        if (
+            merged_intent.dates == existing_intent.dates
+            and last_proposal is not None
+            and is_acceptance(question, normalizer=self._normalizer)
+        ):
+            return await self._transition_to_closing(
+                ctx=ctx, intent=existing_intent
+            )
 
         result = await self._date_proposer.propose(
             project_id=int(ctx.project_id or 0),
