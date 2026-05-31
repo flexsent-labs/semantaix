@@ -114,7 +114,7 @@ EQUIPMENT_ACK_LINE = "Снаряжение подготовим, расскаж�
 # concrete requested time is known and free we say so; when it's busy we offer
 # the nearest free slot via the date proposer.
 SCOPING_COMPLETE_HANDOFF_LINE = (
-    "Спасибо! Передам детали коллегам — подтвердят и вернутся с предложением."
+    "Спасибо! Передам детали коллегам на подтверждение — вернутся с ответом."
 )
 SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
@@ -136,12 +136,13 @@ ASK_FOR_TIME_LINE = (
     "Уточните, пожалуйста, желаемые дату и время — проверю по календарю "
     "и подтвержу."
 )
-# Story 12.19 — confirmation when the customer accepts the offered alternative
-# slot in pitching ("да" / "давайте на 31-ое в 8"). Names the slot so the
-# customer sees what was confirmed; the operator (already escalated) books it.
-# ``{day_month}`` = "31 мая", ``{time}`` = "08:00".
+# Story 12.19 — acknowledgement when the customer accepts the offered
+# alternative slot in pitching ("да" / "давайте на 31-ое в 8"). Names the slot
+# but frames it as passed to the operator *for* confirmation — never as already
+# confirmed (the colleague has not confirmed yet); the operator (already
+# escalated) books it. ``{day_month}`` = "31 мая", ``{time}`` = "08:00".
 PITCHING_ACCEPT_CONFIRM_LINE = (
-    "Отлично, передаю детали коллеге — подтвердят {day_month} на {time}."
+    "Отлично, передаю детали коллеге на подтверждение — {day_month} на {time}."
 )
 
 # Story 12.05 — equipment-question lemma triggers. Lowercase lemma roots

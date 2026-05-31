@@ -108,6 +108,10 @@ claude-opus-4-7 (Claude Code)
 - Ask reply preserves the "never silent about failed media" invariant (appends `MATERIAL_DISPATCH_FALLBACK_LINE` when a dispatch failed).
 - Scope choices: ask for date+time **together** (merge-replace safe); `awaiting_time` deliberately **not** in `_ASIDE_INTERCEPT_STAGES` (an aside mid-clarification re-extracts as no-time → hand off; acceptable for v1).
 
+### Amendments
+
+- **Copy reworded (2026-05-31, operator feedback).** `SCOPING_COMPLETE_HANDOFF_LINE` changed from `"Спасибо! Передам детали коллегам — подтвердят и вернутся с предложением."` to `"Спасибо! Передам детали коллегам на подтверждение — вернутся с ответом."`. Rationale: the bot must not promise colleagues *will* confirm (`подтвердят` presumes the outcome) — it only states the booking is passed *for* confirmation. Mirrors the existing `SLOT_FREE_HANDOFF_LINE` ("…передам коллегам для подтверждения.") and the sibling `PITCHING_ACCEPT_CONFIRM_LINE` reword (Story 12.19). Constant-only change; the 11 test files referencing `SCOPING_COMPLETE_HANDOFF_LINE` assert against the constant, so they tracked the new copy (`ruff` + full suite re-run green).
+
 ### File List
 
 - `services/api/app/sales/sales_persona_answerer.py` (modified)
