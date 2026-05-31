@@ -740,6 +740,18 @@ class SalesPersonaAnswerer:
         )
         if intercept is not None:
             return intercept
+        # Story 12.28 — a first-contact opener that asks a price ("8 человек,
+        # сколько стоит?") must be answered, not dropped. ``classify_turn``
+        # already tags it a price ask; route to pricing BEFORE the funnel
+        # advances to asking for a date. The fields the greeting LLM just
+        # extracted (e.g. headcount) ride along so they inform the quote and
+        # are not re-asked. Falls through (``None``) on a non-price opener or
+        # when pricing isn't configured.
+        price_intercept = await self._maybe_intercept_price_ask(
+            question=question, ctx=ctx, merged=merged
+        )
+        if price_intercept is not None:
+            return price_intercept
         # Greeting always transitions into scoping. Even if the customer
         # already supplied every field in the opener (unlikely), the next
         # turn handles the pitching transition cleanly.
@@ -1489,6 +1501,34 @@ class SalesPersonaAnswerer:
             base_metadata={},
             dispatch_fallback=False,
             reason=availability.reason,
+        )
+
+    async def _maybe_intercept_price_ask(
+        self, *, question: str, ctx: AnswerContext, merged: Intent
+    ) -> AnswerResult | None:
+        """Answer a price ask that lands on the first (greeting) turn.
+
+        Story 12.28 — ``classify_turn`` already recognises a price ask, but it
+        was only consulted mid-funnel (scoping / pitching) via
+        ``_maybe_handle_aside``. On first contact ``state is None`` so the
+        greeting handler ran instead, extracted the fields, was forbidden to
+        quote a price, and asked for a date — silently dropping the customer's
+        question. Routes to the existing ``_handle_pricing`` with a synthetic
+        state carrying the just-extracted ``merged`` intent, so headcount/etc.
+        inform the quote and are persisted (never re-asked). ``None`` when
+        pricing is not configured or the turn is not a price ask — the greeting
+        flow then continues unchanged.
+        """
+        if self._price_lookup is None:
+            return None
+        if classify_turn(question, normalizer=self._normalizer).kind != "price_ask":
+            return None
+        synthetic_state = {
+            "current_stage": STAGE_NEW,
+            "collected_intent": merged.to_dict(),
+        }
+        return await self._handle_pricing(
+            question=question, ctx=ctx, state=synthetic_state
         )
 
     async def _handoff_after_scoping(
