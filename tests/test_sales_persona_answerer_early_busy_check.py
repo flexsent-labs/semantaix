@@ -381,6 +381,44 @@ async def test_scoping_time_first_appears_mid_funnel_busy_intercepts() -> None:
     assert freebusy.calls == 1
 
 
+# --- Regression: absolute date must hit the busy check too ------------------
+
+
+@pytest.mark.asyncio
+async def test_absolute_date_in_intent_intercepts_busy() -> None:
+    """Live bug (31 May 2026): `в понедельник в 13:00` was accepted as bookable
+    even though Monday's slot was busy — because the scoping LLM resolves a
+    weekday/relative reference to an absolute date (`30 мая`, `1 июня`) and the
+    old extractor only parsed relative anchors, so the calendar check was
+    silently skipped. An absolute date must now parse and intercept the same as
+    `завтра`.
+    """
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "30 мая в 14:00"},
+            "next_question": "Сколько человек поедет?",
+        }
+    )
+    answerer, _state_repo, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_tomorrow_14()),
+    )
+    result = await answerer.try_answer(
+        question="можно багги 30 мая в 14:00?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text
+    assert "Ближайшее свободное время" in text
+    assert "09:00" in text
+    assert result.metadata["stage_after"] == STAGE_PITCHING
+    assert "Сколько человек поедет?" not in text
+    assert freebusy.calls == 1
+
+
 # --- AC 5 -------------------------------------------------------------------
 
 
