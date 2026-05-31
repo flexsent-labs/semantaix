@@ -213,6 +213,10 @@ async def test_awaiting_time_reply_with_time_busy_offers_alternative() -> None:
     text = result.text or ""
     assert SLOT_BUSY_LINE in text
     assert "Ближайшее свободное время" in text
+    # Story 12.22 — offering an alternative defers escalation until the
+    # customer responds, even when reached via the awaiting_time path.
+    assert result.response_mode is None
+    assert result.metadata.get("escalate") is not True
 
 
 @pytest.mark.asyncio

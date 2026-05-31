@@ -1263,13 +1263,19 @@ class SalesPersonaAnswerer:
         base_metadata: dict[str, Any],
         dispatch_fallback: bool,
     ) -> AnswerResult:
-        """Requested time is busy — tell the customer + hand off to a human.
+        """Requested time is busy — offer an alternative or hand off.
 
-        When the calendar yields a nearest free slot we name it in the same
-        message; either way we open a HITL ticket carrying the collected intent
-        so the operator confirms / books (autonomous booking is out of scope).
+        Story 12.22 — when we can name a nearest free slot we offer it and
+        park in ``pitching`` so ``_handle_pitching`` can interpret the
+        customer's reply (accept / counter-offer / closure) on the next turn;
+        the HITL ticket is created only when the customer accepts (via
+        ``_confirm_slot``) or abandons the offer (via
+        ``_handoff_after_pitching_followup``). When no alternative is
+        available the customer has nothing to accept onto — we keep the
+        immediate handoff there so a human picks up.
         """
-        if alternative is not None:
+        offered = alternative is not None
+        if offered:
             slot = (
                 f" Ближайшее свободное время — {alternative.day} "
                 f"{_MONTHS_GENITIVE[alternative.month]}, "
@@ -1290,35 +1296,41 @@ class SalesPersonaAnswerer:
             current_stage=STAGE_PITCHING,
             intent=intent,
             last_proposal=(
-                {"alternative_iso": alternative.isoformat()}
-                if alternative is not None
-                else None
+                {"alternative_iso": alternative.isoformat()} if offered else None
             ),
         )
-        logger.info(
-            "sales_answerer_handled",
-            extra={
-                "trace_id": ctx.trace_id,
-                "stage_before": stage_before,
-                "stage_after": STAGE_PITCHING,
-                "sales_turn_kind": turn_kind,
+        log_extra = {
+            "trace_id": ctx.trace_id,
+            "stage_before": stage_before,
+            "stage_after": STAGE_PITCHING,
+            "sales_turn_kind": turn_kind,
+        }
+        if not offered:
+            log_extra["hitl_reason"] = HITL_REASON_SCOPING_COMPLETE
+        logger.info("sales_answerer_handled", extra=log_extra)
+        metadata: dict[str, Any] = {
+            "answerer": NAME,
+            "stage_before": stage_before,
+            "stage_after": STAGE_PITCHING,
+            "sales_turn_kind": turn_kind,
+            **base_metadata,
+        }
+        if offered:
+            # Story 12.22 — defer escalation. The customer still has to accept
+            # the offered slot; a HITL ticket fires on their next-turn reply.
+            return AnswerResult(handled=True, text=text, metadata=metadata)
+        metadata.update(
+            {
+                "escalate": True,
                 "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
-            },
+                "escalation_context": _format_intent_summary(intent),
+            }
         )
         return AnswerResult(
             handled=True,
             text=text,
             response_mode=RESPONSE_MODE_SALES_ESCALATION,
-            metadata={
-                "answerer": NAME,
-                "stage_before": stage_before,
-                "stage_after": STAGE_PITCHING,
-                "sales_turn_kind": turn_kind,
-                "escalate": True,
-                "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
-                "escalation_context": _format_intent_summary(intent),
-                **base_metadata,
-            },
+            metadata=metadata,
         )
 
     async def _handoff_after_scoping(

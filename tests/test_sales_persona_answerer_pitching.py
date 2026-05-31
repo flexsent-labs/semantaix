@@ -211,7 +211,12 @@ async def test_requested_time_busy_offers_alternative() -> None:
     assert SLOT_BUSY_LINE in text
     assert "Ближайшее свободное время" in text
     assert "09:00" in text  # earliest free slot that day
-    assert result.response_mode == "sales_escalation"
+    # Story 12.22 — offering an alternative no longer escalates on the same
+    # turn; the customer must first accept the slot.
+    assert result.response_mode is None
+    assert result.metadata.get("escalate") is not True
+    assert "hitl_reason" not in result.metadata
+    assert "escalation_context" not in result.metadata
     assert (
         result.metadata["sales_turn_kind"] == "scoping_complete_busy_alternative"
     )
@@ -236,6 +241,12 @@ async def test_requested_time_busy_no_alternative_hands_off() -> None:
     assert SLOT_BUSY_LINE in text
     assert SCOPING_COMPLETE_HANDOFF_LINE in text
     assert result.metadata["sales_turn_kind"] == "scoping_complete_busy_no_slot"
+    # Story 12.22 — the no-alternative path keeps escalating: the customer
+    # has nothing to accept, so a human picks up immediately.
+    assert result.response_mode == "sales_escalation"
+    assert result.metadata["escalate"] is True
+    assert result.metadata["hitl_reason"] == "sales_scoping_complete"
+    assert result.metadata["escalation_context"]
     # No slot was offered → nothing to accept onto next turn.
     assert state_repo.upserts[-1]["last_proposal"] is None
 
