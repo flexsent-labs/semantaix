@@ -937,11 +937,29 @@ class SalesPersonaAnswerer:
         last_proposal = state.get("last_proposal")
         now = self._clock()
 
-        # (a) Counter-offer — a new parseable date overrides the stale one.
+        # (a) Counter-offer — a new parseable date overrides the stale one. A
+        # concrete free slot is confirmed BY NAME (Story 12.20); a busy slot
+        # offers a fresh alternative; no concrete time falls through to the
+        # ask / hand off in _complete_booking.
         merged = self._merge_dates_from_customer_message(
             existing_intent=intent, question=question, now=now
         )
         if merged.dates != intent.dates:
+            requested = await self._check_requested_slot(ctx=ctx, intent=merged)
+            if requested is not None and requested.status == STATUS_AVAILABLE:
+                slot_dt = await self._requested_start_for(ctx=ctx, intent=merged)
+                return await self._confirm_slot(
+                    ctx=ctx, intent=merged, slot_dt=slot_dt
+                )
+            if requested is not None and requested.status == STATUS_UNAVAILABLE:
+                return await self._propose_alternative_or_handoff(
+                    ctx=ctx,
+                    intent=merged,
+                    stage_before=STAGE_PITCHING,
+                    alternative=requested.alternative,
+                    base_metadata={},
+                    dispatch_fallback=False,
+                )
             return await self._complete_booking(
                 ctx=ctx, intent=merged, stage_before=STAGE_PITCHING
             )
@@ -1056,6 +1074,19 @@ class SalesPersonaAnswerer:
                 "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
                 "escalation_context": _format_intent_summary(intent),
             },
+        )
+
+    async def _requested_start_for(
+        self, *, ctx: AnswerContext, intent: Intent
+    ) -> datetime | None:
+        """Concrete requested start parsed from ``intent.dates`` — used to name a
+        confirmed slot (Story 12.20). ``None`` when the calendar can't anchor it."""
+        cal = await self._calendar_booking_context(ctx=ctx)
+        dates_text = intent.dates if isinstance(intent.dates, str) else None
+        if cal is None or not dates_text:
+            return None
+        return extract_requested_start(
+            text=dates_text, now=ctx.now, project_tz=cal.project_tz
         )
 
     async def _complete_booking(

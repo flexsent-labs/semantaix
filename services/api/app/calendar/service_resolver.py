@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from services.api.app.russian_text import get_russian_normalizer
@@ -129,6 +129,27 @@ _HH_CLOCK = re.compile(
     r"\b(\d{1,2})\s*час(?:а|ов|у)?\b",
     re.IGNORECASE | re.UNICODE,
 )
+# Story 12.20 — bare hour "в 8" / "в 8 утра" / "в 8 вечера" (no colon, no
+# час-stem). The optional period word disambiguates AM/PM; a bare hour is the
+# literal 24h value.
+_HH_BARE = re.compile(
+    r"\bв\s+(\d{1,2})\s*(утра|вечера|ночи|дня)?\b",
+    re.IGNORECASE | re.UNICODE,
+)
+# Story 12.20 — ordinal day-of-month: "31-ое" / "31-го" / "10-е" / "10 числа".
+_ORDINAL_DAY = re.compile(
+    r"\b(\d{1,2})\s*(?:-?(?:ое|ого|го|ой|ый|й|я|е)\b|числа\b)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _apply_period(hour: int, period: str | None) -> int:
+    """Map a bare hour + optional period word to a 24h hour (Story 12.20)."""
+    if period == "утра":
+        return 0 if hour == 12 else hour
+    if period in ("вечера", "ночи", "дня"):
+        return hour if hour >= 12 else hour + 12
+    return hour
 
 
 def _extract_clock(text: str) -> tuple[int, int] | None:
@@ -146,6 +167,12 @@ def _extract_clock(text: str) -> tuple[int, int] | None:
     clock = _HH_CLOCK.search(text)
     if clock is not None:
         hour = int(clock.group(1))
+        if 0 <= hour <= 23:
+            return hour, 0
+        return None
+    bare = _HH_BARE.search(text)
+    if bare is not None:
+        hour = _apply_period(int(bare.group(1)), bare.group(2))
         if 0 <= hour <= 23:
             return hour, 0
         return None
@@ -192,13 +219,11 @@ def extract_requested_start(
         return None
 
     local_now = now.astimezone(project_tz)
-    lemmas = get_russian_normalizer().lemmas(text)
-    offset = _extract_day_offset(lemmas, local_now.weekday())
-    if offset is None:
+    target_date = _extract_target_date(text, local_now)
+    if target_date is None:
         return None
 
     hour, minute = clock
-    target_date = (local_now + timedelta(days=offset)).date()
     return datetime(
         target_date.year,
         target_date.month,
@@ -207,3 +232,43 @@ def extract_requested_start(
         minute,
         tzinfo=project_tz,
     )
+
+
+def _extract_target_date(text: str, local_now: datetime) -> date | None:
+    """Resolve the requested calendar date (Story 12.20).
+
+    A relative-day word / weekday wins (today + offset); failing that, an
+    ordinal day-of-month ("31-ое") rolled forward to its next valid occurrence.
+    ``None`` when neither is present.
+    """
+    lemmas = get_russian_normalizer().lemmas(text)
+    offset = _extract_day_offset(lemmas, local_now.weekday())
+    if offset is not None:
+        return (local_now + timedelta(days=offset)).date()
+    return _extract_ordinal_date(text, local_now.date())
+
+
+def _ordinal_safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _extract_ordinal_date(text: str, today: date) -> date | None:
+    """An ordinal day-of-month → the next month (from ``today``) whose calendar
+    has that day, on or after today. ``None`` when absent or out of 1..31."""
+    match = _ORDINAL_DAY.search(text)
+    if match is None:
+        return None
+    day = int(match.group(1))
+    if not 1 <= day <= 31:
+        return None
+    for offset in range(13):
+        month_index = today.month - 1 + offset
+        candidate = _ordinal_safe_date(
+            today.year + month_index // 12, month_index % 12 + 1, day
+        )
+        if candidate is not None and candidate >= today:
+            return candidate
+    return None  # pragma: no cover - a 1..31 day always lands within a year

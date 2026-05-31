@@ -71,6 +71,13 @@ _RELATIVE_RE = re.compile(
     r"\b(послезавтра|сегодня|завтра)\b",
     re.UNICODE | re.IGNORECASE,
 )
+# Story 12.20 — ordinal day-of-month ("31-ое" / "31-го" / "10-е" / "10 числа"),
+# resolved against ``now``'s month. Recognising it lets a counter-offer in the
+# sales funnel be detected even without a month name.
+_ORDINAL_DAY_RE = re.compile(
+    r"\b(\d{1,2})\s*(?:-?(?:ое|ого|го|ой|ый|й|я|е)\b|числа\b)",
+    re.UNICODE | re.IGNORECASE,
+)
 
 
 def _month_from_token(token: str) -> int | None:
@@ -145,6 +152,13 @@ def parse_russian_date_span(
             end = _safe_date(year=now.year, month=month, day=last_day)
             if start is not None and end is not None:
                 return start, end
+
+    ordinal_match = _ORDINAL_DAY_RE.search(lowered)
+    if ordinal_match is not None:
+        day = int(ordinal_match.group(1))
+        value = _safe_date(year=now.year, month=now.month, day=day)
+        if value is not None:
+            return value, value
 
     return None
 
