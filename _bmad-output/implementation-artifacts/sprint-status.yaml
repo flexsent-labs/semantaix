@@ -120,5 +120,6 @@ development_status:
   12-27-cancellation-intent-route-to-human: review
   12-28-first-turn-price-intercept: review
   12-29-off-hours-wording-vs-busy: review
-  12-30-deterministic-llm-and-dedup-hardening: backlog
+  12-30-deterministic-llm-sampling: review
+  12-31-operator-command-webhook-dedup: backlog
   epic-12-retrospective: optional
