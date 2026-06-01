@@ -69,6 +69,7 @@ from services.bot_gateway.app.telegram_update import (
     TelegramUpdateValidationError,
     normalize_update,
 )
+from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
 
 app = create_service_app("bot_gateway")
 logger = logging.getLogger(__name__)
@@ -84,6 +85,9 @@ operator_file_repository = OperatorFileRepository(settings.operator_files_db_pat
 media_group_buffer = MediaGroupBuffer(settings.hitl_ticket_db_path)
 offline_backlog_buffer = OfflineBacklogBuffer(settings.persistence_db_path)
 pending_forward_outbox = PendingForwardOutbox(settings.persistence_db_path)
+webhook_update_claim_repository = WebhookUpdateClaimRepository(
+    settings.webhook_dedup_db_path
+)
 offline_context_cues = load_context_cues()
 api_client = ApiClient(
     base_url=settings.api_internal_base_url,
@@ -2386,6 +2390,28 @@ async def _process_telegram_update(
             "attachment_sizes": [a.file_size for a in normalized.attachments],
         },
     )
+
+    # Story 12.31 — operator-command webhook dedup. Claim the Telegram update_id
+    # at the very top, before ANY handler runs. Operator-command handlers
+    # (persona, /hitl_config, the file library, and especially the slow
+    # NL-service handler that makes an OpenRouter call) all run ahead of the
+    # customer-path persist dedup (Story 12.24's UNIQUE(source_message_id) gate
+    # below). Telegram redelivers a webhook when it returns non-200 or exceeds
+    # its ~5s deadline, so a slow operator command would be re-run and
+    # double-act. This atomic claim drops the redelivery here; the customer path
+    # keeps its persist dedup as a second, finer layer (one forward / one
+    # ticket, unchanged). Replay paths (offline-backlog flush, pending-forward
+    # replay) never re-enter the webhook, so they are unaffected.
+    if not webhook_update_claim_repository.claim(normalized.update_id):
+        logger.info(
+            "telegram_duplicate_update_ignored_at_entry",
+            extra={"trace_id": trace_id, "update_id": normalized.update_id},
+        )
+        return {
+            "status": "ignored",
+            "reason": "duplicate_update",
+            "trace_id": trace_id,
+        }
 
     delete_result = await _handle_file_delete_command(normalized=normalized)
     if delete_result is not None:

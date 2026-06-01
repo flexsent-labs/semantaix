@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -40,9 +42,16 @@ def isolated_bot(tmp_path, monkeypatch):
     return {"tmp_path": tmp_path, "dms": sent_dms}
 
 
+_WEBHOOK_UPDATE_IDS = itertools.count(1)
+
+
 def _message(*, text: str, username: str = "ajdevy", chat_id: int = 100):
+    # Unique update_id per delivery so Story 12.31's entry-claim dedup does not
+    # collapse two distinct /help posts (settings-op vs runtime-op) in one test.
+    # message_id stays fixed so the customer-path persist behaviour is unchanged.
+    update_id = next(_WEBHOOK_UPDATE_IDS)
     return {
-        "update_id": 1,
+        "update_id": update_id,
         "message": {
             "message_id": 1,
             "chat": {"id": chat_id},

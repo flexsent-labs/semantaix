@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import itertools
 import logging
 
 import pytest
@@ -70,9 +71,16 @@ def isolated_bot(tmp_path, monkeypatch):
     return {"tmp_path": tmp_path, "dms": sent_dms}
 
 
+_WEBHOOK_UPDATE_IDS = itertools.count(1)
+
+
 def _message(*, text: str, username: str = "calendar_op", chat_id: int = 100):
+    # Each webhook delivery is a distinct Telegram update; give it a unique
+    # update_id so Story 12.31's entry-claim dedup does not collapse two
+    # genuinely different operator messages posted within one test.
+    update_id = next(_WEBHOOK_UPDATE_IDS)
     return {
-        "update_id": 1,
+        "update_id": update_id,
         "message": {
             "message_id": 1,
             "chat": {"id": chat_id},

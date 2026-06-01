@@ -105,17 +105,19 @@ def test_duplicate_update_fixture_is_idempotent_at_gateway_level():
     """Telegram retries the same update_id when its webhook deadline lapses.
     Before the messaging-loop fix, the gateway processed every retry and
     every retry produced a fresh ack + HITL ticket — the customer saw
-    "Минутку, уточню..." three times for one question. The gateway now
-    short-circuits via the persistence layer's UNIQUE(source_message_id)
-    constraint: first call is accepted, subsequent calls return ignored
-    with reason=duplicate_source_message and never reach the api."""
+    "Минутку, уточню..." three times for one question. Story 12.31 now claims
+    the update_id at the very top of the webhook (before any handler), so a
+    redelivery short-circuits there with reason=duplicate_update; the
+    UNIQUE(source_message_id) persist gate remains a second, finer layer. The
+    net guarantee is unchanged: first call accepted, redelivery ignored, and
+    the redelivery never reaches the api."""
     client = TestClient(bot_app)
     payload = _fresh(load_fixture("update_duplicate_update_id.json"))
     first = client.post("/telegram/webhook", json=payload)
     second = client.post("/telegram/webhook", json=payload)
     assert first.status_code == 200 and first.json()["status"] == "accepted"
     assert second.status_code == 200 and second.json()["status"] == "ignored"
-    assert second.json()["reason"] == "duplicate_source_message"
+    assert second.json()["reason"] == "duplicate_update"
 
 
 def test_webhook_rejects_non_object_payload():

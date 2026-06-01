@@ -283,11 +283,12 @@ def test_extract_ticket_id_handles_various_formats():
     assert bot_main._extract_ticket_id("no ticket here") is None
 
 
-def test_telegram_retry_short_circuits_on_duplicate_source_message(monkeypatch):
+def test_telegram_retry_short_circuits_to_single_forward(monkeypatch):
     """The bug-fix regression: 3 webhook POSTs with the same update_id /
-    message_id must produce exactly one forward to the api. The persistence
-    layer already deduped on UNIQUE(source_message_id); this test asserts
-    the webhook handler now consults that result and short-circuits."""
+    message_id must produce exactly one forward to the api. Story 12.31 now
+    claims the update_id at the webhook entry (before any handler), so the
+    redeliveries short-circuit there with reason=duplicate_update; the
+    UNIQUE(source_message_id) persist gate remains a second, finer layer."""
     forward = AsyncMock(return_value={"escalated": True})
     monkeypatch.setattr(api_client, "forward_inbound", forward)
 
@@ -300,9 +301,9 @@ def test_telegram_retry_short_circuits_on_duplicate_source_message(monkeypatch):
     forward.assert_awaited_once()
     assert responses[0]["status"] == "accepted"
     assert responses[1]["status"] == "ignored"
-    assert responses[1]["reason"] == "duplicate_source_message"
+    assert responses[1]["reason"] == "duplicate_update"
     assert responses[2]["status"] == "ignored"
-    assert responses[2]["reason"] == "duplicate_source_message"
+    assert responses[2]["reason"] == "duplicate_update"
     # Same trace_id across all three so the api side would also dedup if
     # the bot_gateway short-circuit were ever bypassed.
     assert (

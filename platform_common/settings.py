@@ -15,6 +15,11 @@ class AppSettings(BaseSettings):
     qdrant_url: str = "http://qdrant:6333"
     database_url: str = "postgresql://postgres:postgres@postgres:5432/semantaix"
     persistence_db_path: str = ".data/semantaix_story1.db"
+    # Story 12.31 — webhook-entry idempotency on the Telegram update_id. A
+    # dedicated, non-transcript store (never the persistence transcript that
+    # feeds /knowledge/extract) so a redelivered operator command is dropped
+    # before any handler runs. Its own DB file on the persistent .data/ volume.
+    webhook_dedup_db_path: str = ".data/semantaix_webhook_dedup.db"
     telegram_bot_token: str = "replace-me"
     telegram_bot_api_base_url: str = "https://api.telegram.org"
     telegram_bot_api_local_mode: bool = False

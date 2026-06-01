@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -77,9 +79,16 @@ def _seed(repo, *, n=1, username="@ajdevy", base_id="ALPHA"):
     return records
 
 
+_WEBHOOK_UPDATE_IDS = itertools.count(1)
+
+
 def _msg(text: str, username: str = "ajdevy") -> dict:
+    # Unique update_id per delivery: Story 12.31's entry-claim dedup drops a
+    # repeated update_id, so two distinct operator commands in one test (e.g.
+    # delete + confirm) must not share one.
+    update_id = next(_WEBHOOK_UPDATE_IDS)
     return {
-        "update_id": 1,
+        "update_id": update_id,
         "message": {
             "message_id": 1,
             "chat": {"id": 100},
