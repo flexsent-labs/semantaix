@@ -125,4 +125,5 @@ development_status:
   12-32-never-silently-accept-unverifiable-slot: review
   12-33-weekday-date-resolution: review
   12-34-decline-out-of-scope: review
+  12-35-reply-in-customer-language: review
   epic-12-retrospective: optional
