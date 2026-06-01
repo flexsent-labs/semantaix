@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -128,6 +129,42 @@ def test_inbound_pipeline_unhandled_escalates_to_hitl(tmp_path, monkeypatch):
     assert trace["response_mode"] == "human_only"
     assert trace["guardrail_outcome"] == "escalated"
     assert "awaiting_human_response" in trace["limitations"]
+
+
+def test_inbound_pipeline_timeout_escalates_to_hitl(tmp_path, monkeypatch):
+    """Story 12.36 (D12) — a pipeline that exceeds the budget is cancelled and
+    escalated to a human (ack + ticket), never left to stall past the gateway's
+    forward deadline (which would retry → dedup → silence)."""
+    _wire(tmp_path)
+    settings.hitl_primary_operator_username = "@ajdevy"
+    monkeypatch.setattr(settings, "inbound_pipeline_timeout_seconds", 0.1)
+    send_mock = AsyncMock(return_value=1)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
+
+    async def _hang(*, question, ctx):
+        await asyncio.sleep(2)  # well past the 0.1s budget
+        return AnswerResult(handled=True, text="too late")
+
+    monkeypatch.setattr(answer_pipeline, "run", _hang)
+    client = TestClient(api_app)
+
+    response = client.post(
+        "/conversations/inbound",
+        json={
+            "text": "Можно багги завтра в 14:00?",
+            "chat_id": 9001,
+            "customer_username": "@customer",
+            "trace_id": "trace-timeout",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["escalated"] is True
+    assert body["response_mode"] == "human_only"
+    assert isinstance(body["hitl_ticket_id"], int)
+    send_mock.assert_awaited()  # the customer still gets an ack
+    trace = client.get("/answer-traces/trace-timeout").json()
+    assert trace["response_mode"] == "human_only"
 
 
 def test_inbound_escalation_sends_ack_to_customer(tmp_path, monkeypatch):
