@@ -676,7 +676,15 @@ answer_pipeline = AnswerPipeline(
         # Scope guard is always last: catches anything the above answerers could
         # not handle and replies with a short random decline phrase instead of
         # escalating to HITL. Keeps operator queue clean of off-topic messages.
-        ScopeGuardAnswerer(phrases_getter=_effective_scope_decline_messages),
+        # Exception (Story 12.39, D10): an in-scope price/booking ask on a project
+        # that DOES bookings (calendar enabled) defers to HITL instead of declining
+        # — it only reaches the last resort when an upstream answerer skipped
+        # (e.g. the sales persona LLM briefly failed).
+        ScopeGuardAnswerer(
+            phrases_getter=_effective_scope_decline_messages,
+            normalizer=get_russian_normalizer(),
+            project_does_bookings=calendar_settings_repository.is_enabled,
+        ),
     ]
 )
 
