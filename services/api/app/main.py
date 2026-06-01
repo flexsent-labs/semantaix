@@ -2399,15 +2399,29 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                     failure_kind="inbound_interim_failed",
                 )
 
-        pipeline_result = await pipeline_task
+        # Story 12.36 (D12) — bound the pipeline so a slow/hung turn escalates
+        # (via the except below) BEFORE the bot_gateway forward deadline, instead
+        # of stalling into a retry → Story-12.24-dedup → permanent silence.
+        # ``wait_for`` cancels the task on timeout, freeing the stuck LLM call.
+        pipeline_budget = max(
+            0.05,
+            settings.inbound_pipeline_timeout_seconds
+            - (time.perf_counter() - started_at),
+        )
+        pipeline_result = await asyncio.wait_for(
+            pipeline_task, timeout=pipeline_budget
+        )
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
+        timed_out = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+        error_reason = "pipeline_timeout" if timed_out else (str(exc) or repr(exc))
         logger.exception(
             "answer_pipeline_unhandled_error",
             extra={
                 "trace_id": trace_id,
                 "chat_id": request.chat_id,
-                "error": str(exc),
+                "error": error_reason,
+                "timed_out": timed_out,
             },
         )
         ack_message = _effective_inbound_ack_message(
@@ -2437,11 +2451,11 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             request_text=request.text,
             response_mode="human_only",
             guardrail_outcome="pipeline_error",
-            guardrail_reasons=[str(exc)],
+            guardrail_reasons=[error_reason],
             guardrail_score=None,
             retrieval=[],
             latency_ms=latency_ms,
-            limitations=["pipeline_error"],
+            limitations=[error_reason],
             hitl_ticket_id=ticket.id,
         )
         return {

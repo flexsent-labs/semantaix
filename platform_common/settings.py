@@ -133,6 +133,12 @@ class AppSettings(BaseSettings):
     # does occur. The webhook already 200s to Telegram first, so a long forward
     # timeout never delays Telegram.
     inbound_forward_timeout_seconds: int = 45
+    # Story 12.36 (D12) — upper bound on the answer pipeline for one inbound turn.
+    # MUST stay below inbound_forward_timeout_seconds so a slow/hung pipeline
+    # escalates to a human (ack + ticket) BEFORE the bot_gateway's forward times
+    # out and retries — a retry would otherwise be deduplicated by the Story
+    # 12.24 claim into permanent customer silence.
+    inbound_pipeline_timeout_seconds: float = 40.0
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50
