@@ -61,6 +61,7 @@ from services.api.app.sales.date_proposer import (
 )
 from services.api.app.sales.decline import is_decline
 from services.api.app.sales.intent import _FIELD_NAMES, Intent, intent_merge
+from services.api.app.sales.out_of_scope import is_out_of_scope
 from services.api.app.sales.price_lookup import (
     PriceFound,
     PriceMissing,
@@ -119,6 +120,12 @@ CANCELLATION_HANDOFF_LINE = (
     "Передам вашу просьбу об отмене коллеге — свяжутся с вами."
 )
 CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
+# Story 12.34 (D7) — an out-of-scope request (dining/lodging) is politely
+# declined and redirected to buggy bookings, never accepted as a booking.
+OUT_OF_SCOPE_DECLINE_LINE = (
+    "Этим, к сожалению, не помогу — я по прокату багги. "
+    "Подскажу с поездкой: даты и сколько человек?"
+)
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 # Story 12.05 — appended to the textual reply when a media dispatch failed
@@ -660,6 +667,18 @@ class SalesPersonaAnswerer:
                 question=question, ctx=ctx, state=state
             )
 
+        # Story 12.34 — an out-of-scope ask (a restaurant / hotel) must be
+        # politely declined, not accepted as a booking. The polite-decline
+        # ScopeGuardAnswerer runs LAST in the pipeline, so in an active funnel
+        # `_handle_scoping`/`_handle_pitching` would otherwise claim the turn and
+        # emit the booking-acceptance line. Gated on ``not is_sales_intent`` so a
+        # mixed "хочу багги … и ресторан?" stays in the funnel and a field answer
+        # is never swallowed; fires in any stage and leaves funnel state intact.
+        if is_out_of_scope(
+            question, normalizer=self._normalizer
+        ) and not is_sales_intent(question, normalizer=self._normalizer):
+            return self._handle_out_of_scope(ctx=ctx)
+
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
                 return _skip("not_sales_intent")
@@ -841,6 +860,31 @@ class SalesPersonaAnswerer:
                 "answerer": NAME,
                 "stage_before": STAGE_NEW,
                 "stage_after": stage_after,
+            },
+        )
+
+    def _handle_out_of_scope(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 12.34 (D7) — politely decline an out-of-scope ask and redirect.
+
+        A plain handled reply: no HITL escalation, and no ``_persist`` — the
+        booking funnel (if any) is left exactly as it was so the customer
+        resumes on their next on-topic turn. ``suppress_followup`` so an
+        off-topic aside doesn't schedule a "still thinking about booking?" nudge.
+        """
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "sales_turn_kind": "out_of_scope_decline",
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=OUT_OF_SCOPE_DECLINE_LINE,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "out_of_scope_decline",
+                "suppress_followup": True,
             },
         )
 
