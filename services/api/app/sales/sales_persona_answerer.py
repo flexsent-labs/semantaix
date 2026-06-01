@@ -41,6 +41,8 @@ from services.api.app.calendar.availability import (
 )
 from services.api.app.calendar.requested_time_check import (
     STATUS_AVAILABLE,
+    STATUS_ERROR,
+    STATUS_NOT_CONNECTED,
     STATUS_UNAVAILABLE,
     check_requested_availability,
 )
@@ -104,6 +106,11 @@ HITL_REASON_SCOPING_COMPLETE = "sales_scoping_complete"
 # booking-of-record the bot can cancel autonomously (operators finalize
 # bookings), so the request is acknowledged and routed to a human.
 HITL_REASON_CANCELLATION = "sales_cancellation_request"
+# Story 12.32 (D1) — a concrete requested time was given but the calendar could
+# not be consulted (not connected / reconnect needed / provider error). The
+# booking is escalated flagged UNVERIFIED so the operator confirms the exact
+# time (and reconnects the calendar if needed) — never a silent accept.
+HITL_REASON_CALENDAR_UNVERIFIED = "sales_calendar_unverified"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -136,6 +143,13 @@ SCOPING_COMPLETE_HANDOFF_LINE = (
 )
 SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
+)
+# Story 12.32 (D1) — the customer named a concrete time but the calendar could
+# NOT be checked. Say plainly we'll verify it; never claim it's free
+# (SLOT_FREE_HANDOFF_LINE) and never the plain accept-shaped completion line —
+# both would imply a slot we never confirmed.
+SLOT_UNVERIFIED_HANDOFF_LINE = (
+    "Спасибо! Проверю это время и вернусь к вам с ответом."
 )
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
 # Story 12.29 — the availability engine already distinguishes *why* a slot is
@@ -1246,6 +1260,25 @@ class SalesPersonaAnswerer:
                 dispatch_fallback=dispatch_fallback,
                 reason=requested.reason,
             )
+        # Story 12.32 (D1) — a concrete time WAS given but the calendar could not
+        # verify it (not connected / reconnect needed / provider error). Never
+        # collapse this into the accept-shaped handoff below: hand off flagged
+        # UNVERIFIED so the operator confirms the exact time. (``requested is
+        # None`` — no concrete time / calendar disabled — still uses the generic
+        # handoff: there was nothing to verify.)
+        if requested is not None and requested.status in (
+            STATUS_NOT_CONNECTED,
+            STATUS_ERROR,
+        ):
+            return await self._handoff_unverified_slot(
+                ctx=ctx,
+                intent=intent,
+                stage_before=stage_before,
+                status=requested.status,
+                reason=requested.reason,
+                base_metadata=base_metadata,
+                dispatch_fallback=dispatch_fallback,
+            )
         free = requested is not None and requested.status == STATUS_AVAILABLE
         return await self._handoff_after_scoping(
             ctx=ctx,
@@ -1653,6 +1686,69 @@ class SalesPersonaAnswerer:
                 "escalate": True,
                 "hitl_reason": HITL_REASON_SCOPING_COMPLETE,
                 "escalation_context": _format_intent_summary(intent),
+                **base_metadata,
+            },
+        )
+
+    async def _handoff_unverified_slot(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        stage_before: str,
+        status: str,
+        reason: str | None,
+        base_metadata: dict[str, Any],
+        dispatch_fallback: bool,
+    ) -> AnswerResult:
+        """Story 12.32 (D1) — concrete time given, but the calendar could not be
+        consulted (``not_connected`` / ``error:<reason>``). Hand off WITHOUT
+        implying the slot is free: a distinct "I'll check it" line + a HITL
+        ticket flagged ``calendar_verified=False`` (with the reason) and an
+        operator-visible warning in the escalation context, so a human confirms
+        the exact time. Mirrors the date-proposer's ``provider_error``
+        escalation; the ``escalation_context`` prefix rides into the operator DM
+        (``api/main.py``).
+        """
+        text = SLOT_UNVERIFIED_HANDOFF_LINE
+        if dispatch_fallback:
+            text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        unverified_reason = status if reason is None else f"{status}:{reason}"
+        await self._persist(
+            ctx=ctx,
+            current_stage=STAGE_PITCHING,
+            intent=intent,
+            last_proposal=None,
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": "scoping_complete_unverified",
+                "calendar_verified": False,
+                "calendar_unverified_reason": unverified_reason,
+                "hitl_reason": HITL_REASON_CALENDAR_UNVERIFIED,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": "scoping_complete_unverified",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_CALENDAR_UNVERIFIED,
+                "calendar_verified": False,
+                "calendar_unverified_reason": unverified_reason,
+                "escalation_context": (
+                    f"⚠️ Календарь не проверен ({unverified_reason}); "
+                    f"подтвердите точное время. {_format_intent_summary(intent)}"
+                ),
                 **base_metadata,
             },
         )
