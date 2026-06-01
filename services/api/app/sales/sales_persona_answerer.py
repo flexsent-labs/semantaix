@@ -234,6 +234,35 @@ _MONTHS_GENITIVE: dict[int, str] = {
     12: "декабря",
 }
 
+# Story 12.33 (D9) — Monday..Sunday, indexed by datetime.weekday().
+_WEEKDAYS_RU: tuple[str, ...] = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
+# The scoping/greeting LLM gets no current-date context otherwise, so it
+# resolves a weekday ("в понедельник") to a guessed absolute date. Anchor it on
+# the project-local today. Defaults to the platform timezone (Europe/Moscow,
+# matching settings.default_timezone); a far-off-tz project near local midnight
+# could see a 1-day-off label — the deterministic resolver still uses the
+# calendar's own tz, so the verdict is unaffected.
+_PROMPT_TODAY_TZ = ZoneInfo("Europe/Moscow")
+
+
+def _format_today_ru(now: datetime, tz: ZoneInfo = _PROMPT_TODAY_TZ) -> str:
+    """Russian 'сегодня' label ("1 июня 2026 года, понедельник") for the date
+    context injected into the greeting/scoping prompts (Story 12.33 / D9)."""
+    local = now.astimezone(tz)
+    return (
+        f"{local.day} {_MONTHS_GENITIVE[local.month]} {local.year} года, "
+        f"{_WEEKDAYS_RU[local.weekday()]}"
+    )
+
+
 _PROMPTS_DIR = Path(__file__).resolve().parent / "system_prompts"
 _GREETING_PROMPT_PATH = _PROMPTS_DIR / "sales_greeting.txt"
 _SCOPING_PROMPT_PATH = _PROMPTS_DIR / "sales_scoping.txt"
@@ -461,10 +490,11 @@ def _intent_to_tags(intent: Intent) -> list[str]:
     return out
 
 
-def _build_greeting_prompt() -> str:
+def _build_greeting_prompt(*, today: str) -> str:
     # The greeting no longer states a name, so the persona is not interpolated
-    # here — ``.format()`` only resolves the escaped JSON braces.
-    return _GREETING_PROMPT_TEMPLATE.format()
+    # here — ``.format()`` resolves ``{today}`` (Story 12.33) + the escaped
+    # JSON braces.
+    return _GREETING_PROMPT_TEMPLATE.format(today=today)
 
 
 def _parse_count(text: str) -> int | None:
@@ -515,10 +545,11 @@ def _format_extracted_fields_spec(schema: ScopingSchema) -> str:
 
 
 def _build_scoping_prompt(
-    *, persona: str, intent: Intent, schema: ScopingSchema
+    *, persona: str, intent: Intent, schema: ScopingSchema, today: str
 ) -> str:
     return _SCOPING_PROMPT_TEMPLATE.format(
         persona=persona,
+        today=today,
         known_fields=_format_known_fields(intent),
         missing_fields=_format_missing_fields(intent, schema),
         pending_instruction=_format_pending_instruction(
@@ -726,7 +757,7 @@ class SalesPersonaAnswerer:
     async def _handle_greeting(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        system = _build_greeting_prompt()
+        system = _build_greeting_prompt(today=_format_today_ru(self._clock()))
         user = f"Сообщение клиента:\n{question}"
 
         try:
@@ -882,7 +913,10 @@ class SalesPersonaAnswerer:
         persona = self._persona_getter()
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
         system = _build_scoping_prompt(
-            persona=persona, intent=existing_intent, schema=schema
+            persona=persona,
+            intent=existing_intent,
+            schema=schema,
+            today=_format_today_ru(self._clock()),
         )
         user = f"Сообщение клиента:\n{question}"
         try:
