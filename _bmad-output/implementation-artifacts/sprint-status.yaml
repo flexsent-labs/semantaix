@@ -126,4 +126,5 @@ development_status:
   12-33-weekday-date-resolution: review
   12-34-decline-out-of-scope: review
   12-36-inbound-pipeline-timeout: review
+  12-37-sales-owns-inscope-turns: review
   epic-12-retrospective: optional
