@@ -63,6 +63,7 @@ from services.api.app.sales.date_proposer import (
 )
 from services.api.app.sales.decline import is_decline
 from services.api.app.sales.intent import _FIELD_NAMES, Intent, intent_merge
+from services.api.app.sales.out_of_scope import is_out_of_scope
 from services.api.app.sales.price_lookup import (
     PriceFound,
     PriceMissing,
@@ -126,6 +127,12 @@ CANCELLATION_HANDOFF_LINE = (
     "Передам вашу просьбу об отмене коллеге — свяжутся с вами."
 )
 CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
+# Story 12.34 (D7) — an out-of-scope request (dining/lodging) is politely
+# declined and redirected to buggy bookings, never accepted as a booking.
+OUT_OF_SCOPE_DECLINE_LINE = (
+    "Этим, к сожалению, не помогу — я по прокату багги. "
+    "Подскажу с поездкой: даты и сколько человек?"
+)
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 # Story 12.05 — appended to the textual reply when a media dispatch failed
@@ -247,6 +254,35 @@ _MONTHS_GENITIVE: dict[int, str] = {
     11: "ноября",
     12: "декабря",
 }
+
+# Story 12.33 (D9) — Monday..Sunday, indexed by datetime.weekday().
+_WEEKDAYS_RU: tuple[str, ...] = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
+# The scoping/greeting LLM gets no current-date context otherwise, so it
+# resolves a weekday ("в понедельник") to a guessed absolute date. Anchor it on
+# the project-local today. Defaults to the platform timezone (Europe/Moscow,
+# matching settings.default_timezone); a far-off-tz project near local midnight
+# could see a 1-day-off label — the deterministic resolver still uses the
+# calendar's own tz, so the verdict is unaffected.
+_PROMPT_TODAY_TZ = ZoneInfo("Europe/Moscow")
+
+
+def _format_today_ru(now: datetime, tz: ZoneInfo = _PROMPT_TODAY_TZ) -> str:
+    """Russian 'сегодня' label ("1 июня 2026 года, понедельник") for the date
+    context injected into the greeting/scoping prompts (Story 12.33 / D9)."""
+    local = now.astimezone(tz)
+    return (
+        f"{local.day} {_MONTHS_GENITIVE[local.month]} {local.year} года, "
+        f"{_WEEKDAYS_RU[local.weekday()]}"
+    )
+
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "system_prompts"
 _GREETING_PROMPT_PATH = _PROMPTS_DIR / "sales_greeting.txt"
@@ -475,10 +511,11 @@ def _intent_to_tags(intent: Intent) -> list[str]:
     return out
 
 
-def _build_greeting_prompt() -> str:
+def _build_greeting_prompt(*, today: str) -> str:
     # The greeting no longer states a name, so the persona is not interpolated
-    # here — ``.format()`` only resolves the escaped JSON braces.
-    return _GREETING_PROMPT_TEMPLATE.format()
+    # here — ``.format()`` resolves ``{today}`` (Story 12.33) + the escaped
+    # JSON braces.
+    return _GREETING_PROMPT_TEMPLATE.format(today=today)
 
 
 def _parse_count(text: str) -> int | None:
@@ -529,10 +566,11 @@ def _format_extracted_fields_spec(schema: ScopingSchema) -> str:
 
 
 def _build_scoping_prompt(
-    *, persona: str, intent: Intent, schema: ScopingSchema
+    *, persona: str, intent: Intent, schema: ScopingSchema, today: str
 ) -> str:
     return _SCOPING_PROMPT_TEMPLATE.format(
         persona=persona,
+        today=today,
         known_fields=_format_known_fields(intent),
         missing_fields=_format_missing_fields(intent, schema),
         pending_instruction=_format_pending_instruction(
@@ -643,6 +681,18 @@ class SalesPersonaAnswerer:
                 question=question, ctx=ctx, state=state
             )
 
+        # Story 12.34 — an out-of-scope ask (a restaurant / hotel) must be
+        # politely declined, not accepted as a booking. The polite-decline
+        # ScopeGuardAnswerer runs LAST in the pipeline, so in an active funnel
+        # `_handle_scoping`/`_handle_pitching` would otherwise claim the turn and
+        # emit the booking-acceptance line. Gated on ``not is_sales_intent`` so a
+        # mixed "хочу багги … и ресторан?" stays in the funnel and a field answer
+        # is never swallowed; fires in any stage and leaves funnel state intact.
+        if is_out_of_scope(
+            question, normalizer=self._normalizer
+        ) and not is_sales_intent(question, normalizer=self._normalizer):
+            return self._handle_out_of_scope(ctx=ctx)
+
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
                 return _skip("not_sales_intent")
@@ -740,7 +790,7 @@ class SalesPersonaAnswerer:
     async def _handle_greeting(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        system = _build_greeting_prompt()
+        system = _build_greeting_prompt(today=_format_today_ru(self._clock()))
         user = f"Сообщение клиента:\n{question}"
 
         try:
@@ -827,6 +877,31 @@ class SalesPersonaAnswerer:
             },
         )
 
+    def _handle_out_of_scope(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 12.34 (D7) — politely decline an out-of-scope ask and redirect.
+
+        A plain handled reply: no HITL escalation, and no ``_persist`` — the
+        booking funnel (if any) is left exactly as it was so the customer
+        resumes on their next on-topic turn. ``suppress_followup`` so an
+        off-topic aside doesn't schedule a "still thinking about booking?" nudge.
+        """
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "sales_turn_kind": "out_of_scope_decline",
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=OUT_OF_SCOPE_DECLINE_LINE,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "out_of_scope_decline",
+                "suppress_followup": True,
+            },
+        )
+
     async def _handle_cancellation(
         self,
         *,
@@ -896,7 +971,10 @@ class SalesPersonaAnswerer:
         persona = self._persona_getter()
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
         system = _build_scoping_prompt(
-            persona=persona, intent=existing_intent, schema=schema
+            persona=persona,
+            intent=existing_intent,
+            schema=schema,
+            today=_format_today_ru(self._clock()),
         )
         user = f"Сообщение клиента:\n{question}"
         try:
