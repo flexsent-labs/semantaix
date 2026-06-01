@@ -122,6 +122,7 @@ development_status:
   12-29-off-hours-wording-vs-busy: review
   12-30-deterministic-llm-sampling: review
   12-31-operator-command-webhook-dedup: review
+  12-32-never-silently-accept-unverifiable-slot: review
   12-33-weekday-date-resolution: review
   12-34-decline-out-of-scope: review
   epic-12-retrospective: optional
