@@ -1,16 +1,43 @@
+---
+name: rebuild
+description: Use when asked to restart, redeploy, rebuild, bounce, or bring up the Semantaix services / live Docker stack — typically after merging a change to main.
+---
+
 # Rebuild & Restart Services
-1. cd to the active worktree (verify with `git rev-parse --show-toplevel`)
-2. git checkout main && git pull
-3. Ensure Docker daemon is running; start Docker Desktop and poll if not
-4. docker compose build && docker compose up -d
-5. **Restart nginx** so it re-resolves the recreated backends' IPs:
-   `docker compose restart nginx`. nginx caches each upstream IP at startup
-   (the config uses a literal-hostname `proxy_pass http://api:8000` with no
-   `resolver`), and `up -d` recreates api/bot_gateway with NEW container IPs —
-   so without this restart nginx keeps proxying to the dead old IPs and returns
-   **502 Bad Gateway** to the Telegram webhook (the customer's messages silently
-   stop arriving).
-6. Verify all containers are healthy AND the proxied routes are reachable —
-   not just the internal health checks. The webhook path must answer through
-   nginx: `curl -s -o /dev/null -w '%{http_code}' http://localhost/telegram/webhook`
-   should be **405** (reachable, POST-only), **never 502**. Report status.
+
+Run the bundled script — it redeploys the live Semantaix stack from `origin/main`
+and restarts it **autonomously (no prompts, no questions)**:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/.claude/skills/rebuild/restart.sh"
+```
+
+It is safe to run unattended and exits non-zero (with a clear message) if it
+can't proceed safely. Do not fall back to manual `docker compose` / `git`
+commands unless the script aborts and tells you why.
+
+## What it does
+
+1. **Locates the deploy dir** = the working_dir of the running `semantaix`
+   compose project (falls back to the main worktree root). Works no matter which
+   worktree you invoke it from.
+2. **Advances that checkout to `origin/main` — fast-forward only.** It does NOT
+   `git checkout main` (main is usually checked out/locked in another worktree),
+   and it ABORTS rather than clobbering if the deploy dir has uncommitted tracked
+   changes or has diverged from `origin/main`.
+3. `docker compose build && docker compose up -d`.
+4. **Restarts nginx** (required). nginx `proxy_pass` uses literal hostnames with
+   no `resolver`, so it caches each upstream IP at startup; `up -d` recreates
+   api/bot_gateway with NEW IPs, and without this restart nginx keeps proxying
+   the dead old IPs → **502 Bad Gateway** on the Telegram webhook (the customer's
+   messages silently stop arriving). This was a real incident.
+5. **Verifies through nginx** (not just internal health): `GET /telegram/webhook`
+   → **405** (reachable, POST-only; never 502) and `/api/health/live` → **200**.
+
+## If it aborts
+
+- *"uncommitted tracked changes"* or *"not a fast-forward"*: the deploy dir needs
+  manual reconciliation — run `git -C <deploy-dir> status` and resolve. The
+  script refuses to force state or discard local commits.
+- *webhook still 502 after a run*: re-run it (re-restarts nginx); if it persists,
+  check `docker compose logs nginx` and backend health.
