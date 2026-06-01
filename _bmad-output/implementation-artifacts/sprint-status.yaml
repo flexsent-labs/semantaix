@@ -124,4 +124,5 @@ development_status:
   12-31-operator-command-webhook-dedup: review
   12-33-weekday-date-resolution: review
   12-34-decline-out-of-scope: review
+  12-35-reply-in-customer-language: review
   epic-12-retrospective: optional
