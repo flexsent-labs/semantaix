@@ -95,6 +95,115 @@ async def test_try_answer_single_phrase_always_returns_it():
 
 
 # ---------------------------------------------------------------------------
+# Unit: in-scope asks DEFER (skip) so the inbound HITL escalation handles them
+# (Story 12.39, D10). A price/booking ask only reaches the last-resort guard
+# when every upstream answerer skipped (e.g. the persona LLM briefly failed) —
+# declining a real customer with "Этим не занимаюсь." is the bug.
+# ---------------------------------------------------------------------------
+
+
+def _bookings_answerer(phrases: str = "Этим не занимаюсь.") -> ScopeGuardAnswerer:
+    """A scope guard whose project DOES offer bookings (so in-scope asks defer)."""
+    return ScopeGuardAnswerer(
+        phrases_getter=lambda: phrases,
+        project_does_bookings=lambda _pid: True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_in_scope_price_ask_defers_to_hitl():
+    answerer = _bookings_answerer()
+    result = await answerer.try_answer(
+        question="Сколько стоит покраска?", ctx=_make_ctx()
+    )
+    assert result.handled is False
+    assert result.text is None
+    assert result.metadata.get("skip_reason") == "in_scope_defer_to_hitl"
+
+
+@pytest.mark.asyncio
+async def test_in_scope_booking_ask_defers_to_hitl():
+    answerer = _bookings_answerer()
+    result = await answerer.try_answer(
+        question="Запишите на багги 3 июня в 13:00", ctx=_make_ctx()
+    )
+    assert result.handled is False
+    assert result.metadata.get("skip_reason") == "in_scope_defer_to_hitl"
+
+
+@pytest.mark.asyncio
+async def test_structural_booking_without_scheduling_verb_defers():
+    # Round-6 D10 #34: "Можно багги сегодня в 13:00 …" is a booking by STRUCTURE
+    # (service + date + time + headcount) but has no scheduling verb, so
+    # has_scheduling_intent misses it and turn-kind is "other". It must still
+    # defer (parses as a concrete date+time) — not decline "Это не ко мне".
+    answerer = _bookings_answerer()
+    result = await answerer.try_answer(
+        question="Можно багги сегодня в 13:00, нас четверо, одна багги?",
+        ctx=_make_ctx(),
+    )
+    assert result.handled is False
+    assert result.metadata.get("skip_reason") == "in_scope_defer_to_hitl"
+
+
+@pytest.mark.asyncio
+async def test_structural_booking_with_naive_now_declines():
+    # Defensive: a naive ctx.now (shouldn't happen in the live pipeline) means
+    # the booking-parse can't safely run, so a structural booking is treated as
+    # un-parseable and declines rather than guessing a timezone.
+    answerer = _bookings_answerer()
+    ctx = AnswerContext(
+        chat_id=1,
+        customer_username="@u",
+        trace_id="t",
+        now=datetime(2026, 6, 2, 8, 28),  # naive — no tzinfo
+    )
+    result = await answerer.try_answer(
+        question="Можно багги сегодня в 13:00, нас четверо, одна багги?",
+        ctx=ctx,
+    )
+    assert result.handled is True
+    assert result.response_mode == RESPONSE_MODE_SCOPE_DECLINE
+
+
+@pytest.mark.asyncio
+async def test_in_scope_ask_declines_when_project_has_no_bookings():
+    # Default (no bookings, e.g. a disabled noop project): even an in-scope ask
+    # declines rather than escalating — don't turn off-topic into operator noise.
+    answerer = ScopeGuardAnswerer(phrases_getter=lambda: "Этим не занимаюсь.")
+    result = await answerer.try_answer(
+        question="Запишите на багги 3 июня в 13:00", ctx=_make_ctx()
+    )
+    assert result.handled is True
+    assert result.response_mode == RESPONSE_MODE_SCOPE_DECLINE
+
+
+@pytest.mark.asyncio
+async def test_factual_question_still_declines():
+    # "Какое сегодня число?" is is_sales_intent-positive (false positive!) but is
+    # NOT a price/booking ask -> the precise signal keeps it a scope decline even
+    # on a bookings-enabled project.
+    answerer = _bookings_answerer()
+    result = await answerer.try_answer(
+        question="Какое сегодня число?", ctx=_make_ctx()
+    )
+    assert result.handled is True
+    assert result.response_mode == RESPONSE_MODE_SCOPE_DECLINE
+
+
+@pytest.mark.asyncio
+async def test_out_of_scope_booking_still_declines():
+    # A booking-shaped ask for an out-of-scope service (lodging, Story 12.34)
+    # declines rather than escalating — we don't book hotels.
+    answerer = _bookings_answerer()
+    result = await answerer.try_answer(
+        question="Где забронировать отель?", ctx=_make_ctx()
+    )
+    assert result.handled is True
+    assert result.response_mode == RESPONSE_MODE_SCOPE_DECLINE
+
+
+# ---------------------------------------------------------------------------
 # Unit: _effective_scope_decline_messages
 # ---------------------------------------------------------------------------
 
@@ -139,15 +248,23 @@ def test_scope_guard_is_in_pipeline():
 # ---------------------------------------------------------------------------
 
 
-def _mini_pipeline(phrases: str):
+def _mini_pipeline(phrases: str, *, project_does_bookings=lambda _pid: False):
     """Return an AnswerPipeline with ONLY the ScopeGuardAnswerer.
 
     Replacing the full pipeline with this avoids real LLM/RAG calls in
     integration tests that are specifically exercising the scope guard path.
+    ``project_does_bookings`` defaults to a noop project (decline path).
     """
     from services.api.app.answerers import AnswerPipeline
 
-    return AnswerPipeline([ScopeGuardAnswerer(phrases_getter=lambda: phrases)])
+    return AnswerPipeline(
+        [
+            ScopeGuardAnswerer(
+                phrases_getter=lambda: phrases,
+                project_does_bookings=project_does_bookings,
+            )
+        ]
+    )
 
 
 def test_offtopic_message_delivers_decline_and_no_ticket(tmp_path, monkeypatch):
@@ -182,6 +299,48 @@ def test_offtopic_message_delivers_decline_and_no_ticket(tmp_path, monkeypatch):
 
     tickets = client.get("/hitl/tickets").json()["items"]
     assert tickets == []
+
+
+def test_inscope_ask_at_scope_guard_escalates_to_hitl(tmp_path, monkeypatch):
+    # When an in-scope booking ask reaches the last-resort guard (every upstream
+    # answerer skipped), the guard defers -> the inbound endpoint escalates to a
+    # human: ack sent + ticket created (NOT a "Этим не занимаюсь." decline).
+    _wire(tmp_path)
+    monkeypatch.setattr(
+        main_mod,
+        "answer_pipeline",
+        _mini_pipeline("Этим не занимаюсь.", project_does_bookings=lambda _pid: True),
+    )
+    monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
+
+    send_calls: list[tuple] = []
+
+    async def _fake_send(*, chat_id: int, text: str) -> int:
+        send_calls.append((chat_id, text))
+        return 1
+
+    monkeypatch.setattr(telegram_bot_sender, "send_message", _fake_send)
+
+    client = TestClient(api_app)
+    resp = client.post(
+        "/conversations/inbound",
+        json={
+            "text": "Запишите на багги 3 июня в 13:00",
+            "chat_id": 5003,
+            "trace_id": "sg-trace-3",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["escalated"] is True
+    assert body["response_mode"] == "human_only"
+
+    tickets = client.get("/hitl/tickets").json()["items"]
+    assert len(tickets) == 1
+    # The customer got an ack (not a scope decline).
+    assert len(send_calls) == 1
+    assert send_calls[0][1] != "Этим не занимаюсь."
 
 
 def test_offtopic_message_trace_persisted(tmp_path, monkeypatch):

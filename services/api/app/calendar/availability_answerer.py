@@ -66,6 +66,7 @@ from services.api.app.calendar.settings_repository import (
 )
 from services.api.app.calendar.token_repository import TokenNotFound
 from services.api.app.russian_text.normalizer import RussianNormalizer
+from services.api.app.sales.russian_sales_intent import is_sales_intent
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,16 @@ class CalendarAvailabilityAnswerer:
             text=question, now=ctx.now, project_tz=project_tz
         )
         if isinstance(match, NoMatch):
+            # Story 12.37 (D11) — a sales-intent booking whose service this legacy
+            # resolver can't match (e.g. the project's multi-word service name)
+            # must NOT get the "на какую услугу и на какое время…" clarify even
+            # when the customer named both. Defer it to the SalesPersonaAnswerer
+            # (the booking owner) → the inbound endpoint escalates to a human. A
+            # non-sales availability ask ("свободно ли завтра?") still clarifies.
+            if is_sales_intent(question, normalizer=self._normalizer):
+                return self._skip(
+                    reason="sales_intent_defer_to_persona", ctx=ctx
+                )
             return await self._clarify_or_escalate(
                 ctx=ctx,
                 clarify_text=CLARIFY_NO_SERVICE,

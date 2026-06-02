@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,8 +10,10 @@ from fastapi.testclient import TestClient
 import services.api.app.main as main_mod
 from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
+    InboundMessageRequest,
     answer_pipeline,
     answer_trace_repository,
+    conversations_inbound,
     hitl_ticket_repository,
     incident_repository,
     rag_repository,
@@ -43,6 +46,47 @@ def _stub_pipeline(monkeypatch, result: AnswerResult) -> AsyncMock:
     mock = AsyncMock(return_value=result)
     monkeypatch.setattr(answer_pipeline, "run", mock)
     return mock
+
+
+@pytest.mark.asyncio
+async def test_inbound_idempotency_gates_run_off_event_loop(tmp_path, monkeypatch):
+    # Story 12.40 (D12): the per-message idempotency gates (find_by_trace_id /
+    # claim_inbound) are the FIRST DB ops every inbound hits. Running them
+    # synchronously on the event loop means a locked/slow SQLite (WAL contention
+    # / disk pressure) wedges the loop -> the bot goes globally silent until a
+    # restart. They must run off the loop (asyncio.to_thread), so a slow DB call
+    # blocks a worker thread, not the loop. The handler is awaited directly here
+    # so the test's own thread IS the event-loop thread.
+    _wire(tmp_path)
+    monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    _stub_pipeline(
+        monkeypatch,
+        AnswerResult(handled=True, text="ok", response_mode="x", metadata={"answerer": "a"}),
+    )
+
+    loop_thread = threading.current_thread()
+    seen: dict[str, threading.Thread] = {}
+    orig_claim = answer_trace_repository.claim_inbound
+    orig_find = answer_trace_repository.find_by_trace_id
+
+    def recording_claim(trace_id):
+        seen["claim"] = threading.current_thread()
+        return orig_claim(trace_id)
+
+    def recording_find(trace_id):
+        seen["find"] = threading.current_thread()
+        return orig_find(trace_id)
+
+    monkeypatch.setattr(answer_trace_repository, "claim_inbound", recording_claim)
+    monkeypatch.setattr(answer_trace_repository, "find_by_trace_id", recording_find)
+
+    await conversations_inbound(
+        InboundMessageRequest(text="hi", chat_id=1, trace_id="t-offloop")
+    )
+
+    assert seen["claim"] is not loop_thread, "claim_inbound ran on the event loop"
+    assert seen["find"] is not loop_thread, "find_by_trace_id ran on the event loop"
 
 
 @pytest.mark.e2e

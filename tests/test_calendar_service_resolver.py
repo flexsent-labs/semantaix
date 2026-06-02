@@ -298,6 +298,142 @@ def test_relative_anchor_still_wins_over_absolute_date() -> None:
     assert result == datetime(2026, 6, 6, 10, 0, tzinfo=MOSCOW)
 
 
+# --- numeric absolute dates (Story 12.38, D10 #30) --------------------------
+# The scoping LLM (and customers) sometimes emit numeric/ISO/slash dates rather
+# than Russian month words: "20.06 в 13:00", "01.06.2026", "2026-09-15", "20/06".
+# Those must reach the busy check too — and crucially the dotted "DD.MM" must not
+# be misread as a "HH.MM" clock (the _HH_MM regex used to greedily eat "03.06").
+
+
+def test_parses_numeric_dotted_date_with_colon_time() -> None:
+    # "20.06" is later this year -> current year; clock "13:00" not eaten by 20.06.
+    result = extract_requested_start(
+        text="Запишите на 20.06 в 13:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 20, 13, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_dotted_date_past_rolls_to_next_year() -> None:
+    # _NOW is 2026-06-05; "02.06" already lapsed this year -> rolls to next year.
+    result = extract_requested_start(
+        text="02.06 в 11:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2027, 6, 2, 11, 0, tzinfo=MOSCOW)
+
+
+def test_parses_dotted_date_with_explicit_4digit_year() -> None:
+    # Explicit year is honored as-is (no rollover) even when already past.
+    result = extract_requested_start(
+        text="01.06.2026 в 14:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 1, 14, 0, tzinfo=MOSCOW)
+
+
+def test_parses_dotted_date_with_explicit_2digit_year() -> None:
+    result = extract_requested_start(
+        text="01.07.27 в 9:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2027, 7, 1, 9, 0, tzinfo=MOSCOW)
+
+
+def test_parses_iso_date_with_time() -> None:
+    result = extract_requested_start(
+        text="2026-09-15 в 9:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 9, 15, 9, 0, tzinfo=MOSCOW)
+
+
+def test_parses_slash_date_with_time() -> None:
+    result = extract_requested_start(
+        text="20/06 в 13:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 20, 13, 0, tzinfo=MOSCOW)
+
+
+def test_parses_slash_date_with_explicit_year() -> None:
+    result = extract_requested_start(
+        text="01/07/2027 в 10:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2027, 7, 1, 10, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_date_with_chasov_clock() -> None:
+    # Strip the date first, then the час-form clock still resolves.
+    result = extract_requested_start(
+        text="20.06 в 13 часов", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 20, 13, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_date_without_time_is_none() -> None:
+    # A bare date with no clock left after stripping -> None (conservative).
+    assert (
+        extract_requested_start(text="20.06", now=_NOW, project_tz=MOSCOW) is None
+    )
+
+
+def test_invalid_numeric_dotted_date_is_none() -> None:
+    # 31.02 is not a real date; no rollover salvages it -> None.
+    assert (
+        extract_requested_start(text="31.02 в 10:00", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_invalid_explicit_year_numeric_date_is_none() -> None:
+    assert (
+        extract_requested_start(
+            text="31.02.2026 в 10:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_explicit_numeric_date_without_time_is_none() -> None:
+    # A fully-qualified date but no clock -> None (a booking needs both).
+    assert (
+        extract_requested_start(text="01.06.2026", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_invalid_iso_date_is_none() -> None:
+    # Month 13 is invalid -> ISO branch yields None, nothing else matches.
+    assert (
+        extract_requested_start(
+            text="2026-13-01 в 10:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_invalid_slash_date_is_none() -> None:
+    assert (
+        extract_requested_start(text="40/06 в 10:00", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_dotted_value_stays_time_when_no_separate_clock() -> None:
+    # "завтра в 05.06": 05.06 is a *valid* date, but stripping it leaves no clock,
+    # so it must read as the time 05:06 (tomorrow), NOT a date. Preserves the
+    # existing dotted-time contract while only treating DD.MM as a date when a
+    # separate clock is present.
+    result = extract_requested_start(
+        text="завтра в 05.06", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 6, 5, 6, tzinfo=MOSCOW)
+
+
+def test_relative_anchor_wins_over_numeric_date() -> None:
+    # "завтра" present alongside a numeric date -> relative offset is used, and
+    # the dotted date is stripped so the clock "10:00" is read (not "20.06").
+    result = extract_requested_start(
+        text="завтра, не 20.06, в 10:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert result == datetime(2026, 6, 6, 10, 0, tzinfo=MOSCOW)
+
+
 # --- copy constants ---------------------------------------------------------
 
 

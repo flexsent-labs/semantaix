@@ -157,6 +157,16 @@ _ABS_DATE_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Numeric / ISO / slash calendar dates (Story 12.38). The scoping LLM and
+# customers sometimes emit these instead of Russian month words ("20.06 в 13:00",
+# "01.06.2026", "2026-09-15", "20/06"). ISO and any year-bearing form are
+# unambiguous; a bare dotted "DD.MM" collides with a "HH.MM" clock and is
+# disambiguated in :func:`_extract_numeric_date`.
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_DOTTED_DATE_YEAR_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
+_SLASH_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
+_DOTTED_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\b")
+
 
 def _extract_clock(text: str) -> tuple[int, int] | None:
     """Return ``(hour, minute)`` if exactly one valid clock time is present.
@@ -217,6 +227,92 @@ def _safe_date(*, year: int, month: int, day: int) -> date | None:
         return None
 
 
+def _resolve_dated(
+    *, day: int, month: int, today: date, explicit_year: int | None
+) -> date | None:
+    """Build a date from day/month, inferring + rolling the year when omitted.
+
+    An explicit year is honored verbatim (even if already past — the customer
+    said so). An omitted year defaults to ``today``'s and rolls to next year
+    when the bare day/month has already lapsed, matching the Russian-word path
+    (:func:`_extract_absolute_date`) so "02.06" behaves like "2 июня".
+    """
+    if explicit_year is not None:
+        year = explicit_year if explicit_year >= 100 else 2000 + explicit_year
+        return _safe_date(year=year, month=month, day=day)
+    candidate = _safe_date(year=today.year, month=month, day=day)
+    if candidate is None:
+        return None
+    if candidate < today:
+        candidate = _safe_date(year=today.year + 1, month=month, day=day)
+    return candidate
+
+
+def _extract_numeric_date(
+    text: str, today: date
+) -> tuple[date, tuple[int, int]] | None:
+    """Locate a numeric/ISO/slash calendar date and its text span, or ``None``.
+
+    Order matters: ISO and dotted/slash forms that carry a year are unambiguous
+    and matched first. A bare dotted "DD.MM" collides with a "HH.MM" clock, so it
+    is accepted as a date only when removing it still leaves a parseable clock
+    (the booking shape "20.06 в 13:00") — otherwise it stays a time ("в 15.30").
+    The span lets the caller strip the date before clock extraction so the clock
+    regex never re-reads a dotted date as a time.
+    """
+    iso = _ISO_DATE_RE.search(text)
+    if iso is not None:
+        resolved = _safe_date(
+            year=int(iso.group(1)), month=int(iso.group(2)), day=int(iso.group(3))
+        )
+        if resolved is not None:
+            return resolved, iso.span()
+
+    dotted_year = _DOTTED_DATE_YEAR_RE.search(text)
+    if dotted_year is not None:
+        resolved = _resolve_dated(
+            day=int(dotted_year.group(1)),
+            month=int(dotted_year.group(2)),
+            today=today,
+            explicit_year=int(dotted_year.group(3)),
+        )
+        if resolved is not None:
+            return resolved, dotted_year.span()
+
+    slash = _SLASH_DATE_RE.search(text)
+    if slash is not None:
+        year_str = slash.group(3)
+        resolved = _resolve_dated(
+            day=int(slash.group(1)),
+            month=int(slash.group(2)),
+            today=today,
+            explicit_year=int(year_str) if year_str else None,
+        )
+        if resolved is not None:
+            return resolved, slash.span()
+
+    for dotted in _DOTTED_DATE_RE.finditer(text):
+        resolved = _resolve_dated(
+            day=int(dotted.group(1)),
+            month=int(dotted.group(2)),
+            today=today,
+            explicit_year=None,
+        )
+        if resolved is None:
+            continue
+        remainder = text[: dotted.start()] + " " + text[dotted.end() :]
+        if _extract_clock(remainder) is not None:
+            return resolved, dotted.span()
+
+    return None
+
+
+def _strip_span(text: str, span: tuple[int, int]) -> str:
+    """Return ``text`` with ``span`` blanked out (so tokens don't merge)."""
+    start, end = span
+    return text[:start] + " " + text[end:]
+
+
 def _extract_day_offset(lemmas: list[str], today_weekday: int) -> int | None:
     """Resolve a day anchor to a non-negative offset from today, or ``None``.
 
@@ -256,21 +352,35 @@ def extract_requested_start(
     parallel tokenizer); the clock is matched on the raw text since the
     lemmatizer drops the ``:`` separator.
     """
-    clock = _extract_clock(text)
-    if clock is None:
-        return None
-
     local_now = now.astimezone(project_tz)
     lemmas = get_russian_normalizer().lemmas(text)
     offset = _extract_day_offset(lemmas, local_now.weekday())
+
+    # Locate a numeric/ISO/slash date ("20.06", "01.06.2026", "2026-09-15",
+    # "20/06") up front and remember its span. Stripping that span before the
+    # clock extractor runs is what stops the _HH_MM regex from greedily reading a
+    # dotted "DD.MM" date as a "HH.MM" time (Story 12.38, D10 #30).
+    numeric = _extract_numeric_date(text, local_now.date())
+
     if offset is not None:
+        # A relative/weekday anchor still wins, but a numeric date alongside it
+        # must be stripped so the clock isn't read off the date digits.
         target_date = (local_now + timedelta(days=offset)).date()
+        clock_source = _strip_span(text, numeric[1]) if numeric is not None else text
+    elif numeric is not None:
+        target_date = numeric[0]
+        clock_source = _strip_span(text, numeric[1])
     else:
-        # No relative/weekday anchor — accept an explicit "<day> <month>" date
-        # so an LLM-resolved absolute date still reaches the calendar check.
+        # No relative/weekday/numeric anchor — accept an explicit "<day> <month>"
+        # date so an LLM-resolved absolute date still reaches the calendar check.
         target_date = _extract_absolute_date(text.lower(), local_now.date())
         if target_date is None:
             return None
+        clock_source = text
+
+    clock = _extract_clock(clock_source)
+    if clock is None:
+        return None
 
     hour, minute = clock
     return datetime(
