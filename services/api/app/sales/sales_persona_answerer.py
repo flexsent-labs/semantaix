@@ -2637,12 +2637,29 @@ class SalesPersonaAnswerer:
         Counter-offers must update the proposer's window; otherwise we'd
         re-propose the old slot. The merge is conservative — when the
         question has no parseable date, the existing ``dates`` value
-        stands.
+        stands. Story 12.48 (round-10 N1) — ``parse_russian_date_span`` only
+        handles relative/written-month dates, so a numeric counter-offer
+        ("03.06 в 16:00") in pitching went undetected and skipped the busy
+        check; also accept a date the deterministic ``extract_requested_start``
+        can parse (which covers numeric/ISO/slash forms).
         """
-        parsed = parse_russian_date_span(question, now=now.date())
-        if parsed is None:
+        if parse_russian_date_span(
+            question, now=now.date()
+        ) is None and not self._question_carries_concrete_start(question, now):
             return existing_intent
         return replace(existing_intent, dates=question.strip())
+
+    def _question_carries_concrete_start(
+        self, question: str, now: datetime
+    ) -> bool:
+        """True when the raw question parses to a concrete date+time (round-10
+        N1) — covers numeric forms ``parse_russian_date_span`` misses."""
+        tz = now.tzinfo
+        return (
+            tz is not None
+            and extract_requested_start(text=question, now=now, project_tz=tz)
+            is not None
+        )
 
     async def _render_and_persist_proposal(
         self,
