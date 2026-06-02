@@ -90,6 +90,13 @@ STAGE_AWAITING_OPERATOR_PRICE = "awaiting_operator_price"
 STAGE_PROPOSING = "proposing"
 STAGE_CLOSING = "closing"
 STAGE_DORMANT = "dormant"
+# Story 12.46 (round-9 R9-1) — a leading greeting marks "the customer moved on
+# from pricing", so we re-enter the funnel instead of staying stuck in pricing.
+_GREETING_RE = re.compile(
+    r"^\s*(здравствуй|привет|добр(ый|ое|ого)\s*(день|вечер|утро)?"
+    r"|hello|hi|hey|good\s+(morning|afternoon|evening))",
+    re.IGNORECASE,
+)
 # Story 12.10 — scoping is complete but the booking carries no concrete time and
 # the calendar can actually check it: we ask for the date+time and park here for
 # exactly one turn (the stage itself is the "already asked" marker).
@@ -716,6 +723,14 @@ class SalesPersonaAnswerer:
                 return aside
 
         if current_stage in (STAGE_PRICING, STAGE_AWAITING_OPERATOR_PRICE):
+            # Story 12.46 (round-9 R9-1) — a price ask is a one-shot aside; it must
+            # NOT trap the customer in pricing. When the customer has moved on to a
+            # fresh greeting or a booking, re-enter the funnel from greeting so the
+            # turn is handled on its own merits — never answered with a stale price
+            # line. A price follow-up ("ну так сколько в итоге?") stays in pricing.
+            # (Cancellation / out-of-scope were already routed above.)
+            if self._has_moved_on_from_pricing(question=question, ctx=ctx):
+                return await self._handle_greeting(question=question, ctx=ctx)
             return await self._handle_pricing(
                 question=question, ctx=ctx, state=state
             )
@@ -760,6 +775,27 @@ class SalesPersonaAnswerer:
 
         # Unknown / future stage value — defer to downstream answerers.
         return _skip("stage_not_implemented_yet")
+
+    def _has_moved_on_from_pricing(
+        self, *, question: str, ctx: AnswerContext
+    ) -> bool:
+        """True when a pricing-stage turn is a fresh greeting or a booking, so the
+        funnel should re-engage (Story 12.46, round-9 R9-1). A price follow-up
+        ("ну так сколько в итоге?") returns False and stays in pricing.
+
+        The tz only gates the parses-as-a-booking check; the downstream busy check
+        re-parses with the real project tz.
+        """
+        if _GREETING_RE.search(question):
+            return True
+        now = ctx.now
+        tz = ZoneInfo(ctx.timezone)
+        return (
+            now is not None
+            and now.tzinfo is not None
+            and extract_requested_start(text=question, now=now, project_tz=tz)
+            is not None
+        )
 
     async def _enqueue_followup(self, *, ctx: AnswerContext) -> None:
         """Schedule one nudge T+24h after every successful sales turn.

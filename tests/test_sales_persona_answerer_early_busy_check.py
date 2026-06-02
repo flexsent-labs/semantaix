@@ -36,6 +36,7 @@ from services.api.app.sales.sales_persona_answerer import (
     SLOT_BUSY_LINE,
     STAGE_NEW,
     STAGE_PITCHING,
+    STAGE_PRICING,
     STAGE_SCOPING,
     SalesPersonaAnswerer,
 )
@@ -637,3 +638,60 @@ async def test_error_falls_through() -> None:
     assert result.text == "Сколько человек поедет?"
     assert SLOT_BUSY_LINE not in (result.text or "")
     assert result.metadata["stage_after"] == STAGE_SCOPING
+
+
+# --- R9-1 (round 9): a price ask must not wedge the conversation --------------
+# Once in a pricing stage, every later turn used to route to pricing, so a
+# greeting/booking got a stale price reply. Now a "moved-on" turn (greeting or a
+# parseable booking) re-enters the funnel; a price follow-up stays in pricing.
+
+
+def _pricing_state() -> dict[str, Any]:
+    return {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PRICING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pricing_stage_greeting_reroutes_to_greeting_not_price() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {}, "next_question": "Здравствуйте! Какие даты?"}
+    )
+    answerer, _state, _, _ = _build(
+        state=_pricing_state(),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(),
+    )
+    result = await answerer.try_answer(question="Здравствуйте!", ctx=_ctx())
+    assert result.handled is True
+    assert result.text == "Здравствуйте! Какие даты?"  # greeting, not a price line
+
+
+@pytest.mark.asyncio
+async def test_pricing_stage_booking_reroutes_to_availability_not_price() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "завтра в 14:00"},
+            "next_question": "Сколько человек?",
+        }
+    )
+    answerer, _state, _, freebusy = _build(
+        state=_pricing_state(),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_tomorrow_14()),
+    )
+    result = await answerer.try_answer(
+        question="А завтра в 14:00 свободно для багги?", ctx=_ctx()
+    )
+    assert SLOT_BUSY_LINE in (result.text or "")  # availability verdict, not price
+    assert freebusy.calls == 1
