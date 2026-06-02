@@ -132,6 +132,41 @@ async def test_in_scope_booking_ask_defers_to_hitl():
 
 
 @pytest.mark.asyncio
+async def test_structural_booking_without_scheduling_verb_defers():
+    # Round-6 D10 #34: "Можно багги сегодня в 13:00 …" is a booking by STRUCTURE
+    # (service + date + time + headcount) but has no scheduling verb, so
+    # has_scheduling_intent misses it and turn-kind is "other". It must still
+    # defer (parses as a concrete date+time) — not decline "Это не ко мне".
+    answerer = _bookings_answerer()
+    result = await answerer.try_answer(
+        question="Можно багги сегодня в 13:00, нас четверо, одна багги?",
+        ctx=_make_ctx(),
+    )
+    assert result.handled is False
+    assert result.metadata.get("skip_reason") == "in_scope_defer_to_hitl"
+
+
+@pytest.mark.asyncio
+async def test_structural_booking_with_naive_now_declines():
+    # Defensive: a naive ctx.now (shouldn't happen in the live pipeline) means
+    # the booking-parse can't safely run, so a structural booking is treated as
+    # un-parseable and declines rather than guessing a timezone.
+    answerer = _bookings_answerer()
+    ctx = AnswerContext(
+        chat_id=1,
+        customer_username="@u",
+        trace_id="t",
+        now=datetime(2026, 6, 2, 8, 28),  # naive — no tzinfo
+    )
+    result = await answerer.try_answer(
+        question="Можно багги сегодня в 13:00, нас четверо, одна багги?",
+        ctx=ctx,
+    )
+    assert result.handled is True
+    assert result.response_mode == RESPONSE_MODE_SCOPE_DECLINE
+
+
+@pytest.mark.asyncio
 async def test_in_scope_ask_declines_when_project_has_no_bookings():
     # Default (no bookings, e.g. a disabled noop project): even an in-scope ask
     # declines rather than escalating — don't turn off-topic into operator noise.

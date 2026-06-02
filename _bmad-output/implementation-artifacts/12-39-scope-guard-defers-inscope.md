@@ -37,13 +37,14 @@ Gating ScopeGuard on `is_sales_intent` is **wrong**: it false-positives on factu
 2. A factual/off-topic ask ("Какое сегодня число?", "Который час?", "Расскажи анекдот") still gets a scope **decline** — no operator noise.
 3. An **out-of-scope** booking ("Где забронировать отель?", Story 12.34) still **declines**, not escalates.
 4. A **disabled / noop project** (default — no calendar) keeps declining a booking ask (no behaviour change): the defer fires only when `project_does_bookings` is true (wired to calendar `is_enabled`).
-5. Story 12.09 (persona thin gate) unchanged; gates green; 100% coverage.
+5. **(Round-6 D10 #34)** A booking expressed by **structure** rather than a scheduling verb — "Можно багги сегодня в 13:00, нас четверо" — also defers: it parses to a concrete start via `extract_requested_start` even though the verb-based `has_scheduling_intent` misses it. A factual question with no concrete time ("Какое сегодня число?") still parses to `None` → declines (no false positive).
+6. Story 12.09 (persona thin gate) unchanged; gates green; 100% coverage.
 
 ## Design — two guards
 
 The defer fires only when **both** hold:
 1. **`project_does_bookings(project_id)`** — the project offers booking/sales work (live: calendar `is_enabled`). A disabled noop project keeps the plain decline, so off-topic never becomes a ticket. This is what keeps the `test_e2e_epic11_disabled_noop` decline test green.
-2. **Precise in-scope intent** — `has_scheduling_intent(normalized)` OR `classify_turn().kind ∈ {price_ask, catalog_ask}`, AND NOT `is_out_of_scope`.
+2. **Precise in-scope intent** — `has_scheduling_intent(normalized)` OR `classify_turn().kind ∈ {price_ask, catalog_ask}` OR **parses as a concrete booking** (`extract_requested_start is not None`, round-6 D10 #34), AND NOT `is_out_of_scope`.
 
 Deferring (skip) — not answering — is the mechanism: `AnswerPipeline.run` returns `handled=False` when nothing handles, and the inbound endpoint then escalates to HITL. Same skip→HITL pattern as D11 (#118).
 

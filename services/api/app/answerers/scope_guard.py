@@ -27,6 +27,7 @@ from collections.abc import Callable
 
 from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.answerers.scheduling_context import has_scheduling_intent
+from services.api.app.calendar.service_resolver import extract_requested_start
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.russian_text.normalizer import RussianNormalizer
 from services.api.app.sales.out_of_scope import is_out_of_scope
@@ -63,24 +64,47 @@ class ScopeGuardAnswerer:
         phrases = [p.strip() for p in raw.splitlines() if p.strip()]
         return random.choice(phrases) if phrases else raw.strip()
 
-    def _is_in_scope(self, question: str) -> bool:
+    def _is_in_scope(self, question: str, ctx: AnswerContext) -> bool:
         """True when ``question`` is an in-scope price/booking ask.
 
         Conservative + precise: an out-of-scope ask (Story 12.34) is never
-        in-scope; otherwise a real scheduling intent OR a price/catalog turn
-        kind qualifies. Avoids ``is_sales_intent`` (too loose for the last
-        resort — it fires on factual questions that should still decline).
+        in-scope; otherwise a real scheduling intent, a price/catalog turn
+        kind, OR a turn that parses as a concrete booking qualifies. Avoids
+        ``is_sales_intent`` (too loose for the last resort — it fires on factual
+        questions that should still decline).
         """
         if is_out_of_scope(question, normalizer=self._normalizer):
             return False
         if has_scheduling_intent(self._normalizer.normalize(question)):
             return True
-        return classify_turn(question, normalizer=self._normalizer).kind in _IN_SCOPE_TURN_KINDS
+        if classify_turn(question, normalizer=self._normalizer).kind in _IN_SCOPE_TURN_KINDS:
+            return True
+        # Story 12.39 (round-6 D10 #34): a booking expressed by STRUCTURE rather
+        # than a scheduling verb — "Можно багги сегодня в 13:00, нас четверо" —
+        # is missed by the verb-based has_scheduling_intent, but parses to a
+        # concrete start. Treat a parseable date+time as an in-scope booking.
+        return self._parses_as_booking(question, ctx)
+
+    def _parses_as_booking(self, question: str, ctx: AnswerContext) -> bool:
+        """True when ``question`` carries a concrete, parseable date + time.
+
+        Only the presence (not the value) of the parsed slot matters here, so
+        the exact project timezone is irrelevant — a tz-aware ``ctx.now`` is
+        enough. A naive ``now`` (shouldn't happen in the live pipeline) is
+        treated as un-parseable rather than guessed.
+        """
+        now = ctx.now
+        if now is None or now.tzinfo is None:
+            return False
+        return (
+            extract_requested_start(text=question, now=now, project_tz=now.tzinfo)
+            is not None
+        )
 
     async def try_answer(self, *, question: str, ctx: AnswerContext) -> AnswerResult:
         # Cheap intent check first; the project-config lookup (DB) only when the
         # ask is actually in-scope.
-        if self._is_in_scope(question):
+        if self._is_in_scope(question, ctx):
             does_bookings = await asyncio.to_thread(
                 self._project_does_bookings, ctx.project_id
             )
