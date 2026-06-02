@@ -820,6 +820,13 @@ class SalesPersonaAnswerer:
             return _skip("llm_transport_error")
 
         merged = intent_merge(Intent(), extracted)
+        # Story 12.43 (round-8 N1) — the greeting LLM sometimes stores a numeric
+        # date WITHOUT its co-located time ("03.06"), which extract_requested_start
+        # can't parse, so the busy check below silently skipped and the slot was
+        # handed off unchecked. The raw message always carries date+time.
+        merged = self._dates_with_raw_fallback(
+            intent=merged, question=question, ctx=ctx
+        )
         # Story 12.25 — if the opener carries a concrete date+time and the
         # slot is already busy, surface it now: customers should not be
         # asked logistics questions about a slot that was never going to
@@ -1002,11 +1009,13 @@ class SalesPersonaAnswerer:
                 },
             )
             return _skip("llm_transport_error")
-        return (
-            intent_merge(existing_intent, extracted, allowed=schema.keys()),
-            next_question,
-            extracted,
+        merged = intent_merge(existing_intent, extracted, allowed=schema.keys())
+        # Story 12.43 (round-8 N1) — see _handle_greeting: fall back to the raw
+        # message for `dates` when the LLM stored a numeric date time-less.
+        merged = self._dates_with_raw_fallback(
+            intent=merged, question=question, ctx=ctx
         )
+        return (merged, next_question, extracted)
 
     async def _handle_scoping(
         self,
@@ -2529,6 +2538,36 @@ class SalesPersonaAnswerer:
             ctx=ctx,
             intent=merged_intent,
         )
+
+    def _dates_with_raw_fallback(
+        self, *, intent: Intent, question: str, ctx: AnswerContext
+    ) -> Intent:
+        """Adopt the raw customer message as ``dates`` when the LLM's stored
+        ``dates`` can't be parsed into a concrete start but the raw text can.
+
+        Round-8 N1: the scoping/greeting LLM sometimes stores a numeric date
+        WITHOUT its co-located time ("03.06"); ``extract_requested_start`` then
+        returns ``None``, the deterministic busy check is skipped, and a busy
+        numeric slot is handed off unchecked. The raw message always carries
+        date+time. Conservative — only overrides when the stored value does NOT
+        already parse, so a clean LLM date (relative / written month / already
+        date+time) is left intact. The tz only affects the parse-or-not decision
+        here; the downstream check re-parses with the real project tz.
+        """
+        tz = ZoneInfo(ctx.timezone)
+        stored = intent.dates if isinstance(intent.dates, str) else None
+        if (
+            stored
+            and extract_requested_start(text=stored, now=ctx.now, project_tz=tz)
+            is not None
+        ):
+            return intent
+        if (
+            extract_requested_start(text=question, now=ctx.now, project_tz=tz)
+            is not None
+        ):
+            return replace(intent, dates=question.strip())
+        return intent
 
     def _merge_dates_from_customer_message(
         self,

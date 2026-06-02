@@ -343,6 +343,74 @@ async def test_greeting_available_falls_through_to_scoping() -> None:
     assert freebusy.calls == 1
 
 
+# --- N1 (round 8): numeric date busy check falls back to the raw text --------
+# The greeting/scoping LLM sometimes stores a numeric date WITHOUT its
+# co-located time ("03.06"); extract_requested_start can't parse a date-only
+# string, so the slot was handed off UNCHECKED. The raw customer message always
+# carries date+time, so the busy check must use it (verdict is phrasing/field
+# independent — AC5).
+
+
+def _busy_blocks_june3_afternoon() -> tuple[BusyInterval, ...]:
+    """3 June 2026 (Wed) blocked 13:00–16:30 → 16:00 busy (the live N1 slot)."""
+    return (
+        BusyInterval(
+            start=datetime(2026, 6, 3, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 6, 3, 16, 30, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_numeric_opener_busy_check_uses_raw_text_when_llm_drops_time() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "03.06"},  # LLM stored date, dropped time
+            "next_question": "Сколько человек поедет?",
+        }
+    )
+    answerer, _state, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_june3_afternoon()),
+    )
+    result = await answerer.try_answer(
+        question="Можно 03.06 в 16:00 на багги, нас двое?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text  # 16:00 busy → rejected, not handed off
+    assert freebusy.calls == 1  # the calendar WAS consulted
+
+
+@pytest.mark.asyncio
+async def test_numeric_scoping_reply_busy_check_uses_raw_text() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "03.06"},  # LLM stored date, dropped time
+            "next_question": "Сколько багги вам потребуется?",
+        }
+    )
+    answerer, _state, _, freebusy = _build(
+        state=_scoping_state(intent=Intent()),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_june3_afternoon()),
+    )
+    result = await answerer.try_answer(
+        question="Можно 03.06 в 16:00 на багги, нас двое?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text
+    assert freebusy.calls == 1  # the calendar WAS consulted
+    # A busy intercept during scoping parks in pitching with the offered slot.
+    assert result.metadata["stage_after"] == STAGE_PITCHING
+
+
 # --- AC 4 -------------------------------------------------------------------
 
 
