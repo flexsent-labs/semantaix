@@ -128,4 +128,5 @@ development_status:
   12-36-inbound-pipeline-timeout: review
   12-37-sales-owns-inscope-turns: review
   12-38-numeric-date-parsing: review
+  12-39-scope-guard-defers-inscope: review
   epic-12-retrospective: optional
