@@ -69,6 +69,7 @@ from services.api.app.sales.price_lookup import (
     PriceMissing,
     extract_price_tokens,
 )
+from services.api.app.sales.reply_language import reply_language_directive
 from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.scoping_schema import (
     TRANSFER_SCHEMA,
@@ -790,7 +791,11 @@ class SalesPersonaAnswerer:
     async def _handle_greeting(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        system = _build_greeting_prompt(today=_format_today_ru(self._clock()))
+        # Story 12.45 (round-8 N3) — mirror the customer's language. Empty suffix
+        # for Russian (the default), so RU prompts are unchanged.
+        system = _build_greeting_prompt(
+            today=_format_today_ru(self._clock())
+        ) + reply_language_directive(question)
         user = f"Сообщение клиента:\n{question}"
 
         try:
@@ -982,7 +987,7 @@ class SalesPersonaAnswerer:
             intent=existing_intent,
             schema=schema,
             today=_format_today_ru(self._clock()),
-        )
+        ) + reply_language_directive(question)  # N3 — mirror the customer's language
         user = f"Сообщение клиента:\n{question}"
         try:
             payload = await self._openrouter.complete_json(
@@ -2328,6 +2333,7 @@ class SalesPersonaAnswerer:
                 ctx=ctx,
                 intent=existing_intent,
                 current_stage=current_stage,
+                question=question,
             )
 
         return await self._escalate_price_unknown(
@@ -2344,11 +2350,12 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         intent: Intent,
         current_stage: str,
+        question: str = "",
     ) -> AnswerResult:
         persona = self._persona_getter()
         system = _PRICING_HIT_PROMPT_TEMPLATE.format(
             persona=persona, snippet=outcome.snippet
-        )
+        ) + reply_language_directive(question)  # N3 — mirror the customer's language
         user = f"Сообщение клиента:\n{outcome.snippet}"
         try:
             payload = await self._openrouter.complete_json(
