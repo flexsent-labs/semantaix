@@ -288,8 +288,11 @@ async def test_no_match_first_turn_clarifies_then_escalates() -> None:
     clarify = _FakeClarify()
     answerer = _build(settings_repo=_FakeSettings(), clarify=clarify)
     # First turn: no configured service named -> ONE clarifying question.
+    # NB: a NON-sales scheduling ask ("запишите меня …", no service word). A
+    # sales-intent NoMatch now defers to the persona (Story 12.37 / D11), so this
+    # legacy clarify→escalate path is exercised with a non-sales phrasing.
     first = await answerer.try_answer(
-        question="хочу записаться на покраску в субботу в 15:00",
+        question="запишите меня в субботу в 15:00",
         ctx=_ctx(),
     )
     assert first.handled is True
@@ -299,13 +302,29 @@ async def test_no_match_first_turn_clarifies_then_escalates() -> None:
 
     # Second still-unresolved turn: escalate (no second clarification).
     second = await answerer.try_answer(
-        question="запишите на покраску в субботу в 15:00",
+        question="запишите меня в субботу в 15:00",
         ctx=_ctx(trace_id="t-2"),
     )
     assert second.handled is True
     assert second.response_mode == RESPONSE_MODE_ESCALATION
     assert second.metadata["escalate"] is True
     assert second.metadata["reason"] == "service_no_match_after_clarify"
+
+
+@pytest.mark.asyncio
+async def test_sales_intent_no_match_defers_to_persona() -> None:
+    """Story 12.37 (D11) — a sales-intent booking whose service this legacy
+    resolver can't match must DEFER (skip) to the SalesPersonaAnswerer, never
+    emit the "на какую услугу и на какое время…" clarify."""
+    clarify = _FakeClarify()
+    answerer = _build(settings_repo=_FakeSettings(), clarify=clarify)
+    # Sales intent ("хочу записаться …") naming an UNCONFIGURED service ("покраску")
+    # → NoMatch → defer to the persona (not the legacy clarify).
+    result = await answerer.try_answer(
+        question="хочу записаться на покраску в субботу в 15:00", ctx=_ctx()
+    )
+    assert result.handled is False  # ceded to the sales persona
+    assert clarify.arm_calls == []  # no clarify armed
 
 
 @pytest.mark.asyncio
