@@ -122,6 +122,20 @@ _WEEKDAYS: dict[str, int] = {
     "воскресенье": 6,
 }
 
+# Story 12.50 (round-11 R11-2) — English day anchors. The Russian normalizer
+# can't lemmatize English, so these are matched on the raw lowercased text by
+# word boundary. "day after tomorrow" is checked before "tomorrow" (substring).
+_EN_RELATIVE_DAYS: dict[str, int] = {"today": 0, "tomorrow": 1}
+_EN_WEEKDAYS: dict[str, int] = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
 # "в 15:00" / "в 15.00" — explicit hour:minute.
 _HH_MM = re.compile(r"\b(\d{1,2})[:.](\d{2})\b")
 # "в 3 часа" / "в 15 часов" / "в 9 час" — hour + час-stem, minute defaults to 0.
@@ -129,6 +143,9 @@ _HH_CLOCK = re.compile(
     r"\b(\d{1,2})\s*час(?:а|ов|у)?\b",
     re.IGNORECASE | re.UNICODE,
 )
+# Story 12.50 (round-11 R11-2) — English am/pm clock: "2pm", "10am", "2:30pm",
+# "2 pm". Checked BEFORE _HH_MM so "2:30pm" reads as 14:30, not 02:30.
+_AMPM_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\b", re.IGNORECASE)
 
 # Absolute calendar dates: "1 июня", "2 июня", "15 сентября". The scoping LLM
 # frequently *resolves* a relative reference ("в понедельник", even "завтра")
@@ -157,6 +174,32 @@ _ABS_DATE_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Story 12.50 (round-11 R11-2) — English "<month> <day>" / "<day> <month>"
+# ("June 7", "7th of June"). Month lookup is by prefix like the Russian path,
+# so "jun"/"june" both resolve; an optional ordinal suffix and "of" are
+# tolerated. The captured word is validated against the prefix table, so a
+# non-month word ("book 7") simply yields no month and is skipped.
+_EN_MONTH_PREFIXES: tuple[tuple[str, int], ...] = (
+    ("jan", 1),
+    ("feb", 2),
+    ("mar", 3),
+    ("apr", 4),
+    ("may", 5),
+    ("jun", 6),
+    ("jul", 7),
+    ("aug", 8),
+    ("sep", 9),
+    ("oct", 10),
+    ("nov", 11),
+    ("dec", 12),
+)
+_EN_DATE_MD = re.compile(
+    r"\b([a-z]{3,})\s+(\d{1,2})(?:st|nd|rd|th)?\b", re.IGNORECASE
+)
+_EN_DATE_DM = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([a-z]{3,})\b", re.IGNORECASE
+)
+
 # Numeric / ISO / slash calendar dates (Story 12.38). The scoping LLM and
 # customers sometimes emit these instead of Russian month words ("20.06 в 13:00",
 # "01.06.2026", "2026-09-15", "20/06"). ISO and any year-bearing form are
@@ -168,12 +211,28 @@ _SLASH_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 _DOTTED_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\b")
 
 
+def _ampm_to_hm(match: re.Match[str]) -> tuple[int, int] | None:
+    """Convert an ``_AMPM_RE`` match to 24h ``(hour, minute)``, or ``None`` if
+    the 12-hour value is out of range (e.g. "14pm")."""
+    hour, minute = int(match.group(1)), int(match.group(2) or 0)
+    if not (1 <= hour <= 12 and 0 <= minute <= 59):
+        return None
+    if match.group(3).lower() == "a":  # am: 12am → 00, else unchanged
+        hour = 0 if hour == 12 else hour
+    else:  # pm: 12pm → 12, else +12
+        hour = 12 if hour == 12 else hour + 12
+    return hour, minute
+
+
 def _extract_clock(text: str) -> tuple[int, int] | None:
     """Return ``(hour, minute)`` if exactly one valid clock time is present.
 
     Conservative: an out-of-range value (hour > 23, minute > 59) yields
     ``None``; the answerer then clarifies instead of guessing.
     """
+    ampm = _AMPM_RE.search(text)
+    if ampm is not None:
+        return _ampm_to_hm(ampm)
     hm = _HH_MM.search(text)
     if hm is not None:
         hour, minute = int(hm.group(1)), int(hm.group(2))
@@ -187,6 +246,38 @@ def _extract_clock(text: str) -> tuple[int, int] | None:
             return hour, 0
         return None
     return None
+
+
+def extract_all_clocks(text: str) -> list[tuple[int, int]]:
+    """Every distinct ``(hour, minute)`` clock time in ``text``, in order.
+
+    Covers am/pm ("10am", "2:30pm"), explicit "HH:MM"/"HH.MM", and the Russian
+    "N часов" form. Used by the pitching negotiation (Story 12.51, round-11
+    R11-1) to tell a counter-offered time apart from the bot's own proposal
+    when a follow-up names a bare time ("а давайте тогда в 12:00").
+    """
+    found: list[tuple[int, int]] = []
+    chars = list(text)
+    for match in _AMPM_RE.finditer(text):
+        converted = _ampm_to_hm(match)
+        if converted is not None:
+            found.append(converted)
+        for i in range(*match.span()):  # blank in place so HH:MM skips "2:30pm"
+            chars[i] = " "
+    work = "".join(chars)
+    for match in _HH_MM.finditer(work):
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            found.append((hour, minute))
+    for match in _HH_CLOCK.finditer(work):
+        hour = int(match.group(1))
+        if 0 <= hour <= 23:
+            found.append((hour, 0))
+    distinct: list[tuple[int, int]] = []
+    for clock in found:
+        if clock not in distinct:
+            distinct.append(clock)
+    return distinct
 
 
 def _month_from_token(token: str) -> int | None:
@@ -217,6 +308,39 @@ def _extract_absolute_date(text: str, today: date) -> date | None:
         if candidate < today:
             candidate = _safe_date(year=today.year + 1, month=month, day=day)
         return candidate
+    return None
+
+
+def _en_month_from_token(token: str) -> int | None:
+    lowered = token.lower()
+    for prefix, month in _EN_MONTH_PREFIXES:
+        if lowered.startswith(prefix):
+            return month
+    return None
+
+
+def _extract_en_absolute_date(text: str, today: date) -> date | None:
+    """Resolve an English ``"<month> <day>"`` / ``"<day> <month>"`` date, or None.
+
+    Mirrors :func:`_extract_absolute_date` (year defaults to today's, rolls to
+    next year when the bare day/month already passed). Only commits when the
+    word is a recognised English month, so non-month words are skipped.
+    """
+    for regex, day_group, month_group in (
+        (_EN_DATE_MD, 2, 1),
+        (_EN_DATE_DM, 1, 2),
+    ):
+        for match in regex.finditer(text):
+            month = _en_month_from_token(match.group(month_group))
+            if month is None:
+                continue
+            day = int(match.group(day_group))
+            candidate = _safe_date(year=today.year, month=month, day=day)
+            if candidate is None:
+                continue
+            if candidate < today:
+                candidate = _safe_date(year=today.year + 1, month=month, day=day)
+            return candidate
     return None
 
 
@@ -313,12 +437,16 @@ def _strip_span(text: str, span: tuple[int, int]) -> str:
     return text[:start] + " " + text[end:]
 
 
-def _extract_day_offset(lemmas: list[str], today_weekday: int) -> int | None:
+def _extract_day_offset(
+    lemmas: list[str], text: str, today_weekday: int
+) -> int | None:
     """Resolve a day anchor to a non-negative offset from today, or ``None``.
 
     Relative words win over weekday names. A named weekday resolves to its next
     occurrence (today counts only when it *is* that weekday). When neither a
     relative word nor a weekday is present, the day is ambiguous → ``None``.
+    Russian is matched on lemmas; English (Story 12.50, R11-2) on the raw
+    lowercased ``text`` by word boundary, since it can't be lemmatized.
     """
     for lemma in lemmas:
         if lemma in _RELATIVE_DAYS:
@@ -327,6 +455,15 @@ def _extract_day_offset(lemmas: list[str], today_weekday: int) -> int | None:
         target = _WEEKDAYS.get(lemma)
         if target is not None:
             return (target - today_weekday) % 7
+    low = text.lower()
+    if "day after tomorrow" in low:  # checked before "tomorrow" (substring)
+        return 2
+    for word, offset in _EN_RELATIVE_DAYS.items():
+        if re.search(rf"\b{word}\b", low):
+            return offset
+    for word, index in _EN_WEEKDAYS.items():
+        if re.search(rf"\b{word}\b", low):
+            return (index - today_weekday) % 7
     return None
 
 
@@ -354,7 +491,7 @@ def extract_requested_start(
     """
     local_now = now.astimezone(project_tz)
     lemmas = get_russian_normalizer().lemmas(text)
-    offset = _extract_day_offset(lemmas, local_now.weekday())
+    offset = _extract_day_offset(lemmas, text, local_now.weekday())
 
     # Locate a numeric/ISO/slash date ("20.06", "01.06.2026", "2026-09-15",
     # "20/06") up front and remember its span. Stripping that span before the
@@ -373,7 +510,10 @@ def extract_requested_start(
     else:
         # No relative/weekday/numeric anchor — accept an explicit "<day> <month>"
         # date so an LLM-resolved absolute date still reaches the calendar check.
-        target_date = _extract_absolute_date(text.lower(), local_now.date())
+        # Russian month words first, then English (Story 12.50, R11-2).
+        target_date = _extract_absolute_date(
+            text.lower(), local_now.date()
+        ) or _extract_en_absolute_date(text.lower(), local_now.date())
         if target_date is None:
             return None
         clock_source = text

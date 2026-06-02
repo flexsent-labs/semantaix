@@ -46,7 +46,10 @@ from services.api.app.calendar.requested_time_check import (
     STATUS_UNAVAILABLE,
     check_requested_availability,
 )
-from services.api.app.calendar.service_resolver import extract_requested_start
+from services.api.app.calendar.service_resolver import (
+    extract_all_clocks,
+    extract_requested_start,
+)
 from services.api.app.rag import RagChunk
 from services.api.app.sales.acceptance import is_acceptance
 from services.api.app.sales.cancel_intent import is_cancellation
@@ -132,11 +135,20 @@ PROPOSAL_FALLBACK_CALENDAR_DISABLED = "Дату подтвержу у колле
 PROPOSAL_FALLBACK_UNAVAILABLE = "Уточню свободные даты и сразу сообщу."
 PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER = "На каком туре остановимся?"
 CLOSING_HANDOFF_LINE = "Передам коллегам для подтверждения, на связи."
+# Story 12.52 (round-11 N3) — English variants for the remaining funnel-reachable
+# deterministic lines (closing / cancellation / empty-catalog), so an English
+# thread that reaches a closing or cancellation handoff stays English.
+CLOSING_HANDOFF_LINE_EN = (
+    "I'll pass this to my colleagues for confirmation — talk soon."
+)
 # Story 12.27 — cancellation request. The customer-facing line does not presume
 # the cancellation is done (a human confirms it); the operator-facing context
 # tags the ticket so the human sees it's an отмена, not a new booking.
 CANCELLATION_HANDOFF_LINE = (
     "Передам вашу просьбу об отмене коллеге — свяжутся с вами."
+)
+CANCELLATION_HANDOFF_LINE_EN = (
+    "I'll pass your cancellation request to a colleague — they'll get in touch."
 )
 CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
 # Story 12.34 (D7) — an out-of-scope request (dining/lodging) is politely
@@ -151,6 +163,9 @@ OUT_OF_SCOPE_DECLINE_LINE_EN = (
 )
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
+EMPTY_CATALOG_ESCALATION_LINE_EN = (
+    "No services are listed yet. I'll check with my colleagues and let you know."
+)
 # Story 12.05 — appended to the textual reply when a media dispatch failed
 # mid-turn so the customer never sees a silent bot.
 MATERIAL_DISPATCH_FALLBACK_LINE = (
@@ -1052,7 +1067,11 @@ class SalesPersonaAnswerer:
         )
         return AnswerResult(
             handled=True,
-            text=CANCELLATION_HANDOFF_LINE,
+            text=localize(
+                CANCELLATION_HANDOFF_LINE,
+                CANCELLATION_HANDOFF_LINE_EN,
+                language=ctx.language,
+            ),
             response_mode=RESPONSE_MODE_SALES_ESCALATION,
             metadata={
                 "answerer": NAME,
@@ -1300,6 +1319,21 @@ class SalesPersonaAnswerer:
                 ctx=ctx, intent=merged, stage_before=STAGE_PITCHING
             )
 
+        # (a2) Time-only counter-offer (Story 12.51, round-11 R11-1): the
+        # customer names a NEW clock time, the date implied by the slot we just
+        # offered ("а давайте тогда в 12:00", "what about 10am?"). Re-check THAT
+        # time before any acceptance check, so a leading "давайте" never books
+        # the bot's own 08:00 instead of the customer's 12:00.
+        counter = self._timeonly_counteroffer_start(
+            question=question, last_proposal=last_proposal, now=now
+        )
+        if counter is not None:
+            return await self._complete_booking(
+                ctx=ctx,
+                intent=replace(intent, dates=counter.strftime("%Y-%m-%d %H:%M")),
+                stage_before=STAGE_PITCHING,
+            )
+
         # (b) Acceptance of the slot we offered → confirm it (named) and close.
         if isinstance(last_proposal, dict) and is_acceptance(
             question, normalizer=self._normalizer
@@ -1313,6 +1347,40 @@ class SalesPersonaAnswerer:
         return await self._handoff_after_pitching_followup(
             ctx=ctx, intent=intent, closure=closure
         )
+
+    def _pitching_offered_slot(self, last_proposal: Any) -> datetime | None:
+        """The alternative datetime we offered this pitching turn, or ``None``.
+
+        Mirrors ``_confirm_slot``'s trust in the stored ISO (written by our own
+        ``_persist``) — no defensive parse.
+        """
+        if isinstance(last_proposal, dict):
+            iso = last_proposal.get("alternative_iso")
+            if iso:
+                return datetime.fromisoformat(iso)
+        return None
+
+    def _timeonly_counteroffer_start(
+        self, *, question: str, last_proposal: Any, now: datetime
+    ) -> datetime | None:
+        """A pitching reply that names only a clock time → the new requested
+        start (date carried from the offered slot), or ``None`` (Story 12.51).
+
+        The bot's own offered time is excluded, so restating it ("давайте в
+        08:00") is acceptance, not a counter; a single remaining time wins, so
+        a correction naming both ("именно в 12:00, а не в 08:00") still picks
+        12:00. More than one new time, or none, is ambiguous → ``None``.
+        """
+        tz = now.tzinfo
+        offered = self._pitching_offered_slot(last_proposal)
+        if tz is None or offered is None:
+            return None
+        proposal_hm = (offered.hour, offered.minute)
+        candidates = [hm for hm in extract_all_clocks(question) if hm != proposal_hm]
+        if len(candidates) != 1:
+            return None
+        hour, minute = candidates[0]
+        return datetime(offered.year, offered.month, offered.day, hour, minute, tzinfo=tz)
 
     async def _confirm_slot(
         self,
@@ -1407,7 +1475,11 @@ class SalesPersonaAnswerer:
         )
         return AnswerResult(
             handled=True,
-            text=SCOPING_COMPLETE_HANDOFF_LINE,
+            text=localize(
+                SCOPING_COMPLETE_HANDOFF_LINE,
+                SCOPING_COMPLETE_HANDOFF_LINE_EN,
+                language=ctx.language,
+            ),
             response_mode=RESPONSE_MODE_SALES_ESCALATION,
             metadata={
                 "answerer": NAME,
@@ -2166,7 +2238,11 @@ class SalesPersonaAnswerer:
             )
             return AnswerResult(
                 handled=True,
-                text=EMPTY_CATALOG_ESCALATION_LINE,
+                text=localize(
+                    EMPTY_CATALOG_ESCALATION_LINE,
+                    EMPTY_CATALOG_ESCALATION_LINE_EN,
+                    language=ctx.language,
+                ),
                 response_mode=RESPONSE_MODE_SALES_ESCALATION,
                 metadata={
                     "answerer": NAME,
@@ -3043,7 +3119,9 @@ class SalesPersonaAnswerer:
         )
         return AnswerResult(
             handled=True,
-            text=CLOSING_HANDOFF_LINE,
+            text=localize(
+                CLOSING_HANDOFF_LINE, CLOSING_HANDOFF_LINE_EN, language=ctx.language
+            ),
             response_mode=RESPONSE_MODE_SALES_ESCALATION,
             metadata={
                 "answerer": NAME,
@@ -3079,7 +3157,9 @@ class SalesPersonaAnswerer:
         )
         return AnswerResult(
             handled=True,
-            text=CLOSING_HANDOFF_LINE,
+            text=localize(
+                CLOSING_HANDOFF_LINE, CLOSING_HANDOFF_LINE_EN, language=ctx.language
+            ),
             response_mode=RESPONSE_MODE_SALES_ESCALATION,
             metadata={
                 "answerer": NAME,
