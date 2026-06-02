@@ -113,6 +113,25 @@ class OpenRouterClient:
         # raised in config. Funnel/verifier override this per-call.
         self.temperature = settings.openrouter_temperature
 
+    def _is_configured(self) -> bool:
+        """True when a real API key is present (so a model check can run)."""
+        return bool(self.api_key)
+
+    async def fetch_available_model_ids(self) -> set[str]:
+        """Return the set of model ids OpenRouter currently serves.
+
+        Used by the model-availability guard (Story 12.41) to catch a retired
+        slug — a 404 on /chat/completions otherwise silently degrades the bot.
+        """
+        if not self.api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"{self.base_url}/models", headers=headers)
+            response.raise_for_status()
+            data = response.json().get("data", [])
+        return {m["id"] for m in data if m.get("id")}
+
     async def _chat(
         self,
         *,

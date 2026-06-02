@@ -11,7 +11,7 @@ from typing import Annotated
 import httpx
 from cryptography.fernet import Fernet
 from fastapi import Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
@@ -102,6 +102,7 @@ from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.knowledge import KnowledgeCandidateRepository
 from services.api.app.knowledge_moderation import KnowledgeModerationRepository
+from services.api.app.llm_model_health import find_unavailable_models
 from services.api.app.nl_knowledge_ops import (
     NlKnowledgeOpsError,
     NlKnowledgeOpsRepository,
@@ -3560,6 +3561,51 @@ async def sync_telegram_identity_on_startup() -> None:
     await _safe_telegram_identity_call(
         method=telegram_bot_sender.set_my_short_description,
         short_description=short_description,
+    )
+
+
+def _configured_llm_models() -> list[str]:
+    """The OpenRouter model slugs this service depends on (persona + grounding)."""
+    return [settings.openrouter_model, settings.openrouter_grounding_model]
+
+
+@app.on_event("startup")
+async def validate_llm_models_on_startup() -> None:
+    """Story 12.41 — fail LOUD at boot if a configured OpenRouter model is gone.
+
+    A retired slug 404s on /chat/completions and silently degrades every persona
+    turn (round-7). Skips when the key is the unconfigured placeholder so unit
+    tests never reach the network (mirrors sync_telegram_identity_on_startup).
+    """
+    if not openrouter_client._is_configured():
+        return
+    models = _configured_llm_models()
+    unavailable = await find_unavailable_models(client=openrouter_client, models=models)
+    if unavailable:
+        logger.error(
+            "llm_models_unavailable_at_startup", extra={"unavailable": unavailable}
+        )
+    else:
+        logger.info("llm_models_validated", extra={"models": models})
+
+
+@app.get("/health/model")
+async def health_model() -> JSONResponse:
+    """On-demand model-availability check (Story 12.41).
+
+    503 when a configured OpenRouter model is no longer served, so monitoring /
+    a post-deploy probe catches a deprecation before customers do.
+    """
+    models = _configured_llm_models()
+    unavailable = await find_unavailable_models(client=openrouter_client, models=models)
+    ok = not unavailable
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={
+            "status": "ok" if ok else "degraded",
+            "configured": models,
+            "unavailable": unavailable,
+        },
     )
 
 

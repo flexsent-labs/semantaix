@@ -70,3 +70,21 @@ Round-6 was tested on a build **behind** my open PRs. Recommended sequence: merg
 - **Ops:** data volume relieved (90% → 88%, +8.7 GB) — addresses the recurring disk-full trigger.
 
 Remaining (not blockers): D8 (language mirroring) and D11 re-test were unreachable in round 6 because the bot stalled; re-test after #118–#120 + 12.40 deploy.
+
+---
+
+## Follow-up: 2026-06-02 (round 7) — root cause is a DEAD OpenRouter model (Confirmed, High)
+
+**Symptoms (round 7, live stack already running #117–#121):** `#37 "Здравствуйте!" → "Это не ко мне"` (greeting deflected); `#36` clean booking → no reply. Bot effectively non-functional.
+
+**Stronghold (Confirmed — live api logs + OpenRouter /models):**
+- `docker logs semantaix-api-1`: `POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 404 Not Found"` → `sales_persona_answerer … sales_llm_transport_error` on every persona turn (traces `tg-update-726742839`, `…840`).
+- The persona calls `complete_json(system, user)` with **no model** → defaults to `OpenRouterClient.grounding_model` = `settings.openrouter_grounding_model` = **`google/gemini-2.0-flash-lite-001`** (`openrouter_client.py:111,227`; `sales_persona_answerer.py:797,981`).
+- OpenRouter `/models` (live, 342 models) → `google/gemini-2.0-flash-lite-001` **absent** (deprecated). `openai/gpt-4o-mini` present. Successors: `google/gemini-2.5-flash-lite`, `…-preview-09-2025`, `google/gemini-3.1-flash-lite`.
+- Dead slug set in `platform_common/settings.py:34` + `.env.example:36`; live `.env` does **not** override → the dead default is live.
+
+**Causal chain (Confirmed):** OpenRouter retired `gemini-2.0-flash-lite-001` between round 5 (worked) and round 6–7 → every persona `complete_json` 404s → `_skip` (thin gate) → greeting (not in-scope) → ScopeGuard "Это не ко мне"; booking (in-scope) → HITL escalate (12.39) or, with flaky ack delivery, perceived as "no reply". The round-6/7 D10/D12 "defects" are **symptoms of the dead model**, not new code bugs — 12.36–12.40 correctly handle the degraded mode but can't make the bot functional.
+
+**Fix (config):** point `openrouter_grounding_model` at a live slug (`settings.py:34` + `.env.example:36`), redeploy. Optional hardening: a startup model-validation check (warn/alert if the configured model 404s) so a future deprecation is caught before it silently degrades the bot.
+
+**Confidence: High** (deterministic: 404 in logs + slug absent from live /models).
