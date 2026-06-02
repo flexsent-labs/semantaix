@@ -2051,8 +2051,9 @@ async def _escalate_calendar_availability(
     project's calendar operator with context."""
     calendar_operator = metadata.get("calendar_operator")
     escalation_context = metadata.get("escalation_context") or ""
-    operator_username = _resolve_calendar_escalation_assignee(
-        calendar_operator if isinstance(calendar_operator, str) else None
+    operator_username = await asyncio.to_thread(
+        _resolve_calendar_escalation_assignee,
+        calendar_operator if isinstance(calendar_operator, str) else None,
     )
     contextual_question = (
         f"[{escalation_context}] {request.text}"
@@ -2061,7 +2062,9 @@ async def _escalate_calendar_availability(
     )
 
     active_ticket = (
-        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        await asyncio.to_thread(
+            hitl_ticket_repository.find_active_for_chat, request.chat_id
+        )
         if request.chat_id is not None
         else None
     )
@@ -2082,7 +2085,8 @@ async def _escalate_calendar_availability(
             question=f"[follow-up] {contextual_question}",
             customer_username=request.customer_username,
         )
-        persisted_trace_id = _persist_answer_trace(
+        persisted_trace_id = await asyncio.to_thread(
+            _persist_answer_trace,
             trace_id=trace_id,
             request_text=request.text,
             response_mode="human_only",
@@ -2106,8 +2110,10 @@ async def _escalate_calendar_availability(
             "coalesced": True,
         }
 
-    ack_message = _effective_inbound_ack_message(
-        project_id=_resolve_inbound_project_id(request.chat_id)
+    ack_message = await asyncio.to_thread(
+        lambda: _effective_inbound_ack_message(
+            project_id=_resolve_inbound_project_id(request.chat_id)
+        )
     )
     if request.chat_id is not None:
         await _safe_send_message(
@@ -2116,12 +2122,14 @@ async def _escalate_calendar_availability(
             failure_summary="Inbound ack delivery failed",
             failure_kind="inbound_ack_failed",
         )
-    ticket = hitl_ticket_repository.create(
+    ticket = await asyncio.to_thread(
+        hitl_ticket_repository.create,
         conversation_ref=request.text[:120],
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
     )
-    hitl_ticket_repository.assign(
+    await asyncio.to_thread(
+        hitl_ticket_repository.assign,
         ticket_id=ticket.id,
         operator_username=operator_username,
     )
@@ -2142,7 +2150,8 @@ async def _escalate_calendar_availability(
         question=contextual_question,
         customer_username=request.customer_username,
     )
-    persisted_trace_id = _persist_answer_trace(
+    persisted_trace_id = await asyncio.to_thread(
+        _persist_answer_trace,
         trace_id=trace_id,
         request_text=request.text,
         response_mode="human_only",
@@ -2200,7 +2209,9 @@ async def _dispatch_sales_escalation(
         )
 
     active_ticket = (
-        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        await asyncio.to_thread(
+            hitl_ticket_repository.find_active_for_chat, request.chat_id
+        )
         if request.chat_id is not None
         else None
     )
@@ -2220,7 +2231,8 @@ async def _dispatch_sales_escalation(
                 "sales_turn_kind": metadata.get("sales_turn_kind"),
             },
         )
-        persisted_trace_id = _persist_answer_trace(
+        persisted_trace_id = await asyncio.to_thread(
+            _persist_answer_trace,
             trace_id=trace_id,
             request_text=request.text,
             response_mode=pipeline_result.response_mode or "sales_escalation",
@@ -2244,13 +2256,15 @@ async def _dispatch_sales_escalation(
             "coalesced": True,
         }
 
-    ticket = hitl_ticket_repository.create(
+    ticket = await asyncio.to_thread(
+        hitl_ticket_repository.create,
         conversation_ref=request.text[:120],
         reason=hitl_reason,
         target_chat_id=request.chat_id,
     )
-    assignee = _pick_assignee_for_chat(request.chat_id)
-    hitl_ticket_repository.assign(
+    assignee = await asyncio.to_thread(_pick_assignee_for_chat, request.chat_id)
+    await asyncio.to_thread(
+        hitl_ticket_repository.assign,
         ticket_id=ticket.id,
         operator_username=assignee,
     )
@@ -2270,7 +2284,8 @@ async def _dispatch_sales_escalation(
         question=_operator_question(request.text),
         customer_username=request.customer_username,
     )
-    persisted_trace_id = _persist_answer_trace(
+    persisted_trace_id = await asyncio.to_thread(
+        _persist_answer_trace,
         trace_id=trace_id,
         request_text=request.text,
         response_mode=pipeline_result.response_mode or "sales_escalation",
@@ -2319,7 +2334,14 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
     # defends against duplicate /conversations/inbound calls — for example a
     # Telegram webhook retry that slips past the bot_gateway dedup, or a
     # script that posts the same trace_id twice.
-    existing_trace = answer_trace_repository.find_by_trace_id(trace_id)
+    # Story 12.40 (D12) — every DB call in this handler runs via asyncio.to_thread
+    # so a locked/slow SQLite (WAL contention, disk pressure) blocks a worker
+    # thread, NEVER the event loop. A wedged loop is what made the bot go globally
+    # silent until a restart; off-loop DB keeps the loop (and /health) alive and
+    # lets it recover on its own once the DB frees up.
+    existing_trace = await asyncio.to_thread(
+        answer_trace_repository.find_by_trace_id, trace_id
+    )
     if existing_trace is not None:
         logger.info(
             "inbound_idempotent_replay",
@@ -2345,7 +2367,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
     # bot_gateway's forward times out mid-send and retries) misses that gate.
     # The claim closes that window — the loser is deduplicated here, before any
     # side effect, so the customer line is never sent twice.
-    if not answer_trace_repository.claim_inbound(trace_id):
+    if not await asyncio.to_thread(answer_trace_repository.claim_inbound, trace_id):
         logger.info(
             "inbound_idempotent_replay",
             extra={"trace_id": trace_id, "reason": "in_flight_claim"},
@@ -2432,8 +2454,9 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 "timed_out": timed_out,
             },
         )
-        ack_message = _effective_inbound_ack_message(
-            project_id=ctx.project_id if ctx is not None else None
+        ack_message = await asyncio.to_thread(
+            _effective_inbound_ack_message,
+            project_id=ctx.project_id if ctx is not None else None,
         )
         if request.chat_id is not None:
             await _safe_send_message(
@@ -2442,19 +2465,25 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 failure_summary="Pipeline-error ack delivery failed",
                 failure_kind="inbound_pipeline_error_ack_failed",
             )
-        ticket = hitl_ticket_repository.create(
+        ticket = await asyncio.to_thread(
+            hitl_ticket_repository.create,
             conversation_ref=request.text[:120],
             reason="pipeline_error",
             target_chat_id=request.chat_id,
         )
-        assignee = _pick_assignee_for_chat(request.chat_id)
-        hitl_ticket_repository.assign(ticket_id=ticket.id, operator_username=assignee)
+        assignee = await asyncio.to_thread(_pick_assignee_for_chat, request.chat_id)
+        await asyncio.to_thread(
+            hitl_ticket_repository.assign,
+            ticket_id=ticket.id,
+            operator_username=assignee,
+        )
         await _notify_hitl_operator_with_question(
             ticket_id=ticket.id,
             question=request.text,
             customer_username=request.customer_username,
         )
-        persisted_trace_id = _persist_answer_trace(
+        persisted_trace_id = await asyncio.to_thread(
+            _persist_answer_trace,
             trace_id=trace_id,
             request_text=request.text,
             response_mode="human_only",
@@ -2517,7 +2546,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 failure_kind="inbound_delivery_failed",
             )
         limitations: list[str] = [] if retrieval else ["no_retrieval"]
-        persisted_trace_id = _persist_answer_trace(
+        persisted_trace_id = await asyncio.to_thread(
+            _persist_answer_trace,
             trace_id=trace_id,
             request_text=request.text,
             response_mode=pipeline_result.response_mode or "unknown",
@@ -2543,7 +2573,9 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
     # one exists so a customer's rapid follow-up questions become one human
     # conversation instead of N parallel tickets + N acks.
     active_ticket = (
-        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        await asyncio.to_thread(
+            hitl_ticket_repository.find_active_for_chat, request.chat_id
+        )
         if request.chat_id is not None
         else None
     )
@@ -2551,8 +2583,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         # Customer already has an active ticket. Don't re-ack (they got one
         # on the original message); just forward the follow-up to the
         # assigned operator as a continuation.
-        operator_username = (
-            active_ticket.operator_username or _effective_hitl_operator_username()
+        operator_username = active_ticket.operator_username or await asyncio.to_thread(
+            _effective_hitl_operator_username
         )
         logger.info(
             "hitl_escalation_start",
@@ -2571,7 +2603,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             question=f"[follow-up] {request.text}",
             customer_username=request.customer_username,
         )
-        persisted_trace_id = _persist_answer_trace(
+        persisted_trace_id = await asyncio.to_thread(
+            _persist_answer_trace,
             trace_id=trace_id,
             request_text=request.text,
             response_mode="human_only",
@@ -2593,7 +2626,9 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             "coalesced": True,
         }
 
-    ack_message = _effective_inbound_ack_message(project_id=ctx.project_id)
+    ack_message = await asyncio.to_thread(
+        _effective_inbound_ack_message, project_id=ctx.project_id
+    )
     logger.info(
         "hitl_escalation_start",
         extra={
@@ -2613,13 +2648,15 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             failure_kind="inbound_ack_failed",
         )
 
-    ticket = hitl_ticket_repository.create(
+    ticket = await asyncio.to_thread(
+        hitl_ticket_repository.create,
         conversation_ref=request.text[:120],
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
     )
-    assignee = _pick_assignee_for_chat(request.chat_id)
-    hitl_ticket_repository.assign(
+    assignee = await asyncio.to_thread(_pick_assignee_for_chat, request.chat_id)
+    await asyncio.to_thread(
+        hitl_ticket_repository.assign,
         ticket_id=ticket.id,
         operator_username=assignee,
     )
@@ -2639,7 +2676,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         customer_username=request.customer_username,
     )
 
-    persisted_trace_id = _persist_answer_trace(
+    persisted_trace_id = await asyncio.to_thread(
+        _persist_answer_trace,
         trace_id=trace_id,
         request_text=request.text,
         response_mode="human_only",
@@ -2651,12 +2689,13 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         limitations=["awaiting_human_response"],
         hitl_ticket_id=ticket.id,
     )
+    operator_username = await asyncio.to_thread(_effective_hitl_operator_username)
     return {
         "delivered": False,
         "escalated": True,
         "response_mode": "human_only",
         "hitl_ticket_id": ticket.id,
-        "hitl_operator_username": _effective_hitl_operator_username(),
+        "hitl_operator_username": operator_username,
         "trace_id": persisted_trace_id,
     }
 
