@@ -220,3 +220,31 @@ async def test_greeting_logs_structured_event(caplog) -> None:
     assert getattr(record, "trace_id", None) == "trace-greet"
     assert getattr(record, "stage_before", None) == "new"
     assert getattr(record, "stage_after", None) == "scoping"
+
+
+@pytest.mark.asyncio
+async def test_english_opener_instructs_llm_to_reply_in_english() -> None:
+    # Story 12.45 (round-8 N3) — mirror the customer's language: an English
+    # opener appends the "reply in English" directive to the greeting LLM prompt.
+    answerer, _, openrouter = _build_answerer()
+    openrouter.queue_response(
+        {"extracted_fields": {}, "next_question": "Which date suits you?"}
+    )
+    await answerer.try_answer(
+        question="Hello! Can I book a buggy for 4 people tomorrow at 10am?",
+        ctx=_ctx(),
+    )
+    assert "English" in openrouter.calls[-1]["system"]
+
+
+@pytest.mark.asyncio
+async def test_russian_opener_keeps_prompt_russian_only() -> None:
+    # Russian is the default — the prompt is unchanged (no English directive).
+    answerer, _, openrouter = _build_answerer()
+    openrouter.queue_response(
+        {"extracted_fields": {}, "next_question": "Здравствуйте! Какие даты?"}
+    )
+    await answerer.try_answer(
+        question="Здравствуйте! Хочу записаться на багги завтра.", ctx=_ctx()
+    )
+    assert "English" not in openrouter.calls[-1]["system"]
