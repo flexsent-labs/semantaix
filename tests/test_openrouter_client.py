@@ -30,8 +30,66 @@ def _http_mock(monkeypatch, *, content: str):
     return http_client
 
 
+def _http_get_mock(monkeypatch, *, payload):
+    response = Mock()
+    response.json.return_value = payload
+    response.raise_for_status = Mock()
+
+    http_client = AsyncMock()
+    http_client.get.return_value = response
+
+    async_client_cm = AsyncMock()
+    async_client_cm.__aenter__.return_value = http_client
+    async_client_cm.__aexit__.return_value = None
+
+    monkeypatch.setattr(
+        "services.api.app.openrouter_client.httpx.AsyncClient",
+        lambda timeout: async_client_cm,
+    )
+    return http_client
+
+
 def _snippet() -> RagChunk:
     return RagChunk(id=1, source_id="kb-1", chunk_text="text", score=0.9)
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_model_ids_returns_ids(monkeypatch):
+    http = _http_get_mock(
+        monkeypatch,
+        payload={
+            "data": [
+                {"id": "openai/gpt-4o-mini"},
+                {"id": "google/gemini-2.5-flash-lite"},
+                {"name": "no-id-skipped"},
+            ]
+        },
+    )
+    client = OpenRouterClient()
+    client.api_key = "token"
+    client.base_url = "https://openrouter.ai/api/v1"
+
+    ids = await client.fetch_available_model_ids()
+
+    assert ids == {"openai/gpt-4o-mini", "google/gemini-2.5-flash-lite"}
+    assert http.get.call_args.args[0] == "https://openrouter.ai/api/v1/models"
+    assert "Bearer token" in http.get.call_args.kwargs["headers"]["Authorization"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_model_ids_requires_api_key():
+    client = OpenRouterClient()
+    client.api_key = None
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        await client.fetch_available_model_ids()
+
+
+def test_is_configured_reflects_api_key():
+    client = OpenRouterClient()
+    client.api_key = None
+    assert client._is_configured() is False
+    client.api_key = "token"
+    assert client._is_configured() is True
 
 
 @pytest.mark.asyncio

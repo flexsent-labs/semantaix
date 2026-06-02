@@ -31,7 +31,10 @@ class AppSettings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
-    openrouter_grounding_model: str = "google/gemini-2.0-flash-lite-001"
+    # NOTE: OpenRouter retires model slugs over time (a 404 on /chat/completions
+    # silently degrades the bot — see the booking-dialog round-7 investigation).
+    # The startup/-/health/model guard validates this against the live model list.
+    openrouter_grounding_model: str = "google/gemini-2.5-flash-lite"
     # Story 12.30 — default sampling temperature for generative LLM calls (the
     # grounded answer, catalog digest). 0.0 = deterministic. The booking funnel's
     # structured extraction and the grounding verifier are hard-pinned to 0 in

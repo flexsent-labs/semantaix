@@ -130,4 +130,5 @@ development_status:
   12-38-numeric-date-parsing: review
   12-39-scope-guard-defers-inscope: review
   12-40-inbound-event-loop-hardening: review
+  12-41-valid-llm-model-and-guard: review
   epic-12-retrospective: optional
