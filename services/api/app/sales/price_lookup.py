@@ -36,6 +36,32 @@ _PRICE_TOKEN_RE = re.compile(
 
 _PRICE_ANCHOR_LEMMAS: tuple[str, ...] = ("цена", "стоимость", "рубль", "₽")
 
+# Story 12.53 (round-11 N2) — generic price/booking/unit/function lemmas that
+# carry no SUBJECT meaning. Removing them from a question leaves only the
+# distinctive subject nouns (a vehicle/activity like «багги», «квадроцикл»,
+# «каньонинг»), so an off-subject price chunk can be told apart from a matching
+# one even when NO services are configured. Tunable like the guardrail lists; a
+# missing word only risks a (safe) escalation, never a wrong quote — so keep
+# distinctive subject nouns OUT of this set.
+_PRICE_GENERIC_LEMMAS: frozenset[str] = frozenset(
+    {
+        # price words
+        "цена", "стоимость", "стоить", "рубль", "руб", "₽", "сколько",
+        "почём", "почем", "обойтись", "выйти", "ценник",
+        # booking / activity-generic
+        "тур", "прокат", "аренда", "покататься", "кататься", "поездка",
+        "поехать", "услуга", "вариант", "заказать", "забронировать", "бронь",
+        "маршрут", "опция",
+        # units / quantities
+        "час", "часовой", "человек", "группа", "день", "сутки", "минута",
+        "время", "штука", "всё", "весь",
+        # function words / fillers
+        "это", "этот", "на", "в", "за", "до", "с", "со", "по", "и", "или",
+        "а", "но", "не", "нужно", "хотеть", "мочь", "быть", "ваш", "наш",
+        "я", "мы", "вы", "он", "что", "как",
+    }
+)
+
 _SNIPPET_RADIUS = 60
 
 
@@ -136,6 +162,17 @@ def _best_matching_service(
     return best
 
 
+def _subject_lemmas(text: str, normalizer: _Normalizer) -> set[str]:
+    """Distinctive subject lemmas of ``text`` — content nouns left after the
+    generic price/booking/unit/function words and bare numbers are removed
+    (Story 12.53, round-11 N2). Empty for a generic ask ("сколько стоит?")."""
+    return {
+        lemma
+        for lemma in normalizer.lemmas(text)
+        if lemma and lemma not in _PRICE_GENERIC_LEMMAS and not lemma.isdigit()
+    }
+
+
 class PriceLookup:
     """Resolve a customer's price ask against the RAG knowledge base.
 
@@ -174,6 +211,12 @@ class PriceLookup:
         # ("… багги?"), require the winning chunk to mention that same service;
         # a generic ask (no service named) keeps the first-price-chunk behaviour.
         asked = _best_matching_service(question, service_names, self._normalizer)
+        # Story 12.53 (round-11 N2) — the live project has NO services, so `asked`
+        # is None and the guard above is inert. Fall back to a catalog-free check:
+        # when the customer names a subject ("… багги?"), the winning chunk must
+        # mention it, else escalate — never quote an off-subject («квадроцикл»)
+        # price. A generic ask names no subject → first-price-chunk behaviour.
+        subject = _subject_lemmas(question, self._normalizer)
         for chunk in chunks:
             if not _has_price_token(chunk.chunk_text):
                 continue
@@ -183,6 +226,12 @@ class PriceLookup:
                     chunk.chunk_text, service_names, self._normalizer
                 )
                 != asked
+            ):
+                continue
+            if (
+                asked is None
+                and subject
+                and not (subject & set(self._normalizer.lemmas(chunk.chunk_text)))
             ):
                 continue
             snippet = _price_snippet(chunk.chunk_text)

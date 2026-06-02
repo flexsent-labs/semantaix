@@ -328,3 +328,46 @@ async def test_multiword_service_no_match_misses_not_wrong_service() -> None:
     )
     assert isinstance(result, PriceMissing)  # not the квадроцикл price
     assert result.payload.service == "Аренда багги"
+
+
+# --- Story 12.53 (round-11 N2): subject-mismatch escalation, no services -----
+# Live: the project has NO configured services and the RAG holds only quadbike
+# prices. A "багги" ask must escalate (PriceMissing), never quote the quadbike
+# price — even with empty service_names (12.49's guard is inert there).
+
+
+@pytest.mark.asyncio
+async def test_no_services_buggy_ask_does_not_quote_quadbike() -> None:
+    lookup, _ = _lookup(
+        [RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9)]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит покататься на багги?",
+        service_names=(),  # live reality: nothing configured
+    )
+    assert isinstance(result, PriceMissing)  # escalate, never mis-quote
+
+
+@pytest.mark.asyncio
+async def test_no_services_generic_ask_returns_first_price() -> None:
+    # No subject noun named → no mismatch to detect → first price chunk wins.
+    lookup, _ = _lookup(
+        [RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9)]
+    )
+    result = await lookup.lookup(
+        project_id=1, intent=Intent(), question="Сколько это стоит?", service_names=()
+    )
+    assert isinstance(result, PriceFound)
+
+
+@pytest.mark.asyncio
+async def test_no_services_subject_match_returns_price() -> None:
+    lookup, _ = _lookup(
+        [RagChunk(id=1, source_id="kb", chunk_text=_BUGGY_PRICE, score=0.9)]
+    )
+    result = await lookup.lookup(
+        project_id=1, intent=Intent(), question="Сколько стоит багги?", service_names=()
+    )
+    assert isinstance(result, PriceFound)  # chunk is about багги → quote it
