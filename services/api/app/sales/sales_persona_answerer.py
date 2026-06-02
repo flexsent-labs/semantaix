@@ -69,7 +69,11 @@ from services.api.app.sales.price_lookup import (
     PriceMissing,
     extract_price_tokens,
 )
-from services.api.app.sales.reply_language import reply_language_directive
+from services.api.app.sales.reply_language import (
+    detect_language,
+    localize,
+    reply_language_directive,
+)
 from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.scoping_schema import (
     TRANSFER_SCHEMA,
@@ -141,6 +145,10 @@ OUT_OF_SCOPE_DECLINE_LINE = (
     "Этим, к сожалению, не помогу — я по прокату багги. "
     "Подскажу с поездкой: даты и сколько человек?"
 )
+OUT_OF_SCOPE_DECLINE_LINE_EN = (
+    "I'm afraid I can't help with that — I handle buggy rentals. "
+    "I can help with a trip: what dates, and how many people?"
+)
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 # Story 12.05 — appended to the textual reply when a media dispatch failed
@@ -156,8 +164,16 @@ EQUIPMENT_ACK_LINE = "Снаряжение подготовим, расскаж�
 SCOPING_COMPLETE_HANDOFF_LINE = (
     "Спасибо! Передам детали коллегам на подтверждение — вернутся с ответом."
 )
+SCOPING_COMPLETE_HANDOFF_LINE_EN = (
+    "Thank you! I'll pass the details to my colleagues for confirmation — "
+    "they'll get back to you."
+)
 SLOT_FREE_HANDOFF_LINE = (
     "Спасибо! Это время свободно — передам коллегам для подтверждения."
+)
+SLOT_FREE_HANDOFF_LINE_EN = (
+    "Thank you! That time is free — I'll pass it to my colleagues for "
+    "confirmation."
 )
 # Story 12.32 (D1) — the customer named a concrete time but the calendar could
 # NOT be checked. Say plainly we'll verify it; never claim it's free
@@ -166,7 +182,11 @@ SLOT_FREE_HANDOFF_LINE = (
 SLOT_UNVERIFIED_HANDOFF_LINE = (
     "Спасибо! Проверю это время и вернусь к вам с ответом."
 )
+SLOT_UNVERIFIED_HANDOFF_LINE_EN = (
+    "Thank you! I'll check that time and get back to you with an answer."
+)
 SLOT_BUSY_LINE = "К сожалению, это время уже занято."
+SLOT_BUSY_LINE_EN = "Unfortunately, that time is already taken."
 # Story 12.29 — the availability engine already distinguishes *why* a slot is
 # unavailable; surface that as distinct customer copy instead of mislabeling
 # every unavailable slot "занято" (busy). A 23:00 request is outside working
@@ -176,11 +196,21 @@ SLOT_OFF_HOURS_LINE = "К сожалению, это время вне рабо�
 SLOT_WRONG_DAY_LINE = "К сожалению, в этот день услуга недоступна."
 SLOT_CLOSED_DATE_LINE = "К сожалению, в этот день мы не работаем."
 SLOT_IN_PAST_LINE = "К сожалению, это время уже прошло."
+SLOT_OFF_HOURS_LINE_EN = "Unfortunately, that time is outside our working hours."
+SLOT_WRONG_DAY_LINE_EN = "Unfortunately, the service isn't available that day."
+SLOT_CLOSED_DATE_LINE_EN = "Unfortunately, we're closed that day."
+SLOT_IN_PAST_LINE_EN = "Unfortunately, that time has already passed."
 _UNAVAILABLE_LEAD_LINES: dict[str, str] = {
     REASON_OUTSIDE_WORKING_HOURS: SLOT_OFF_HOURS_LINE,
     REASON_WRONG_SERVICE_DAY: SLOT_WRONG_DAY_LINE,
     REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE,
     REASON_IN_PAST: SLOT_IN_PAST_LINE,
+}
+_UNAVAILABLE_LEAD_LINES_EN: dict[str, str] = {
+    REASON_OUTSIDE_WORKING_HOURS: SLOT_OFF_HOURS_LINE_EN,
+    REASON_WRONG_SERVICE_DAY: SLOT_WRONG_DAY_LINE_EN,
+    REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE_EN,
+    REASON_IN_PAST: SLOT_IN_PAST_LINE_EN,
 }
 # Story 12.11 — when the customer declines the field just asked ("не нужно",
 # "0", "без водителей"), record this sentinel so the funnel advances instead of
@@ -198,6 +228,12 @@ ASK_FOR_TIME_LINE = (
     "Уточните, пожалуйста, желаемые дату и время — проверю по календарю "
     "и подтвержу."
 )
+# Story 12.47 (round-10 N3) — English variants of the deterministic
+# customer-facing lines, selected per turn via ``localize(.., ctx.language)``.
+ASK_FOR_TIME_LINE_EN = (
+    "Could you let me know the desired date and time? "
+    "I'll check the calendar and confirm."
+)
 # Story 12.19 — acknowledgement when the customer accepts the offered
 # alternative slot in pitching ("да" / "давайте на 31-ое в 8"). Names the slot
 # but frames it as passed to the operator *for* confirmation — never as already
@@ -205,6 +241,10 @@ ASK_FOR_TIME_LINE = (
 # escalated) books it. ``{day_month}`` = "31 мая", ``{time}`` = "08:00".
 PITCHING_ACCEPT_CONFIRM_LINE = (
     "Отлично, передаю детали коллеге на подтверждение — {day_month} на {time}."
+)
+PITCHING_ACCEPT_CONFIRM_LINE_EN = (
+    "Great — I'm passing the details to a colleague for confirmation: "
+    "{day_month} at {time}."
 )
 
 # Story 12.05 — equipment-question lemma triggers. Lowercase lemma roots
@@ -261,6 +301,22 @@ _MONTHS_GENITIVE: dict[int, str] = {
     10: "октября",
     11: "ноября",
     12: "декабря",
+}
+# Story 12.47 (round-10 N3) — English month names so an English thread's
+# busy-alternative tail / accept confirmation names the slot in English too.
+_MONTHS_EN: dict[int, str] = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
 }
 
 # Story 12.33 (D9) — Monday..Sunday, indexed by datetime.weekday().
@@ -659,6 +715,13 @@ class SalesPersonaAnswerer:
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
+        # Story 12.47 (round-10 N3) — pin the turn's language ONCE from the
+        # customer's current message, so every downstream line (LLM-generated
+        # AND the deterministic constants below) mirrors it. Detection is the
+        # same cheap heuristic the LLM directive uses; an English thread now
+        # stays English on every turn instead of reverting to Russian the
+        # moment a fixed constant (ask-for-time, busy/free verdict) fires.
+        ctx = replace(ctx, language=detect_language(question))
         result = await self._dispatch(question=question, ctx=ctx)
         # Story 12.27 — a cancellation turn suppresses the +24h nudge so the
         # customer isn't asked "still thinking about booking?" a day after asking
@@ -942,7 +1005,11 @@ class SalesPersonaAnswerer:
         )
         return AnswerResult(
             handled=True,
-            text=OUT_OF_SCOPE_DECLINE_LINE,
+            text=localize(
+                OUT_OF_SCOPE_DECLINE_LINE,
+                OUT_OF_SCOPE_DECLINE_LINE_EN,
+                language=ctx.language,
+            ),
             metadata={
                 "answerer": NAME,
                 "sales_turn_kind": "out_of_scope_decline",
@@ -1261,13 +1328,22 @@ class SalesPersonaAnswerer:
         booking is out of scope — the operator (already escalated) finalises.
         """
         if slot_dt is not None:
-            text = PITCHING_ACCEPT_CONFIRM_LINE.format(
-                day_month=f"{slot_dt.day} {_MONTHS_GENITIVE[slot_dt.month]}",
-                time=slot_dt.strftime("%H:%M"),
-            )
+            if ctx.language == "en":
+                day_month = f"{_MONTHS_EN[slot_dt.month]} {slot_dt.day}"
+            else:
+                day_month = f"{slot_dt.day} {_MONTHS_GENITIVE[slot_dt.month]}"
+            text = localize(
+                PITCHING_ACCEPT_CONFIRM_LINE,
+                PITCHING_ACCEPT_CONFIRM_LINE_EN,
+                language=ctx.language,
+            ).format(day_month=day_month, time=slot_dt.strftime("%H:%M"))
             turn_kind = "pitching_accept_confirmed"
         else:
-            text = SCOPING_COMPLETE_HANDOFF_LINE
+            text = localize(
+                SCOPING_COMPLETE_HANDOFF_LINE,
+                SCOPING_COMPLETE_HANDOFF_LINE_EN,
+                language=ctx.language,
+            )
             turn_kind = "pitching_accept_no_slot"
         await self._persist(
             ctx=ctx,
@@ -1431,7 +1507,7 @@ class SalesPersonaAnswerer:
         A plain handled reply (no escalation / HITL ticket). The stage
         transition is what bounds the ask to a single round.
         """
-        text = ASK_FOR_TIME_LINE
+        text = localize(ASK_FOR_TIME_LINE, ASK_FOR_TIME_LINE_EN, language=ctx.language)
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         await self._persist(
@@ -1584,18 +1660,34 @@ class SalesPersonaAnswerer:
         """
         offered = alternative is not None
         if offered:
-            slot = (
-                f" Ближайшее свободное время — {alternative.day} "
-                f"{_MONTHS_GENITIVE[alternative.month]}, "
-                f"{alternative.strftime('%H:%M')}."
-            )
+            if ctx.language == "en":
+                slot = (
+                    f" The nearest available time is "
+                    f"{_MONTHS_EN[alternative.month]} {alternative.day}, "
+                    f"{alternative.strftime('%H:%M')}."
+                )
+            else:
+                slot = (
+                    f" Ближайшее свободное время — {alternative.day} "
+                    f"{_MONTHS_GENITIVE[alternative.month]}, "
+                    f"{alternative.strftime('%H:%M')}."
+                )
             turn_kind = "scoping_complete_busy_alternative"
         else:
-            slot = f" {SCOPING_COMPLETE_HANDOFF_LINE}"
+            slot = " " + localize(
+                SCOPING_COMPLETE_HANDOFF_LINE,
+                SCOPING_COMPLETE_HANDOFF_LINE_EN,
+                language=ctx.language,
+            )
             turn_kind = "scoping_complete_busy_no_slot"
         # Story 12.29 — lead line reflects *why* the slot is unavailable; the
         # alternative-offer / handoff tail and stage transition are unchanged.
-        lead_line = _UNAVAILABLE_LEAD_LINES.get(reason, SLOT_BUSY_LINE)
+        # Story 12.47 — both the lead line and tail mirror the turn's language.
+        lead_line = localize(
+            _UNAVAILABLE_LEAD_LINES.get(reason, SLOT_BUSY_LINE),
+            _UNAVAILABLE_LEAD_LINES_EN.get(reason, SLOT_BUSY_LINE_EN),
+            language=ctx.language,
+        )
         text = f"{lead_line}{slot}"
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
@@ -1781,7 +1873,15 @@ class SalesPersonaAnswerer:
         dispatch_fallback: bool,
     ) -> AnswerResult:
         """Confirm the booking + open a HITL ticket carrying the collected intent."""
-        text = SLOT_FREE_HANDOFF_LINE if free else SCOPING_COMPLETE_HANDOFF_LINE
+        text = (
+            localize(SLOT_FREE_HANDOFF_LINE, SLOT_FREE_HANDOFF_LINE_EN, language=ctx.language)
+            if free
+            else localize(
+                SCOPING_COMPLETE_HANDOFF_LINE,
+                SCOPING_COMPLETE_HANDOFF_LINE_EN,
+                language=ctx.language,
+            )
+        )
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         # Story 12.19 — the free / can't-verify handoff offers no slot to accept.
@@ -1838,7 +1938,11 @@ class SalesPersonaAnswerer:
         escalation; the ``escalation_context`` prefix rides into the operator DM
         (``api/main.py``).
         """
-        text = SLOT_UNVERIFIED_HANDOFF_LINE
+        text = localize(
+            SLOT_UNVERIFIED_HANDOFF_LINE,
+            SLOT_UNVERIFIED_HANDOFF_LINE_EN,
+            language=ctx.language,
+        )
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         unverified_reason = status if reason is None else f"{status}:{reason}"

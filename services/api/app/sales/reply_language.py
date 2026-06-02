@@ -43,4 +43,19 @@ def reply_language_directive(text: str | None) -> str:
     return _EN_REPLY_DIRECTIVE if detect_language(text) == "en" else ""
 
 
-__all__ = ["detect_language", "reply_language_directive"]
+def localize(ru: str, en: str, *, language: str) -> str:
+    """Pick the customer's-language variant of a deterministic line (Story 12.47).
+
+    The sales persona's *LLM* lines already mirror the customer's language via
+    ``reply_language_directive``; its *deterministic* customer-facing constants
+    (ask-for-time, busy/free/unverified verdicts, handoff confirmations) were
+    Russian-only, so an English thread reverted to Russian the moment one of
+    them fired (round-10 N3). Callers pass the per-turn ``ctx.language`` (set
+    once from ``detect_language(question)`` at the turn boundary): ``"en"`` →
+    the English variant, anything else → the Russian default, so Russian
+    conversations are byte-identical and unchanged.
+    """
+    return en if language == "en" else ru
+
+
+__all__ = ["detect_language", "localize", "reply_language_directive"]
