@@ -111,30 +111,29 @@ def _build_query(question: str) -> str:
     return " ".join(parts)
 
 
-def _asked_service(
-    question: str, service_names: Sequence[str], normalizer: _Normalizer
+def _best_matching_service(
+    text: str, service_names: Sequence[str], normalizer: _Normalizer
 ) -> str | None:
-    """The configured service the question names (lemma-subset match), or None.
+    """The configured service whose name shares the MOST lemmas with ``text``.
 
-    Returns the FIRST service whose name lemmas are all present in the question,
-    so «… на багги?» resolves to "Багги" — and a квадроцикл price chunk is then
-    excluded (Story 12.44, round-8 N2). A generic ask that names no configured
-    service returns None (the lookup keeps its first-price-chunk behaviour).
+    Max-overlap (Story 12.49, round-10 N2) — so the customer's short «багги»
+    resolves to the configured multi-word «Аренда багги» (they share the lemma
+    «багга»), and a «квадроцикл» chunk resolves to a different service. Returns
+    ``None`` when nothing overlaps (a generic ask names no service → the lookup
+    keeps its first-price-chunk behaviour). Running the SAME routine on the
+    question and on each chunk makes the match symmetric and robust to shared
+    generic words ("аренда" / "прокат"): the distinctive noun gives the max
+    overlap, so a chunk is kept only when ITS best-matching service is the asked
+    one (12.44's subset match failed entirely on multi-word service names).
     """
-    q_lemmas = set(normalizer.lemmas(question))
+    best: str | None = None
+    best_overlap = 0
     for name in service_names:
-        name_lemmas = [lemma for lemma in normalizer.lemmas(name) if lemma]
-        if name_lemmas and set(name_lemmas) <= q_lemmas:
-            return name
-    return None
-
-
-def _chunk_mentions_service(
-    chunk_text: str, service_name: str, normalizer: _Normalizer
-) -> bool:
-    """True when the chunk's lemmas contain all of the service name's lemmas."""
-    name_lemmas = {lemma for lemma in normalizer.lemmas(service_name) if lemma}
-    return bool(name_lemmas) and name_lemmas <= set(normalizer.lemmas(chunk_text))
+        name_lemmas = {lemma for lemma in normalizer.lemmas(name) if lemma}
+        overlap = len(name_lemmas & set(normalizer.lemmas(text)))
+        if overlap > best_overlap:
+            best, best_overlap = name, overlap
+    return best
 
 
 class PriceLookup:
@@ -174,12 +173,16 @@ class PriceLookup:
         # customer didn't ask about. When the question names a configured service
         # ("… багги?"), require the winning chunk to mention that same service;
         # a generic ask (no service named) keeps the first-price-chunk behaviour.
-        asked = _asked_service(question, service_names, self._normalizer)
+        asked = _best_matching_service(question, service_names, self._normalizer)
         for chunk in chunks:
             if not _has_price_token(chunk.chunk_text):
                 continue
-            if asked is not None and not _chunk_mentions_service(
-                chunk.chunk_text, asked, self._normalizer
+            if (
+                asked is not None
+                and _best_matching_service(
+                    chunk.chunk_text, service_names, self._normalizer
+                )
+                != asked
             ):
                 continue
             snippet = _price_snippet(chunk.chunk_text)
