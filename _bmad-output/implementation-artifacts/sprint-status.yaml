@@ -136,4 +136,7 @@ development_status:
   12-44-price-matches-asked-service: review
   12-45-reply-in-customer-language: review
   12-46-pricing-aside-not-sticky: review
+  12-47-bilingual-deterministic-lines: review
+  12-48-pitching-counteroffer-numeric-date: review
+  12-49-price-multiword-service-match: review
   epic-12-retrospective: optional

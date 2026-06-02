@@ -6,6 +6,7 @@ import pytest
 
 from services.api.app.sales.reply_language import (
     detect_language,
+    localize,
     reply_language_directive,
 )
 
@@ -35,3 +36,19 @@ def test_directive_is_empty_for_russian_text() -> None:
     # Russian is the default — the prompt must be byte-identical (no regression).
     assert reply_language_directive("Здравствуйте, сколько стоит багги?") == ""
     assert reply_language_directive("") == ""
+
+
+# --- Story 12.47 (round-10 N3) — localize() picks the per-turn variant --------
+
+
+def test_localize_returns_english_variant_for_en() -> None:
+    assert localize("Занято.", "Taken.", language="en") == "Taken."
+
+
+def test_localize_returns_russian_default_for_ru() -> None:
+    assert localize("Занято.", "Taken.", language="ru") == "Занято."
+
+
+def test_localize_treats_unknown_language_as_russian_default() -> None:
+    # Only the explicit "en" switches to English; anything else stays Russian.
+    assert localize("Занято.", "Taken.", language="de") == "Занято."

@@ -695,3 +695,34 @@ async def test_pricing_stage_booking_reroutes_to_availability_not_price() -> Non
     )
     assert SLOT_BUSY_LINE in (result.text or "")  # availability verdict, not price
     assert freebusy.calls == 1
+
+
+# --- N1 round 10: numeric counter-offer in the PITCHING path -----------------
+# After a busy intercept parks the funnel in pitching, a NEW numeric date
+# ("Можно 03.06 в 16:00…") must be re-checked. The pitching counter-offer used
+# date_parser (no numeric), so it was accepted unchecked.
+
+
+def _pitching_state(*, intent: Intent) -> dict[str, Any]:
+    return {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": intent.to_dict(),
+        "last_proposal": {"alternative_iso": "2026-05-30T09:00:00+03:00"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_pitching_numeric_counteroffer_is_busy_checked() -> None:
+    answerer, _state, _, freebusy = _build(
+        state=_pitching_state(intent=Intent(dates="завтра в 14:00")),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_june3_afternoon()),
+    )
+    result = await answerer.try_answer(
+        question="Можно 03.06 в 16:00 на багги, нас двое?", ctx=_ctx()
+    )
+    assert SLOT_BUSY_LINE in (result.text or "")  # 16:00 on 3 June is busy
+    assert freebusy.calls == 1  # the numeric counter-offer WAS checked

@@ -9,6 +9,7 @@ hands off — never a second ask.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -22,10 +23,14 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     ASK_FOR_TIME_LINE,
+    ASK_FOR_TIME_LINE_EN,
     MATERIAL_DISPATCH_FALLBACK_LINE,
+    PITCHING_ACCEPT_CONFIRM_LINE_EN,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
+    SLOT_BUSY_LINE_EN,
     SLOT_FREE_HANDOFF_LINE,
+    SLOT_FREE_HANDOFF_LINE_EN,
     STAGE_AWAITING_TIME,
     SalesPersonaAnswerer,
 )
@@ -304,3 +309,118 @@ async def test_no_time_calendar_disabled_hands_off_not_ask() -> None:
     )
     result = await answerer.try_answer(question="ну что?", ctx=_ctx())
     assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+
+
+# --- Story 12.47 (round-10 N3) — deterministic lines mirror the turn language -
+# The LLM lines already mirror the customer's language; these guard that the
+# DETERMINISTIC constants (ask-for-time, busy/free verdict, accept confirmation)
+# do too, on every turn — an English thread no longer reverts to Russian the
+# moment a fixed line fires.
+
+
+def _en_ctx() -> AnswerContext:
+    return replace(_ctx(), language="en")
+
+
+@pytest.mark.asyncio
+async def test_awaiting_time_busy_en_localizes_verdict_and_alternative() -> None:
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 13, 0, tzinfo=ZoneInfo("Europe/Moscow")),
+            end=datetime(2026, 5, 30, 15, 0, tzinfo=ZoneInfo("Europe/Moscow")),
+        ),
+    )
+    openrouter = _QueueOpenRouter(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _ = _build(
+        state=_state(dates=None),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        freebusy=_FreeBusy(busy=busy),
+    )
+    # English turn → English verdict + English nearest-free tail (May 30, 09:00).
+    result = await answerer.try_answer(question="Tomorrow at 14:00 then.", ctx=_ctx())
+    text = result.text or ""
+    assert SLOT_BUSY_LINE_EN in text
+    assert "The nearest available time is" in text
+    assert "May 30" in text and "09:00" in text
+    # No Russian leaks through on an English turn.
+    assert SLOT_BUSY_LINE not in text
+    assert "Ближайшее свободное" not in text
+
+
+@pytest.mark.asyncio
+async def test_awaiting_time_free_en_localizes_handoff() -> None:
+    openrouter = _QueueOpenRouter(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _ = _build(
+        state=_state(dates=None),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(question="Tomorrow at 14:00 then.", ctx=_ctx())
+    assert result.text == SLOT_FREE_HANDOFF_LINE_EN
+
+
+@pytest.mark.asyncio
+async def test_awaiting_time_busy_ru_unchanged_regression() -> None:
+    # A Russian turn keeps the Russian verdict byte-identical (no regression).
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 13, 0, tzinfo=ZoneInfo("Europe/Moscow")),
+            end=datetime(2026, 5, 30, 15, 0, tzinfo=ZoneInfo("Europe/Moscow")),
+        ),
+    )
+    openrouter = _QueueOpenRouter(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _ = _build(
+        state=_state(dates=None),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        freebusy=_FreeBusy(busy=busy),
+    )
+    result = await answerer.try_answer(question="завтра в 14:00", ctx=_ctx())
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text
+    assert "Ближайшее свободное время" in text
+    assert SLOT_BUSY_LINE_EN not in text
+
+
+@pytest.mark.asyncio
+async def test_ask_for_time_en_localizes() -> None:
+    # The round-10 N3 culprit: the ask-for-time constant was Russian-only.
+    answerer, _ = _build(
+        state=_state(dates=None, stage="scoping"),
+        openrouter=_QueueOpenRouter(),
+        cal_settings=_FakeCalSettings(),
+    )
+    result = await answerer._ask_for_time(
+        ctx=_en_ctx(),
+        intent=Intent(dates=None),
+        stage_before="scoping",
+        base_metadata={},
+        dispatch_fallback=False,
+    )
+    assert result.text == ASK_FOR_TIME_LINE_EN
+    assert ASK_FOR_TIME_LINE not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_confirm_slot_en_names_slot_in_english() -> None:
+    answerer, _ = _build(
+        state=_state(dates=None, stage="pitching"),
+        openrouter=_QueueOpenRouter(),
+        cal_settings=_FakeCalSettings(),
+    )
+    slot_dt = datetime(2026, 5, 30, 8, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    result = await answerer._confirm_slot(
+        ctx=_en_ctx(), intent=Intent(dates="завтра в 8"), slot_dt=slot_dt
+    )
+    assert result.text == PITCHING_ACCEPT_CONFIRM_LINE_EN.format(
+        day_month="May 30", time="08:00"
+    )
+    assert "мая" not in (result.text or "")

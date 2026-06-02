@@ -287,3 +287,44 @@ async def test_no_service_named_keeps_first_price_chunk() -> None:
     )
     assert isinstance(result, PriceFound)
     assert "13 000" in result.snippet
+
+
+# --- N2 round 10: multi-word configured service name -------------------------
+# Live service is «Аренда багги» (multi-word); the customer says just «багги».
+# The old subset match required ALL name lemmas in the question and failed.
+
+_MULTIWORD_SERVICES = ["Аренда багги", "Квадроцикл"]
+
+
+@pytest.mark.asyncio
+async def test_multiword_service_resolves_from_short_customer_word() -> None:
+    lookup, _ = _lookup(
+        [
+            RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9),
+            RagChunk(id=2, source_id="kb", chunk_text=_BUGGY_PRICE, score=0.8),
+        ]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит покататься на багги?",
+        service_names=_MULTIWORD_SERVICES,
+    )
+    assert isinstance(result, PriceFound)
+    assert "90 000" in result.snippet  # the багги price
+    assert "13 000" not in result.snippet  # never the квадроцикл price
+
+
+@pytest.mark.asyncio
+async def test_multiword_service_no_match_misses_not_wrong_service() -> None:
+    lookup, _ = _lookup(
+        [RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9)]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит покататься на багги?",
+        service_names=_MULTIWORD_SERVICES,
+    )
+    assert isinstance(result, PriceMissing)  # not the квадроцикл price
+    assert result.payload.service == "Аренда багги"
