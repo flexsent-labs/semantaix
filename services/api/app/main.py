@@ -3236,18 +3236,26 @@ def retrieve_rag(request: RagRetrieveRequest) -> dict[str, object]:
     }
 
 
-@app.post("/incidents/events")
-async def ingest_incident_event(request: IncidentEventRequest) -> dict[str, object]:
+async def _record_and_alert_incident(
+    *, fingerprint: str, severity: str, summary: str
+):
+    """Ingest an incident and DM the admin when it's critical (debounced).
+
+    Shared by the /incidents/events endpoint and the startup model guard (Story
+    12.42), so a model-availability problem reaches the admin through the same
+    dedup/debounce path as every other critical infra incident. Returns
+    ``(incident, sent, delivery_status)``.
+    """
     incident = incident_repository.ingest(
-        fingerprint=request.fingerprint,
-        severity=request.severity,
-        summary=request.summary,
+        fingerprint=fingerprint,
+        severity=severity,
+        summary=summary,
     )
     sent = False
     delivery_status = "not_critical"
     if telegram_notifier.is_critical_event(
-        fingerprint=request.fingerprint,
-        severity=request.severity,
+        fingerprint=fingerprint,
+        severity=severity,
     ):
         last_sent_at = incident_repository.get_last_telegram_sent_at(incident.id)
         if last_sent_at is not None:
@@ -3257,23 +3265,33 @@ async def ingest_incident_event(request: IncidentEventRequest) -> dict[str, obje
             else:
                 sent, delivery_status = await telegram_notifier.notify_if_critical(
                     incident_id=incident.id,
-                    fingerprint=request.fingerprint,
-                    severity=request.severity,
-                    summary=request.summary,
+                    fingerprint=fingerprint,
+                    severity=severity,
+                    summary=summary,
                     occurrence_count=incident.occurrence_count,
                 )
         else:
             sent, delivery_status = await telegram_notifier.notify_if_critical(
                 incident_id=incident.id,
-                fingerprint=request.fingerprint,
-                severity=request.severity,
-                summary=request.summary,
+                fingerprint=fingerprint,
+                severity=severity,
+                summary=summary,
                 occurrence_count=incident.occurrence_count,
             )
     incident_repository.append_event(
         incident_id=incident.id,
         event_type="telegram_notify",
         details=f"status={delivery_status}",
+    )
+    return incident, sent, delivery_status
+
+
+@app.post("/incidents/events")
+async def ingest_incident_event(request: IncidentEventRequest) -> dict[str, object]:
+    incident, sent, delivery_status = await _record_and_alert_incident(
+        fingerprint=request.fingerprint,
+        severity=request.severity,
+        summary=request.summary,
     )
     return {
         "id": incident.id,
@@ -3584,6 +3602,18 @@ async def validate_llm_models_on_startup() -> None:
     if unavailable:
         logger.error(
             "llm_models_unavailable_at_startup", extra={"unavailable": unavailable}
+        )
+        # Story 12.42 — DM the admin via the critical-incident path (deduped /
+        # debounced) so a retired model never breaks the bot silently again.
+        await _record_and_alert_incident(
+            fingerprint="llm_model_unavailable",
+            severity="critical",
+            summary=(
+                "OpenRouter model(s) unavailable: "
+                + ", ".join(unavailable)
+                + " — the bot will degrade (every persona call 404s) until the "
+                "model config is fixed."
+            ),
         )
     else:
         logger.info("llm_models_validated", extra={"models": models})

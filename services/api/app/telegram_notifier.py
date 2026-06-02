@@ -11,6 +11,9 @@ CRITICAL_FINGERPRINTS = {
     "hitl_delivery_failures",
     "knowledge_extraction_failures",
     "knowledge_reindex_failures",
+    # Story 12.42 — a configured LLM model OpenRouter no longer serves: every
+    # persona call 404s and the bot silently degrades, so DM the admin.
+    "llm_model_unavailable",
 }
 
 

@@ -5,6 +5,17 @@ import pytest
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 
 
+def test_llm_model_unavailable_is_a_critical_event():
+    # Story 12.42 — a retired/unavailable model is a critical infra problem the
+    # admin must be DM'd about (it silently breaks every persona turn).
+    assert (
+        TelegramIncidentNotifier.is_critical_event(
+            fingerprint="llm_model_unavailable", severity="critical"
+        )
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_notify_if_critical_skips_non_critical():
     notifier = TelegramIncidentNotifier(
