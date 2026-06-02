@@ -2294,10 +2294,23 @@ class SalesPersonaAnswerer:
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
 
         try:
+            # Story 12.44 (round-8 N2) — pass the configured service catalog so
+            # the lookup won't quote a price for a service the customer didn't
+            # ask about (a багги question must not return the квадроцикл rate).
+            services = await asyncio.to_thread(
+                self._services_repo.list_for_project,
+                project_id=int(ctx.project_id or 0),
+            )
+            service_names = [
+                row.name.strip()
+                for row in services
+                if getattr(row, "name", None) and row.name.strip()
+            ]
             outcome = await self._price_lookup.lookup(
                 project_id=ctx.project_id,
                 intent=existing_intent,
                 question=question,
+                service_names=service_names,
             )
         except Exception as exc:  # defensive — RAG transport / sqlite error
             logger.warning(

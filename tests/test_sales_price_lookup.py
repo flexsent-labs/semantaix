@@ -210,3 +210,80 @@ def test_price_unknown_payload_as_dict_shape() -> None:
         "hours": None,
         "original_question": "Сколько стоит 6 часов?",
     }
+
+
+# --- N2 (round 8): the quoted price must match the ASKED service -------------
+# Live miss: «Сколько стоит … багги?» → «13 000 ₽ за квадроцикл» — the lookup
+# returned the first price-bearing chunk regardless of which service it named.
+
+_QUADBIKE_PRICE = "Прокат квадроцикла — 13 000 ₽ за квадроцикл в час."
+_BUGGY_PRICE = "Багги — 90 000 ₽ за маршрут, до 4 человек."
+_SERVICES = ["Багги", "Квадроцикл"]
+
+
+@pytest.mark.asyncio
+async def test_skips_price_chunk_for_a_service_not_asked_about() -> None:
+    lookup, _ = _lookup(
+        [RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9)]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит покататься на багги?",
+        service_names=_SERVICES,
+    )
+    assert isinstance(result, PriceMissing)  # not the квадроцикл price
+    assert result.payload.service == "Багги"
+
+
+@pytest.mark.asyncio
+async def test_returns_price_chunk_matching_the_asked_service() -> None:
+    lookup, _ = _lookup(
+        [
+            RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9),
+            RagChunk(id=2, source_id="kb", chunk_text=_BUGGY_PRICE, score=0.8),
+        ]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит покататься на багги?",
+        service_names=_SERVICES,
+    )
+    assert isinstance(result, PriceFound)
+    assert "90 000" in result.snippet
+    assert "13 000" not in result.snippet
+
+
+@pytest.mark.asyncio
+async def test_asked_quadbike_returns_quadbike_price() -> None:
+    lookup, _ = _lookup(
+        [
+            RagChunk(id=1, source_id="kb", chunk_text=_BUGGY_PRICE, score=0.9),
+            RagChunk(id=2, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.8),
+        ]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит квадроцикл?",
+        service_names=_SERVICES,
+    )
+    assert isinstance(result, PriceFound)
+    assert "13 000" in result.snippet
+
+
+@pytest.mark.asyncio
+async def test_no_service_named_keeps_first_price_chunk() -> None:
+    # Generic ask with no service mentioned → first price chunk (unchanged).
+    lookup, _ = _lookup(
+        [RagChunk(id=1, source_id="kb", chunk_text=_QUADBIKE_PRICE, score=0.9)]
+    )
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько это стоит?",
+        service_names=_SERVICES,
+    )
+    assert isinstance(result, PriceFound)
+    assert "13 000" in result.snippet

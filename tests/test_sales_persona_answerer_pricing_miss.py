@@ -67,7 +67,7 @@ class _StubPriceLookup:
         self.result = result
 
     async def lookup(
-        self, *, project_id: int | None, intent: Intent, question: str
+        self, *, project_id: int | None, intent: Intent, question: str, **_kwargs
     ):
         return self.result
 

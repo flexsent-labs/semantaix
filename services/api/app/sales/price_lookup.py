@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
@@ -110,6 +111,32 @@ def _build_query(question: str) -> str:
     return " ".join(parts)
 
 
+def _asked_service(
+    question: str, service_names: Sequence[str], normalizer: _Normalizer
+) -> str | None:
+    """The configured service the question names (lemma-subset match), or None.
+
+    Returns the FIRST service whose name lemmas are all present in the question,
+    so «… на багги?» resolves to "Багги" — and a квадроцикл price chunk is then
+    excluded (Story 12.44, round-8 N2). A generic ask that names no configured
+    service returns None (the lookup keeps its first-price-chunk behaviour).
+    """
+    q_lemmas = set(normalizer.lemmas(question))
+    for name in service_names:
+        name_lemmas = [lemma for lemma in normalizer.lemmas(name) if lemma]
+        if name_lemmas and set(name_lemmas) <= q_lemmas:
+            return name
+    return None
+
+
+def _chunk_mentions_service(
+    chunk_text: str, service_name: str, normalizer: _Normalizer
+) -> bool:
+    """True when the chunk's lemmas contain all of the service name's lemmas."""
+    name_lemmas = {lemma for lemma in normalizer.lemmas(service_name) if lemma}
+    return bool(name_lemmas) and name_lemmas <= set(normalizer.lemmas(chunk_text))
+
+
 class PriceLookup:
     """Resolve a customer's price ask against the RAG knowledge base.
 
@@ -134,6 +161,7 @@ class PriceLookup:
         project_id: int | None,
         intent: Intent,
         question: str,
+        service_names: Sequence[str] = (),
     ) -> PriceFound | PriceMissing:
         query = _build_query(question)
         chunks = await asyncio.to_thread(
@@ -142,17 +170,27 @@ class PriceLookup:
             limit=5,
             project_id=project_id,
         )
+        # Story 12.44 (round-8 N2) — never quote a price for a service the
+        # customer didn't ask about. When the question names a configured service
+        # ("… багги?"), require the winning chunk to mention that same service;
+        # a generic ask (no service named) keeps the first-price-chunk behaviour.
+        asked = _asked_service(question, service_names, self._normalizer)
         for chunk in chunks:
-            if _has_price_token(chunk.chunk_text):
-                snippet = _price_snippet(chunk.chunk_text)
-                return PriceFound(
-                    text=chunk.chunk_text,
-                    source_chunk_id=str(chunk.id),
-                    snippet=snippet,
-                )
+            if not _has_price_token(chunk.chunk_text):
+                continue
+            if asked is not None and not _chunk_mentions_service(
+                chunk.chunk_text, asked, self._normalizer
+            ):
+                continue
+            snippet = _price_snippet(chunk.chunk_text)
+            return PriceFound(
+                text=chunk.chunk_text,
+                source_chunk_id=str(chunk.id),
+                snippet=snippet,
+            )
         return PriceMissing(
             payload=PriceUnknownPayload(
-                service=None,
+                service=asked,
                 vehicle_type=None,
                 hours=None,
                 original_question=question,
