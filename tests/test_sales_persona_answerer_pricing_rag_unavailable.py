@@ -56,7 +56,7 @@ class _NeverCalledOpenRouter:
 
 class _BrokenPriceLookup:
     async def lookup(
-        self, *, project_id: int | None, intent: Intent, question: str
+        self, *, project_id: int | None, intent: Intent, question: str, **_kwargs
     ):
         raise RuntimeError("sqlite locked")
 

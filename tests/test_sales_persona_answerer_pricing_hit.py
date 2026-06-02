@@ -9,6 +9,7 @@ one-sentence reply that contains the verbatim price token, persists the
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -76,12 +77,15 @@ class _StubPriceLookup:
         project_id: int | None,
         intent: Intent,
         question: str,
+        service_names=(),
+        **_kwargs,
     ):
         self.calls.append(
             {
                 "project_id": project_id,
                 "intent": intent,
                 "question": question,
+                "service_names": list(service_names),
             }
         )
         return self.result
@@ -100,13 +104,30 @@ def _ctx() -> AnswerContext:
     )
 
 
-def _build(*, price_result):
+class _NamedServicesRepo:
+    """Returns named service rows (incl. a blank one to exercise the filter)."""
+
+    def count_active(self, *, project_id: int) -> int:
+        return 2
+
+    def list_for_project(self, *, project_id: int) -> list:
+        return [
+            SimpleNamespace(name="Багги"),
+            SimpleNamespace(name="Квадроцикл"),
+            SimpleNamespace(name="   "),  # blank → filtered out
+        ]
+
+    def get_by_name(self, *, project_id: int, name: str):
+        return None
+
+
+def _build(*, price_result, services_repo=None):
     state_repo = _FakeStateRepo()
     openrouter = _FakeOpenRouter()
     price_lookup = _StubPriceLookup(result=price_result)
     answerer = SalesPersonaAnswerer(
         state_repo=state_repo,
-        services_repo=_FakeServicesRepo(),
+        services_repo=services_repo or _FakeServicesRepo(),
         openrouter=openrouter,
         normalizer=get_russian_normalizer(),
         clock=lambda: _NOW,
@@ -222,3 +243,22 @@ async def test_pricing_hit_prompt_carries_persona_and_snippet() -> None:
     system = openrouter.calls[-1]["system"]
     assert "Николай" in system
     assert "15 000 ₽" in system
+
+
+@pytest.mark.asyncio
+async def test_pricing_passes_catalog_service_names_to_lookup() -> None:
+    # Story 12.44 (round-8 N2) — the persona hands the configured service catalog
+    # to the lookup so the quoted price matches the asked service (a багги ask
+    # must not return the квадроцикл rate). Blank names are filtered out.
+    found = PriceFound(
+        text="Багги — 90 000 ₽", source_chunk_id="1", snippet="Багги — 90 000 ₽"
+    )
+    answerer, state_repo, openrouter, price_lookup = _build(
+        price_result=found, services_repo=_NamedServicesRepo()
+    )
+    _seed(state_repo, stage=STAGE_PRICING, intent=Intent(dates="1 мая"))
+    openrouter.queue_response({"text": "Багги — 90 000 ₽."})
+
+    await answerer.try_answer(question="сколько стоит багги?", ctx=_ctx())
+
+    assert price_lookup.calls[-1]["service_names"] == ["Багги", "Квадроцикл"]

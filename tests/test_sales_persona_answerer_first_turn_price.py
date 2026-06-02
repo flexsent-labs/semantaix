@@ -86,7 +86,7 @@ class _StubPriceLookup:
         self.calls: list[dict[str, Any]] = []
 
     async def lookup(
-        self, *, project_id: int | None, intent: Intent, question: str
+        self, *, project_id: int | None, intent: Intent, question: str, **_kwargs
     ):
         self.calls.append(
             {"project_id": project_id, "intent": intent, "question": question}
