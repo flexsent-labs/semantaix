@@ -1,4 +1,4 @@
-"""SalesPersonaAnswerer — greeting, scoping, asides, proposing, closing.
+"""SalesPersonaAnswerer - greeting, scoping, asides, proposing, closing.
 
 Activation gate (always-on, cheap, first):
   1. Existing non-dormant state → resume in that stage.
@@ -48,6 +48,7 @@ from services.api.app.calendar.requested_time_check import (
 )
 from services.api.app.calendar.service_resolver import (
     extract_all_clocks,
+    extract_requested_date,
     extract_requested_start,
 )
 from services.api.app.rag import RagChunk
@@ -97,7 +98,7 @@ STAGE_AWAITING_OPERATOR_PRICE = "awaiting_operator_price"
 STAGE_PROPOSING = "proposing"
 STAGE_CLOSING = "closing"
 STAGE_DORMANT = "dormant"
-# Story 12.46 (round-9 R9-1) — a leading greeting marks "the customer moved on
+# Story 12.46 (round-9 R9-1) - a leading greeting marks "the customer moved on
 # from pricing", so we re-enter the funnel instead of staying stuck in pricing.
 _GREETING_RE = re.compile(
     r"^\s*(здравствуй|привет|добр(ый|ое|ого)\s*(день|вечер|утро)?"
@@ -127,6 +128,10 @@ HITL_REASON_CANCELLATION = "sales_cancellation_request"
 # booking is escalated flagged UNVERIFIED so the operator confirms the exact
 # time (and reconnects the calendar if needed) — never a silent accept.
 HITL_REASON_CALENDAR_UNVERIFIED = "sales_calendar_unverified"
+# Story 12.59 (round-14) - a capacity / "how many vehicles" question the bot
+# can't answer from the catalog (no per-vehicle capacity data). Escalated so a
+# human answers, with question-appropriate copy (never the thank-you handoff).
+HITL_REASON_CAPACITY = "sales_capacity_question"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -139,26 +144,26 @@ CLOSING_HANDOFF_LINE = "Передам коллегам для подтверж�
 # deterministic lines (closing / cancellation / empty-catalog), so an English
 # thread that reaches a closing or cancellation handoff stays English.
 CLOSING_HANDOFF_LINE_EN = (
-    "I'll pass this to my colleagues for confirmation — talk soon."
+    "I'll pass this to my colleagues for confirmation - talk soon."
 )
 # Story 12.27 — cancellation request. The customer-facing line does not presume
 # the cancellation is done (a human confirms it); the operator-facing context
 # tags the ticket so the human sees it's an отмена, not a new booking.
 CANCELLATION_HANDOFF_LINE = (
-    "Передам вашу просьбу об отмене коллеге — свяжутся с вами."
+    "Передам вашу просьбу об отмене коллеге - свяжутся с вами."
 )
 CANCELLATION_HANDOFF_LINE_EN = (
-    "I'll pass your cancellation request to a colleague — they'll get in touch."
+    "I'll pass your cancellation request to a colleague - they'll get in touch."
 )
 CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
 # Story 12.34 (D7) — an out-of-scope request (dining/lodging) is politely
 # declined and redirected to buggy bookings, never accepted as a booking.
 OUT_OF_SCOPE_DECLINE_LINE = (
-    "Этим, к сожалению, не помогу — я по прокату багги. "
+    "Этим, к сожалению, не помогу - я по прокату багги. "
     "Подскажу с поездкой: даты и сколько человек?"
 )
 OUT_OF_SCOPE_DECLINE_LINE_EN = (
-    "I'm afraid I can't help with that — I handle buggy rentals. "
+    "I'm afraid I can't help with that - I handle buggy rentals. "
     "I can help with a trip: what dates, and how many people?"
 )
 # Story 12.54 (round-12 D5) — appended to a booking reply when the SAME message
@@ -166,11 +171,79 @@ OUT_OF_SCOPE_DECLINE_LINE_EN = (
 # the off-topic part is declined in one line WITHOUT re-asking booking fields
 # (the full OUT_OF_SCOPE_DECLINE_LINE's "даты?" would duplicate the funnel).
 MIXED_OUT_OF_SCOPE_SUFFIX = (
-    "А с остальным, к сожалению, не помогу — я по прокату багги."
+    "А с остальным, к сожалению, не помогу - я по прокату багги."
 )
 MIXED_OUT_OF_SCOPE_SUFFIX_EN = (
-    "As for the rest, I'm afraid I can't help — I handle buggy rentals."
+    "As for the rest, I'm afraid I can't help - I handle buggy rentals."
 )
+# Story 12.59 (round-14) - a capacity question is answered as "I'm finding out",
+# NOT thanked-and-handed-off. Frames the HITL escalation as checking options.
+CAPACITY_ESCALATION_LINE = "Уточняю у коллег, какие варианты есть, и сразу сообщу."
+CAPACITY_ESCALATION_LINE_EN = (
+    "Let me check the options with my colleagues and get right back to you."
+)
+# Story 12.59 (round-14) - "сколько багги нужно / понадобится / вместит" is a
+# capacity question, NOT a price ask ("сколько стоит") or a headcount answer.
+_CAPACITY_QUESTION_RE = re.compile(
+    r"скольк\w*\b.*\b(нужн\w*|понадоб\w*|надо|потребу\w*|вмест\w*|вмещ\w*"
+    r"|помест\w*|хватит)",
+    re.IGNORECASE | re.UNICODE | re.DOTALL,
+)
+
+
+def is_capacity_question(question: str) -> bool:
+    """A "how many vehicles do we need / will fit" capacity question (round-14,
+    Story 12.59) - distinct from a price ask and a plain headcount answer."""
+    return bool(_CAPACITY_QUESTION_RE.search(question))
+
+
+# Story 12.58 (round-14) — an availability INQUIRY («свободно ли?», «занято?»)
+# vs a booking REQUEST. An inquiry that doesn't carry a booking-commit verb is
+# answered with a plain verdict and never escalates / opens a HITL ticket.
+_AVAILABILITY_INQUIRY_RE = re.compile(
+    r"свободн\w*|занят\w*|доступн\w*|есть\s+ли\b", re.IGNORECASE | re.UNICODE
+)
+# Story 12.60 (round-14 R14-1) — fuzzy time windows. An in-scope booking with a
+# vague time ("во второй половине дня") gets the day's window checked + a slot
+# proposed, never an out-of-scope decline. Ordered specific -> general so
+# "второй половине дня" wins over "днём". Hours are clamped by the calendar.
+_VAGUE_WINDOW_PATTERNS: tuple[tuple[re.Pattern[str], int, int], ...] = (
+    (
+        re.compile(r"перв\w*\s+половин\w*\s+дня|до\s+обеда", re.IGNORECASE | re.UNICODE),
+        8,
+        12,
+    ),
+    (
+        re.compile(
+            r"втор\w*\s+половин\w*\s+дня|после\s+обеда", re.IGNORECASE | re.UNICODE
+        ),
+        12,
+        18,
+    ),
+    (re.compile(r"\bутр", re.IGNORECASE | re.UNICODE), 8, 12),
+    (re.compile(r"\bобед", re.IGNORECASE | re.UNICODE), 12, 15),
+    (re.compile(r"\bвечер", re.IGNORECASE | re.UNICODE), 16, 20),
+    (re.compile(r"\bдн[еёя]м\b", re.IGNORECASE | re.UNICODE), 12, 18),
+)
+
+
+def detect_vague_window(question: str) -> tuple[int, int] | None:
+    """Map a fuzzy time phrase to an ``(start_hour, end_hour)`` window, or None."""
+    for pattern, start_hour, end_hour in _VAGUE_WINDOW_PATTERNS:
+        if pattern.search(question):
+            return (start_hour, end_hour)
+    return None
+_BOOKING_COMMIT_RE = re.compile(
+    r"запиш\w*|записа\w*|забронир\w*|бронир\w*|оформ\w*|брон[ьи]\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_availability_inquiry(question: str) -> bool:
+    """True for a "is this slot free?" question with no booking-commit verb."""
+    return bool(_AVAILABILITY_INQUIRY_RE.search(question)) and not _BOOKING_COMMIT_RE.search(
+        question
+    )
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 EMPTY_CATALOG_ESCALATION_LINE_EN = (
@@ -179,7 +252,7 @@ EMPTY_CATALOG_ESCALATION_LINE_EN = (
 # Story 12.05 — appended to the textual reply when a media dispatch failed
 # mid-turn so the customer never sees a silent bot.
 MATERIAL_DISPATCH_FALLBACK_LINE = (
-    "Видео/фото пришлю чуть позже — уточню у коллег."
+    "Видео/фото пришлю чуть позже - уточню у коллег."
 )
 EQUIPMENT_ACK_LINE = "Снаряжение подготовим, расскажу подробнее на месте."
 # Story 12.10 — scoping completion (all 5 fields collected). The bot no longer
@@ -187,18 +260,34 @@ EQUIPMENT_ACK_LINE = "Снаряжение подготовим, расскаж�
 # concrete requested time is known and free we say so; when it's busy we offer
 # the nearest free slot via the date proposer.
 SCOPING_COMPLETE_HANDOFF_LINE = (
-    "Спасибо! Передам детали коллегам на подтверждение — вернутся с ответом."
+    "Спасибо! Передам детали коллегам на подтверждение - вернутся с ответом."
 )
 SCOPING_COMPLETE_HANDOFF_LINE_EN = (
-    "Thank you! I'll pass the details to my colleagues for confirmation — "
+    "Thank you! I'll pass the details to my colleagues for confirmation - "
     "they'll get back to you."
 )
 SLOT_FREE_HANDOFF_LINE = (
-    "Спасибо! Это время свободно — передам коллегам для подтверждения."
+    "Спасибо! Это время свободно - передам коллегам для подтверждения."
 )
 SLOT_FREE_HANDOFF_LINE_EN = (
-    "Thank you! That time is free — I'll pass it to my colleagues for "
+    "Thank you! That time is free - I'll pass it to my colleagues for "
     "confirmation."
+)
+# Story 12.58 (round-14) — a customer ASKING whether a slot is free («свободно
+# ли в 16:30?») gets a plain text verdict, NOT a booking handoff/HITL ticket.
+SLOT_FREE_INQUIRY_LINE = "Да, это время свободно."
+SLOT_FREE_INQUIRY_LINE_EN = "Yes, that time is free."
+# Story 12.60 (round-14 R14-1) — a vague time window («во второй половине дня»)
+# is answered by proposing a concrete free slot in that window and asking the
+# customer to confirm or name a time, NEVER an out-of-scope decline. ``{time}``
+# is a free slot the calendar returned.
+VAGUE_WINDOW_OFFER_LINE = (
+    "Да, есть свободное время, например в {time}. "
+    "Подойдёт или назовите удобное время?"
+)
+VAGUE_WINDOW_OFFER_LINE_EN = (
+    "Yes, there's free time then - for example {time}. "
+    "Does that work, or let me know a time that suits you?"
 )
 # Story 12.32 (D1) — the customer named a concrete time but the calendar could
 # NOT be checked. Say plainly we'll verify it; never claim it's free
@@ -237,7 +326,7 @@ _UNAVAILABLE_LEAD_LINES_EN: dict[str, str] = {
     REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE_EN,
     REASON_IN_PAST: SLOT_IN_PAST_LINE_EN,
 }
-# Story 12.11 — when the customer declines the field just asked ("не нужно",
+# Story 12.11 - when the customer declines the field just asked ("не нужно",
 # "0", "без водителей"), record this sentinel so the funnel advances instead of
 # re-asking forever. Non-None → satisfies completeness; reads cleanly in the
 # operator's booking summary ("drivers: не требуется").
@@ -250,7 +339,7 @@ SCOPING_DECLINED_SENTINEL = "не требуется"
 # the time) because ``intent_merge`` REPLACES the ``dates`` field — a bare
 # follow-up time would otherwise drop a previously-collected date.
 ASK_FOR_TIME_LINE = (
-    "Уточните, пожалуйста, желаемые дату и время — проверю по календарю "
+    "Уточните, пожалуйста, желаемые дату и время - проверю по календарю "
     "и подтвержу."
 )
 # Story 12.47 (round-10 N3) — English variants of the deterministic
@@ -265,10 +354,10 @@ ASK_FOR_TIME_LINE_EN = (
 # confirmed (the colleague has not confirmed yet); the operator (already
 # escalated) books it. ``{day_month}`` = "31 мая", ``{time}`` = "08:00".
 PITCHING_ACCEPT_CONFIRM_LINE = (
-    "Отлично, передаю детали коллеге на подтверждение — {day_month} на {time}."
+    "Отлично, передаю детали коллеге на подтверждение - {day_month} на {time}."
 )
 PITCHING_ACCEPT_CONFIRM_LINE_EN = (
-    "Great — I'm passing the details to a colleague for confirmation: "
+    "Great - I'm passing the details to a colleague for confirmation: "
     "{day_month} at {time}."
 )
 
@@ -327,7 +416,7 @@ _MONTHS_GENITIVE: dict[int, str] = {
     11: "ноября",
     12: "декабря",
 }
-# Story 12.47 (round-10 N3) — English month names so an English thread's
+# Story 12.47 (round-10 N3) - English month names so an English thread's
 # busy-alternative tail / accept confirmation names the slot in English too.
 _MONTHS_EN: dict[int, str] = {
     1: "January",
@@ -612,10 +701,10 @@ def _build_greeting_prompt(*, today: str) -> str:
 # a handoff), so the persona doesn't re-open with "Здравствуйте". Appended at
 # the call site like reply_language_directive; the LLM still answers on-topic.
 _RETURNING_NO_GREETING_DIRECTIVE = (
-    "\n\nВАЖНО: клиент уже в этом диалоге с вами — НЕ здоровайтесь повторно "
+    "\n\nВАЖНО: клиент уже в этом диалоге с вами - НЕ здоровайтесь повторно "
     "(без «Здравствуйте», «Привет», «Добрый день»), отвечайте сразу по существу."
 )
-# Story 12.56 (round-13) — the directive above is "soft": the LLM sometimes
+# Story 12.56 (round-13) - the directive above is "soft": the LLM sometimes
 # greets anyway. On a returning turn we DETERMINISTICALLY strip a leading
 # salutation from the reply so a re-greeting can't slip through.
 _LEADING_GREETING_RE = re.compile(
@@ -624,6 +713,23 @@ _LEADING_GREETING_RE = re.compile(
     r"|доброй\s+ночи)[\s,.!…—–-]*",
     re.IGNORECASE | re.UNICODE,
 )
+
+
+def _format_alternative_tail(alternative: datetime, language: str) -> str:
+    """The localized " Ближайшее свободное время - <day month>, <HH:MM>." tail.
+    Shared by the busy handoff and the availability-inquiry verdict (Story
+    12.58). Uses a plain hyphen per Story 12.57 (round-14)."""
+    if language == "en":
+        return (
+            f" The nearest available time is "
+            f"{_MONTHS_EN[alternative.month]} {alternative.day}, "
+            f"{alternative.strftime('%H:%M')}."
+        )
+    return (
+        f" Ближайшее свободное время - {alternative.day} "
+        f"{_MONTHS_GENITIVE[alternative.month]}, "
+        f"{alternative.strftime('%H:%M')}."
+    )
 
 
 def _strip_leading_greeting(text: str) -> str:
@@ -638,7 +744,7 @@ def _strip_leading_greeting(text: str) -> str:
 
 
 def _parse_count(text: str) -> int | None:
-    """Story 12.14 — the count in a terse reply ("1" → 1, "троих" → None).
+    """Story 12.14 - the count in a terse reply ("1" → 1, "троих" → None).
 
     Only digits are bound here; "0" is caught upstream by the decline path, and
     word-numerals stay the LLM's job (Layer A). Returns ``None`` when the reply
@@ -651,7 +757,7 @@ def _parse_count(text: str) -> int | None:
 def _format_pending_instruction(
     intent: Intent, required: tuple[str, ...] | None = None
 ) -> str:
-    """Story 12.14 — name the field the customer is answering this turn.
+    """Story 12.14 - name the field the customer is answering this turn.
 
     The stateless extractor otherwise sees only the bare reply ("1") and, told
     not to invent values, drops it — so the funnel re-asks the same field
@@ -664,7 +770,7 @@ def _format_pending_instruction(
         return ""
     pending = missing[0]
     return (
-        f"Клиент сейчас отвечает на вопрос о поле «{pending}». Если его реплика — "
+        f"Клиент сейчас отвечает на вопрос о поле «{pending}». Если его реплика - "
         f"это значение для этого поля (например, просто число «1» или «2»), "
         f'обязательно запиши его в extracted_fields["{pending}"].'
     )
@@ -770,7 +876,7 @@ class SalesPersonaAnswerer:
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        # Story 12.47 (round-10 N3) — pin the turn's language ONCE from the
+        # Story 12.47 (round-10 N3) - pin the turn's language ONCE from the
         # customer's current message, so every downstream line (LLM-generated
         # AND the deterministic constants below) mirrors it. Detection is the
         # same cheap heuristic the LLM directive uses; an English thread now
@@ -839,6 +945,13 @@ class SalesPersonaAnswerer:
             question, normalizer=self._normalizer
         ) and not is_sales_intent(question, normalizer=self._normalizer):
             return self._handle_out_of_scope(ctx=ctx)
+
+        # Story 12.59 (round-14) - a capacity question ("сколько багги нужно?")
+        # is not a booking; the bot has no per-vehicle capacity data, so answer
+        # it by escalating to a human with checking-options copy — never thank
+        # and hand off the mis-read booking. Fires in any state.
+        if is_capacity_question(question):
+            return self._handle_capacity_question(question=question, ctx=ctx)
 
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
@@ -976,13 +1089,13 @@ class SalesPersonaAnswerer:
     async def _handle_greeting(
         self, *, question: str, ctx: AnswerContext, returning: bool = False
     ) -> AnswerResult:
-        # Story 12.45 (round-8 N3) — mirror the customer's language. Empty suffix
+        # Story 12.45 (round-8 N3) - mirror the customer's language. Empty suffix
         # for Russian (the default), so RU prompts are unchanged.
         system = _build_greeting_prompt(
             today=_format_today_ru(self._clock())
         ) + reply_language_directive(question)
         # Story 12.55/12.56 — on a mid-thread re-entry (returning after a handoff
-        # / an intent switch) the bot shouldn't open with "Здравствуйте" — UNLESS
+        # / an intent switch) the bot shouldn't open with "Здравствуйте" - UNLESS
         # the customer greeted first, in which case greeting back is natural.
         suppress_greeting = (
             returning and _LEADING_GREETING_RE.match(question) is None
@@ -1025,6 +1138,21 @@ class SalesPersonaAnswerer:
         merged = self._dates_with_raw_fallback(
             intent=merged, question=question, ctx=ctx
         )
+        # Story 12.58 (round-14) — a pure availability INQUIRY («…в 16:30
+        # свободно?») gets a plain verdict, never a booking handoff/HITL. Checked
+        # before the busy-intercept so an inquiry isn't turned into a booking.
+        inquiry = await self._maybe_answer_availability_inquiry(
+            question=question, ctx=ctx, merged_intent=merged
+        )
+        if inquiry is not None:
+            return inquiry
+        # Story 12.60 (round-14 R14-1) — a vague time («во второй половине дня»)
+        # gets the window checked + a concrete slot proposed, never a decline.
+        vague = await self._maybe_answer_vague_window(
+            question=question, ctx=ctx, merged_intent=merged, stage_before=STAGE_NEW
+        )
+        if vague is not None:
+            return vague
         # Story 12.25 — if the opener carries a concrete date+time and the
         # slot is already busy, surface it now: customers should not be
         # asked logistics questions about a slot that was never going to
@@ -1038,7 +1166,7 @@ class SalesPersonaAnswerer:
         )
         if intercept is not None:
             return intercept
-        # Story 12.28 — a first-contact opener that asks a price ("8 человек,
+        # Story 12.28 - a first-contact opener that asks a price ("8 человек,
         # сколько стоит?") must be answered, not dropped. ``classify_turn``
         # already tags it a price ask; route to pricing BEFORE the funnel
         # advances to asking for a date. The fields the greeting LLM just
@@ -1090,7 +1218,7 @@ class SalesPersonaAnswerer:
         )
 
     def _handle_out_of_scope(self, *, ctx: AnswerContext) -> AnswerResult:
-        """Story 12.34 (D7) — politely decline an out-of-scope ask and redirect.
+        """Story 12.34 (D7) - politely decline an out-of-scope ask and redirect.
 
         A plain handled reply: no HITL escalation, and no ``_persist`` — the
         booking funnel (if any) is left exactly as it was so the customer
@@ -1115,6 +1243,38 @@ class SalesPersonaAnswerer:
                 "answerer": NAME,
                 "sales_turn_kind": "out_of_scope_decline",
                 "suppress_followup": True,
+            },
+        )
+
+    def _handle_capacity_question(
+        self, *, question: str, ctx: AnswerContext
+    ) -> AnswerResult:
+        """Story 12.59 (round-14) - escalate a capacity question to a human with
+        checking-options copy (never the booking thank-you). No ``_persist`` —
+        the funnel (if any) is left intact for the customer's next on-topic turn.
+        """
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "sales_turn_kind": "capacity_question",
+                "hitl_reason": HITL_REASON_CAPACITY,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                CAPACITY_ESCALATION_LINE,
+                CAPACITY_ESCALATION_LINE_EN,
+                language=ctx.language,
+            ),
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "capacity_question",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_CAPACITY,
+                "escalation_context": f"Вопрос о вместимости: {question}",
             },
         )
 
@@ -1195,7 +1355,7 @@ class SalesPersonaAnswerer:
             intent=existing_intent,
             schema=schema,
             today=_format_today_ru(self._clock()),
-        ) + reply_language_directive(question)  # N3 — mirror the customer's language
+        ) + reply_language_directive(question)  # N3 - mirror the customer's language
         user = f"Сообщение клиента:\n{question}"
         try:
             payload = await self._openrouter.complete_json(
@@ -1255,7 +1415,7 @@ class SalesPersonaAnswerer:
         if isinstance(outcome, AnswerResult):
             return outcome
         merged, next_question, extracted = outcome
-        # Story 12.11 — the customer declined the field just asked ("не нужно",
+        # Story 12.11 - the customer declined the field just asked ("не нужно",
         # "0", "без водителей"). The declined field is the topmost-missing one
         # (a decline fills nothing), so record a sentinel for it and advance
         # instead of re-asking forever. If that completes scoping we fall
@@ -1270,7 +1430,7 @@ class SalesPersonaAnswerer:
                 next_question = schema.question_for(
                     merged.missing_fields(required)[0]
                 )
-        # Story 12.14 — the LLM still didn't bind the customer's reply to the
+        # Story 12.14 - the LLM still didn't bind the customer's reply to the
         # field we just asked. For a numeric field, capture a plain count
         # deterministically ("1" → vehicle_count=1) so the funnel advances
         # instead of re-asking the same question forever. Declines are already
@@ -1290,6 +1450,23 @@ class SalesPersonaAnswerer:
                     )
         # Not complete → keep scoping: forward the next-field question.
         if not merged.is_complete(required):
+            # Story 12.58 (round-14) — a mid-scoping availability INQUIRY gets a
+            # plain verdict (no handoff/HITL), checked before the busy-intercept.
+            inquiry = await self._maybe_answer_availability_inquiry(
+                question=question, ctx=ctx, merged_intent=merged
+            )
+            if inquiry is not None:
+                return inquiry
+            # Story 12.60 (round-14 R14-1) — a vague time mid-scoping gets the
+            # window checked + a concrete slot proposed, never a decline.
+            vague = await self._maybe_answer_vague_window(
+                question=question,
+                ctx=ctx,
+                merged_intent=merged,
+                stage_before=STAGE_SCOPING,
+            )
+            if vague is not None:
+                return vague
             # Story 12.25 — when this turn introduced a concrete date+time
             # (greeting opener with no time + first scoping reply, or a
             # customer changing their requested time mid-funnel), verify
@@ -1588,7 +1765,7 @@ class SalesPersonaAnswerer:
         base_metadata: dict[str, Any] | None = None,
         dispatch_fallback: bool = False,
     ) -> AnswerResult:
-        """Scoping is complete — check the requested time, then confirm/hand off.
+        """Scoping is complete - check the requested time, then confirm/hand off.
 
         Decision table:
           * requested time is BUSY → offer the nearest free slot (→ proposing),
@@ -1805,7 +1982,7 @@ class SalesPersonaAnswerer:
         dispatch_fallback: bool,
         reason: str | None = None,
     ) -> AnswerResult:
-        """Requested time is unavailable — offer an alternative or hand off.
+        """Requested time is unavailable - offer an alternative or hand off.
 
         Story 12.22 — when we can name a nearest free slot we offer it and
         park in ``pitching`` so ``_handle_pitching`` can interpret the
@@ -1818,18 +1995,7 @@ class SalesPersonaAnswerer:
         """
         offered = alternative is not None
         if offered:
-            if ctx.language == "en":
-                slot = (
-                    f" The nearest available time is "
-                    f"{_MONTHS_EN[alternative.month]} {alternative.day}, "
-                    f"{alternative.strftime('%H:%M')}."
-                )
-            else:
-                slot = (
-                    f" Ближайшее свободное время — {alternative.day} "
-                    f"{_MONTHS_GENITIVE[alternative.month]}, "
-                    f"{alternative.strftime('%H:%M')}."
-                )
+            slot = _format_alternative_tail(alternative, ctx.language)
             turn_kind = "scoping_complete_busy_alternative"
         else:
             slot = " " + localize(
@@ -1840,7 +2006,7 @@ class SalesPersonaAnswerer:
             turn_kind = "scoping_complete_busy_no_slot"
         # Story 12.29 — lead line reflects *why* the slot is unavailable; the
         # alternative-offer / handoff tail and stage transition are unchanged.
-        # Story 12.47 — both the lead line and tail mirror the turn's language.
+        # Story 12.47 - both the lead line and tail mirror the turn's language.
         lead_line = localize(
             _UNAVAILABLE_LEAD_LINES.get(reason, SLOT_BUSY_LINE),
             _UNAVAILABLE_LEAD_LINES_EN.get(reason, SLOT_BUSY_LINE_EN),
@@ -1894,6 +2060,225 @@ class SalesPersonaAnswerer:
             metadata=metadata,
         )
 
+    async def _maybe_answer_vague_window(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        merged_intent: Intent,
+        stage_before: str,
+    ) -> AnswerResult | None:
+        """Story 12.60 (round-14 R14-1) — an in-scope booking with a VAGUE time
+        («…во второй половине дня…», no concrete clock) gets the day's window
+        checked and a concrete free slot proposed, NEVER an out-of-scope decline.
+        Parks in pitching with the proposed slot so the customer's «да» / a
+        counter-time reply is handled by the existing accept/counter machinery
+        (date carried from the offered slot). ``None`` when there's no vague
+        window, no parseable date, a concrete time IS present, or the calendar
+        can't propose a slot — those fall through to the normal flow.
+        """
+        window = detect_vague_window(question)
+        if window is None:
+            return None
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        tz = cal.project_tz
+        dates_text = (
+            merged_intent.dates if isinstance(merged_intent.dates, str) else None
+        )
+        # Vague case only: no concrete clock in the stored dates or the message.
+        concrete = (
+            extract_requested_start(text=dates_text, now=ctx.now, project_tz=tz)
+            if dates_text
+            else None
+        )
+        if concrete is None:
+            concrete = extract_requested_start(
+                text=question, now=ctx.now, project_tz=tz
+            )
+        if concrete is not None:
+            return None
+        target_date = (
+            extract_requested_date(text=dates_text, now=ctx.now, project_tz=tz)
+            if dates_text
+            else None
+        ) or extract_requested_date(text=question, now=ctx.now, project_tz=tz)
+        if target_date is None:
+            return None
+        start_hour, end_hour = window
+        operator = cal.settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        # Scan the window hour-by-hour for the FIRST free slot inside it, so an
+        # "afternoon" ask is offered an afternoon time (not the day's opening
+        # hour). If the whole window is busy, fall back to the calendar's nearest
+        # free slot (outside the window) so we still propose something, never
+        # decline. (≤6 checks; only on a rare vague-time turn.)
+        proposed: datetime | None = None
+        fallback: datetime | None = None
+        for hour in range(start_hour, end_hour):
+            candidate = datetime(
+                target_date.year, target_date.month, target_date.day, hour, 0,
+                tzinfo=tz,
+            )
+            availability = await check_requested_availability(
+                project_id=cal.project_id,
+                requested_start=candidate,
+                operator=operator,
+                operator_chat_id=operator_chat_id,
+                service_rule=cal.service_rule,
+                token_provider=self._calendar_token_provider,
+                freebusy_client=self._calendar_freebusy_client,
+                now=ctx.now,
+                project_tz=tz,
+                lookahead_days=cal.settings.lookahead_days,
+                country_code=ctx.country_code,
+                trace_id=ctx.trace_id,
+            )
+            if availability.status == STATUS_AVAILABLE:
+                proposed = candidate
+                break
+            if (
+                availability.status == STATUS_UNAVAILABLE
+                and availability.alternative is not None
+            ):
+                fallback = availability.alternative
+        proposed = proposed or fallback
+        if proposed is None:
+            return None  # nothing free to propose — fall through
+        text = localize(
+            VAGUE_WINDOW_OFFER_LINE,
+            VAGUE_WINDOW_OFFER_LINE_EN,
+            language=ctx.language,
+        ).format(time=proposed.strftime("%H:%M"))
+        # Park in pitching with the proposed slot: the next turn («да» / a
+        # concrete counter-time) is handled by _handle_pitching with the date
+        # carried from this offer (Story 12.51).
+        await self._persist(
+            ctx=ctx,
+            current_stage=STAGE_PITCHING,
+            intent=merged_intent,
+            last_proposal={"alternative_iso": proposed.isoformat()},
+        )
+        logger.info(
+            "sales_vague_window_offered",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "proposed_iso": proposed.isoformat(),
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_PITCHING,
+                "sales_turn_kind": "vague_window_offer",
+            },
+        )
+
+    async def _maybe_answer_availability_inquiry(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        merged_intent: Intent,
+    ) -> AnswerResult | None:
+        """Story 12.58 (round-14) - a customer ASKING whether a concrete slot is
+        free («…в 16:30 свободно?») gets a plain verdict (free / busy + nearest
+        free / off-hours / past), with NO booking handoff and NO HITL ticket.
+        ``None`` when the turn isn't an inquiry, carries no concrete time, or the
+        calendar can't verify it - those fall through to the normal flow.
+        """
+        if not is_availability_inquiry(question):
+            return None
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        dates_text = (
+            merged_intent.dates if isinstance(merged_intent.dates, str) else None
+        )
+        start = (
+            extract_requested_start(
+                text=dates_text, now=ctx.now, project_tz=cal.project_tz
+            )
+            if dates_text
+            else None
+        )
+        if start is None:
+            start = extract_requested_start(
+                text=question, now=ctx.now, project_tz=cal.project_tz
+            )
+        if start is None:
+            return None  # no concrete time → not a concrete-slot inquiry
+        operator = cal.settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        availability = await check_requested_availability(
+            project_id=cal.project_id,
+            requested_start=start,
+            operator=operator,
+            operator_chat_id=operator_chat_id,
+            service_rule=cal.service_rule,
+            token_provider=self._calendar_token_provider,
+            freebusy_client=self._calendar_freebusy_client,
+            now=ctx.now,
+            project_tz=cal.project_tz,
+            lookahead_days=cal.settings.lookahead_days,
+            country_code=ctx.country_code,
+            trace_id=ctx.trace_id,
+        )
+        if availability.status == STATUS_AVAILABLE:
+            text = localize(
+                SLOT_FREE_INQUIRY_LINE,
+                SLOT_FREE_INQUIRY_LINE_EN,
+                language=ctx.language,
+            )
+        elif availability.status == STATUS_UNAVAILABLE:
+            lead = localize(
+                _UNAVAILABLE_LEAD_LINES.get(availability.reason, SLOT_BUSY_LINE),
+                _UNAVAILABLE_LEAD_LINES_EN.get(
+                    availability.reason, SLOT_BUSY_LINE_EN
+                ),
+                language=ctx.language,
+            )
+            tail = (
+                _format_alternative_tail(availability.alternative, ctx.language)
+                if availability.alternative is not None
+                else ""
+            )
+            text = f"{lead}{tail}"
+        else:  # not connected / error - can't verify; let the normal flow decide
+            return None
+        logger.info(
+            "sales_availability_inquiry_answered",
+            extra={
+                "trace_id": ctx.trace_id,
+                "requested_start_iso": start.isoformat(),
+                "status": availability.status,
+            },
+        )
+        # A pure question: verdict only — no escalation, no HITL, no funnel
+        # mutation, and no "still thinking about booking?" nudge.
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "availability_inquiry",
+                "suppress_followup": True,
+            },
+        )
+
     async def _maybe_intercept_busy_slot(
         self,
         *,
@@ -1904,11 +2289,11 @@ class SalesPersonaAnswerer:
     ) -> AnswerResult | None:
         """Verify a newly-concrete requested time and offer alternatives early.
 
-        Story 12.25 — closes the gap between Story 12.22's busy-check (fires
+        Story 12.25 - closes the gap between Story 12.22's busy-check (fires
         at scoping completion in ``_complete_booking``) and the customer's
         first turn carrying a concrete date+time. Fires only when the
         parsed ``requested_start`` from ``merged_intent.dates`` is concrete
-        AND different from the prior turn's parse — so we don't re-check
+        AND different from the prior turn's parse - so we don't re-check
         the same time on every scoping turn. ``None`` whenever the calendar
         cannot give a confident verdict (disabled / multi-service / no
         single active rule / not connected / error) — the eventual
@@ -2001,7 +2386,7 @@ class SalesPersonaAnswerer:
         was only consulted mid-funnel (scoping / pitching) via
         ``_maybe_handle_aside``. On first contact ``state is None`` so the
         greeting handler ran instead, extracted the fields, was forbidden to
-        quote a price, and asked for a date — silently dropping the customer's
+        quote a price, and asked for a date - silently dropping the customer's
         question. Routes to the existing ``_handle_pricing`` with a synthetic
         state carrying the just-extracted ``merged`` intent, so headcount/etc.
         inform the quote and are persisted (never re-asked). ``None`` when
@@ -2042,7 +2427,7 @@ class SalesPersonaAnswerer:
         )
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
-        # Story 12.19 — the free / can't-verify handoff offers no slot to accept.
+        # Story 12.19 - the free / can't-verify handoff offers no slot to accept.
         await self._persist(
             ctx=ctx,
             current_stage=STAGE_PITCHING,
@@ -2087,7 +2472,7 @@ class SalesPersonaAnswerer:
         base_metadata: dict[str, Any],
         dispatch_fallback: bool,
     ) -> AnswerResult:
-        """Story 12.32 (D1) — concrete time given, but the calendar could not be
+        """Story 12.32 (D1) - concrete time given, but the calendar could not be
         consulted (``not_connected`` / ``error:<reason>``). Hand off WITHOUT
         implying the slot is free: a distinct "I'll check it" line + a HITL
         ticket flagged ``calendar_verified=False`` (with the reason) and an
@@ -2657,7 +3042,7 @@ class SalesPersonaAnswerer:
         persona = self._persona_getter()
         system = _PRICING_HIT_PROMPT_TEMPLATE.format(
             persona=persona, snippet=outcome.snippet
-        ) + reply_language_directive(question)  # N3 — mirror the customer's language
+        ) + reply_language_directive(question)  # N3 - mirror the customer's language
         user = f"Сообщение клиента:\n{outcome.snippet}"
         try:
             payload = await self._openrouter.complete_json(
@@ -2733,7 +3118,7 @@ class SalesPersonaAnswerer:
         source_chunk_id: str,
         drift_text: str | None,
     ) -> AnswerResult:
-        """LLM quote disagreed with the snippet — never deliver a wrong price.
+        """LLM quote disagreed with the snippet - never deliver a wrong price.
 
         The bot says the fixed ``уточню у коллег…`` line and signals an
         operator handoff with ``price_unknown`` so the operator answers
@@ -2919,7 +3304,7 @@ class SalesPersonaAnswerer:
         self, question: str, now: datetime
     ) -> bool:
         """True when the raw question parses to a concrete date+time (round-10
-        N1) — covers numeric forms ``parse_russian_date_span`` misses."""
+        N1) - covers numeric forms ``parse_russian_date_span`` misses."""
         tz = now.tzinfo
         return (
             tz is not None
@@ -3105,7 +3490,7 @@ class SalesPersonaAnswerer:
             )
 
         if reason == NO_PROPOSAL_NO_DATE_HINT:
-            # The customer is in proposing but hasn't pinned a date yet —
+            # The customer is in proposing but hasn't pinned a date yet -
             # ask for one (no escalation, no calendar leak).
             await self._persist(
                 ctx=ctx, current_stage=STAGE_PROPOSING, intent=intent
@@ -3182,7 +3567,7 @@ class SalesPersonaAnswerer:
     async def _transition_to_closing(
         self, *, ctx: AnswerContext, intent: Intent
     ) -> AnswerResult:
-        """Customer accepted the proposal — speak the handoff line + escalate.
+        """Customer accepted the proposal - speak the handoff line + escalate.
 
         The transition + the customer-facing line + the HITL handoff all
         happen on the same turn; the state row is moved to ``closing`` so
@@ -3226,7 +3611,7 @@ class SalesPersonaAnswerer:
         ctx: AnswerContext,
         state: dict[str, Any],
     ) -> AnswerResult:
-        """Closing-stage follow-ups stay in closing — the handoff is sticky."""
+        """Closing-stage follow-ups stay in closing - the handoff is sticky."""
         existing_intent = Intent.from_dict(state.get("collected_intent") or {})
         await self._persist(
             ctx=ctx, current_stage=STAGE_CLOSING, intent=existing_intent

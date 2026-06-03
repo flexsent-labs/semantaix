@@ -31,7 +31,9 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     _RETURNING_NO_GREETING_DIRECTIVE,
+    CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
+    HITL_REASON_CAPACITY,
     HITL_REASON_SCOPING_COMPLETE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
     RESPONSE_MODE_SALES_ESCALATION,
@@ -39,6 +41,7 @@ from services.api.app.sales.sales_persona_answerer import (
     SCOPING_COMPLETE_HANDOFF_LINE_EN,
     SLOT_BUSY_LINE,
     SLOT_FREE_HANDOFF_LINE,
+    SLOT_FREE_INQUIRY_LINE,
     STAGE_CLOSING,
     STAGE_NEW,
     STAGE_PITCHING,
@@ -46,6 +49,9 @@ from services.api.app.sales.sales_persona_answerer import (
     STAGE_SCOPING,
     SalesPersonaAnswerer,
     _strip_leading_greeting,
+    detect_vague_window,
+    is_availability_inquiry,
+    is_capacity_question,
 )
 
 _NOW = datetime(2026, 5, 29, 9, 0, tzinfo=UTC)  # 12:00 Moscow, Fri 29 May
@@ -1059,3 +1065,320 @@ async def test_nearest_free_alternative_is_now_aware() -> None:
     assert SLOT_BUSY_LINE in text
     assert "10:00" in text  # next free slot >= now
     assert "09:00" not in text  # never the pre-now opening hour
+
+
+# --- Round-14: capacity (D/12.59), availability inquiry (B/12.58), dashes (12.57)
+
+
+def test_is_capacity_question_matches_only_capacity() -> None:
+    assert is_capacity_question("Нас восемь человек, сколько багги нам понадобится?")
+    assert is_capacity_question("Сколько багги нужно на 12 человек?")
+    assert not is_capacity_question("Сколько стоит покататься на багги?")
+    assert not is_capacity_question("Запишите на багги завтра в 14:00, нас двое")
+
+
+@pytest.mark.asyncio
+async def test_capacity_question_escalates_with_checking_copy_not_thanks() -> None:
+    answerer, _s, openrouter, freebusy = _build(
+        state=None, cal_settings=_FakeCalSettings(), token_provider=_TokenProvider()
+    )
+    result = await answerer.try_answer(
+        question="Нас восемь человек, сколько багги нам понадобится?", ctx=_ctx()
+    )
+    assert result.text == CAPACITY_ESCALATION_LINE  # "Уточняю у коллег…", not "Спасибо"
+    assert "Спасибо" not in (result.text or "")
+    assert result.metadata.get("escalate") is True
+    assert result.metadata.get("hitl_reason") == HITL_REASON_CAPACITY
+    assert freebusy.calls == 0
+    assert openrouter.calls == []  # answered deterministically, no LLM
+
+
+def test_is_availability_inquiry_distinguishes_question_from_request() -> None:
+    assert is_availability_inquiry("А сегодня в 16:30 свободно для багги?")
+    assert is_availability_inquiry("В 14:00 занято?")
+    assert not is_availability_inquiry("Запишите на багги в 16:30")
+    assert not is_availability_inquiry("Хочу забронировать багги завтра")
+
+
+@pytest.mark.asyncio
+async def test_availability_inquiry_free_gives_verdict_no_hitl() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # free
+    )
+    result = await answerer.try_answer(
+        question="А завтра в 14:00 свободно для багги?", ctx=_ctx()
+    )
+    assert result.text == SLOT_FREE_INQUIRY_LINE  # plain "Да, это время свободно."
+    assert result.metadata.get("escalate") is not True  # NO HITL ticket
+    assert "hitl_reason" not in result.metadata
+    assert "передам" not in (result.text or "").lower()  # not a handoff
+    assert freebusy.calls == 1  # the calendar WAS consulted
+
+
+@pytest.mark.asyncio
+async def test_availability_inquiry_busy_gives_verdict_with_alt_no_hitl() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_tomorrow_14()),
+    )
+    result = await answerer.try_answer(
+        question="А завтра в 14:00 свободно для багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text
+    assert "Ближайшее свободное время" in text
+    assert result.metadata.get("escalate") is not True  # still no HITL for a question
+
+
+def test_customer_constants_use_plain_hyphen_not_emdash() -> None:
+    # Story 12.57 — customer-facing copy uses "-", never "—"/"–".
+    for line in (
+        SLOT_FREE_HANDOFF_LINE,
+        SCOPING_COMPLETE_HANDOFF_LINE,
+        MIXED_OUT_OF_SCOPE_SUFFIX,
+        CAPACITY_ESCALATION_LINE,
+    ):
+        assert "—" not in line and "–" not in line
+
+
+# --- R14-1 (round-14, Story 12.60): vague time window → propose a slot --------
+
+
+def test_detect_vague_window_maps_phrases() -> None:
+    assert detect_vague_window("во второй половине дня") == (12, 18)
+    assert detect_vague_window("утром") == (8, 12)
+    assert detect_vague_window("вечером") == (16, 20)
+    assert detect_vague_window("завтра в 14:00") is None  # concrete, not vague
+    assert detect_vague_window("нас двое") is None
+
+
+@pytest.mark.asyncio
+async def test_vague_window_proposes_slot_not_decline() -> None:
+    openrouter = _FakeOpenRouter()
+    # The LLM might unhelpfully decline; the deterministic vague-window intercept
+    # overrides it with a concrete proposal.
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "завтра", "headcount": 2},
+            "next_question": "Не смогу тут помочь.",
+        }
+    )
+    answerer, state_repo, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # tomorrow afternoon free
+    )
+    result = await answerer.try_answer(
+        question="Хотим завтра покататься на багги во второй половине дня, нас двое.",
+        ctx=_ctx(),
+    )
+    text = result.text or ""
+    assert "Не смогу" not in text  # never the flat decline
+    assert text.startswith("Да, есть свободное время")  # the offer copy
+    assert "12:00" in text  # a concrete slot from the afternoon window
+    assert result.metadata.get("escalate") is not True  # no HITL on the offer turn
+    assert result.metadata["stage_after"] == STAGE_PITCHING
+    assert freebusy.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_vague_window_followup_counteroffer_books_carried_date() -> None:
+    # After the offer parks pitching with the proposed 30 May 12:00 slot, a
+    # concrete counter-time books THAT day (date carried from the offer).
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(
+            dates="завтра во второй половине дня", headcount=2
+        ).to_dict(),
+        "last_proposal": {"alternative_iso": "2026-05-30T12:00:00+03:00"},
+    }
+    answerer, _s, _, freebusy = _build(
+        state=state,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # 15:00 free
+    )
+    result = await answerer.try_answer(question="давайте в 15:00", ctx=_ctx())
+    assert result.text == SLOT_FREE_HANDOFF_LINE  # booked 30 May 15:00
+    assert freebusy.calls == 1
+
+
+# --- Round-14 coverage: intercept guard branches + scoping-path hooks --------
+
+
+@pytest.mark.asyncio
+async def test_vague_window_no_date_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(), token_provider=_TokenProvider()
+    )
+    r = await a._maybe_answer_vague_window(
+        question="во второй половине дня", ctx=_ctx(),
+        merged_intent=Intent(), stage_before=STAGE_SCOPING,
+    )
+    assert r is None  # vague window but no parseable date
+
+
+@pytest.mark.asyncio
+async def test_vague_window_concrete_time_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(), token_provider=_TokenProvider()
+    )
+    r = await a._maybe_answer_vague_window(
+        question="завтра в 14:00, можно во второй половине дня", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра в 14:00"), stage_before=STAGE_SCOPING,
+    )
+    assert r is None  # a concrete time is present → not a vague case
+
+
+@pytest.mark.asyncio
+async def test_vague_window_calendar_disabled_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(enabled=False),
+        token_provider=_TokenProvider(),
+    )
+    r = await a._maybe_answer_vague_window(
+        question="завтра во второй половине дня", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра"), stage_before=STAGE_SCOPING,
+    )
+    assert r is None
+
+
+@pytest.mark.asyncio
+async def test_vague_window_busy_start_proposes_alternative() -> None:
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 15, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(), freebusy=_FreeBusy(busy=busy),
+    )
+    r = await a._maybe_answer_vague_window(
+        question="завтра во второй половине дня", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра"), stage_before=STAGE_SCOPING,
+    )
+    assert r is not None and "15:00" in (r.text or "")  # 12:00 busy → alt 15:00
+
+
+@pytest.mark.asyncio
+async def test_vague_window_no_free_slot_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(), token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_whole_window()),
+    )
+    r = await a._maybe_answer_vague_window(
+        question="завтра во второй половине дня", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра"), stage_before=STAGE_SCOPING,
+    )
+    assert r is None  # nothing free to propose
+
+
+@pytest.mark.asyncio
+async def test_inquiry_no_concrete_time_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(), token_provider=_TokenProvider()
+    )
+    r = await a._maybe_answer_availability_inquiry(
+        question="а завтра свободно?", ctx=_ctx(), merged_intent=Intent()
+    )
+    assert r is None  # inquiry but no concrete time
+
+
+@pytest.mark.asyncio
+async def test_inquiry_calendar_disabled_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(enabled=False),
+        token_provider=_TokenProvider(),
+    )
+    r = await a._maybe_answer_availability_inquiry(
+        question="завтра в 14:00 свободно?", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра в 14:00"),
+    )
+    assert r is None
+
+
+@pytest.mark.asyncio
+async def test_inquiry_not_connected_falls_through() -> None:
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(),
+        token_provider=_RaisingTokenProvider(),  # → not connected
+    )
+    r = await a._maybe_answer_availability_inquiry(
+        question="завтра в 14:00 свободно?", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра в 14:00"),
+    )
+    assert r is None  # can't verify → fall through (no verdict invented)
+
+
+@pytest.mark.asyncio
+async def test_scoping_path_inquiry_returns_verdict() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    a, _s, _o, _f = _build(
+        state=_scoping_state(intent=Intent(headcount=2)),
+        openrouter=openrouter, cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(), freebusy=_FreeBusy(busy=()),
+    )
+    r = await a.try_answer(question="А завтра в 14:00 свободно?", ctx=_ctx())
+    assert r.text == SLOT_FREE_INQUIRY_LINE  # mid-scoping inquiry → verdict
+
+
+@pytest.mark.asyncio
+async def test_scoping_path_vague_window_offers_slot() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"headcount": 2}, "next_question": "ок"}
+    )
+    a, _s, _o, _f = _build(
+        state=_scoping_state(intent=Intent(dates="завтра")),
+        openrouter=openrouter, cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(), freebusy=_FreeBusy(busy=()),
+    )
+    r = await a.try_answer(
+        question="давайте во второй половине дня, нас двое", ctx=_ctx()
+    )
+    assert (r.text or "").startswith("Да, есть свободное время")  # mid-scoping vague
+
+
+@pytest.mark.asyncio
+async def test_vague_window_fully_busy_falls_back_to_nearest_free() -> None:
+    # The whole afternoon window is busy, but the morning is free → propose the
+    # day's nearest-free as a fallback (never decline).
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 12, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 19, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    a, _s, _o, _f = _build(
+        state=None, cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(), freebusy=_FreeBusy(busy=busy),
+    )
+    r = await a._maybe_answer_vague_window(
+        question="завтра во второй половине дня", ctx=_ctx(),
+        merged_intent=Intent(dates="завтра"), stage_before=STAGE_SCOPING,
+    )
+    assert r is not None and "09:00" in (r.text or "")  # morning fallback
