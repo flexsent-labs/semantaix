@@ -161,6 +161,16 @@ OUT_OF_SCOPE_DECLINE_LINE_EN = (
     "I'm afraid I can't help with that — I handle buggy rentals. "
     "I can help with a trip: what dates, and how many people?"
 )
+# Story 12.54 (round-12 D5) — appended to a booking reply when the SAME message
+# also carried an out-of-scope ask (a mixed "ресторан + запишите на багги"), so
+# the off-topic part is declined in one line WITHOUT re-asking booking fields
+# (the full OUT_OF_SCOPE_DECLINE_LINE's "даты?" would duplicate the funnel).
+MIXED_OUT_OF_SCOPE_SUFFIX = (
+    "А с остальным, к сожалению, не помогу — я по прокату багги."
+)
+MIXED_OUT_OF_SCOPE_SUFFIX_EN = (
+    "As for the rest, I'm afraid I can't help — I handle buggy rentals."
+)
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 EMPTY_CATALOG_ESCALATION_LINE_EN = (
@@ -597,6 +607,16 @@ def _build_greeting_prompt(*, today: str) -> str:
     return _GREETING_PROMPT_TEMPLATE.format(today=today)
 
 
+# Story 12.55 (round-12) — appended to the greeting prompt when the customer is
+# ALREADY in conversation (a mid-thread intent switch, or a fresh booking after
+# a handoff), so the persona doesn't re-open with "Здравствуйте". Appended at
+# the call site like reply_language_directive; the LLM still answers on-topic.
+_RETURNING_NO_GREETING_DIRECTIVE = (
+    "\n\nВАЖНО: клиент уже в этом диалоге с вами — НЕ здоровайтесь повторно "
+    "(без «Здравствуйте», «Привет», «Добрый день»), отвечайте сразу по существу."
+)
+
+
 def _parse_count(text: str) -> int | None:
     """Story 12.14 — the count in a terse reply ("1" → 1, "троих" → None).
 
@@ -738,6 +758,27 @@ class SalesPersonaAnswerer:
         # moment a fixed constant (ask-for-time, busy/free verdict) fires.
         ctx = replace(ctx, language=detect_language(question))
         result = await self._dispatch(question=question, ctx=ctx)
+        # Story 12.54 (round-12 D5) — a message mixing a booking with an
+        # out-of-scope ask is handled by the funnel (the booking part), which
+        # silently dropped the off-topic ask. Append a one-line decline (both
+        # intents present → genuinely mixed; a pure booking never matches
+        # is_out_of_scope, so this never fires on a normal booking).
+        if (
+            result.handled
+            and result.text
+            and is_out_of_scope(question, normalizer=self._normalizer)
+            and is_sales_intent(question, normalizer=self._normalizer)
+        ):
+            result = replace(
+                result,
+                text=result.text
+                + "\n"
+                + localize(
+                    MIXED_OUT_OF_SCOPE_SUFFIX,
+                    MIXED_OUT_OF_SCOPE_SUFFIX_EN,
+                    language=ctx.language,
+                ),
+            )
         # Story 12.27 — a cancellation turn suppresses the +24h nudge so the
         # customer isn't asked "still thinking about booking?" a day after asking
         # to cancel. Any other handled turn schedules one nudge as before.
@@ -788,7 +829,11 @@ class SalesPersonaAnswerer:
         if current_stage == STAGE_DORMANT:
             if not is_sales_intent(question, normalizer=self._normalizer):
                 return _skip("not_sales_intent")
-            return await self._handle_greeting(question=question, ctx=ctx)
+            # Story 12.55 — re-engaging after dormancy is mid-thread, not first
+            # contact: don't greet again.
+            return await self._handle_greeting(
+                question=question, ctx=ctx, returning=True
+            )
 
         # Story 12.06 — intercept mid-funnel conversational asides BEFORE the
         # deferred-stage skip so a pitching/pricing customer can still ask
@@ -808,7 +853,9 @@ class SalesPersonaAnswerer:
             # line. A price follow-up ("ну так сколько в итоге?") stays in pricing.
             # (Cancellation / out-of-scope were already routed above.)
             if self._has_moved_on_from_pricing(question=question, ctx=ctx):
-                return await self._handle_greeting(question=question, ctx=ctx)
+                return await self._handle_greeting(
+                    question=question, ctx=ctx, returning=True
+                )
             return await self._handle_pricing(
                 question=question, ctx=ctx, state=state
             )
@@ -843,7 +890,11 @@ class SalesPersonaAnswerer:
             # clears the stale offered slot. A non-sales reply ("спасибо") keeps
             # the sticky handoff — the human still owns the conversation.
             if is_sales_intent(question, normalizer=self._normalizer):
-                return await self._handle_greeting(question=question, ctx=ctx)
+                # Story 12.55 — a fresh booking after a handoff is mid-thread:
+                # restart the funnel but don't re-greet.
+                return await self._handle_greeting(
+                    question=question, ctx=ctx, returning=True
+                )
             return await self._handle_closing(
                 question=question, ctx=ctx, state=state
             )
@@ -903,13 +954,17 @@ class SalesPersonaAnswerer:
             )
 
     async def _handle_greeting(
-        self, *, question: str, ctx: AnswerContext
+        self, *, question: str, ctx: AnswerContext, returning: bool = False
     ) -> AnswerResult:
         # Story 12.45 (round-8 N3) — mirror the customer's language. Empty suffix
         # for Russian (the default), so RU prompts are unchanged.
         system = _build_greeting_prompt(
             today=_format_today_ru(self._clock())
         ) + reply_language_directive(question)
+        # Story 12.55 (round-12) — re-entering greeting mid-thread (returning
+        # after a handoff / an intent switch): tell the LLM not to greet again.
+        if returning:
+            system += _RETURNING_NO_GREETING_DIRECTIVE
         user = f"Сообщение клиента:\n{question}"
 
         try:
