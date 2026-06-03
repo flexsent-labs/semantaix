@@ -23,6 +23,7 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     ASK_FOR_TIME_LINE,
+    ASK_FOR_TIME_ONLY_LINE,
     MATERIAL_DISPATCH_FALLBACK_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
@@ -290,12 +291,13 @@ async def test_counter_offer_whole_month_without_time_asks() -> None:
 
 @pytest.mark.asyncio
 async def test_counter_offer_single_date_without_time_asks() -> None:
-    # "1 июня" parses to a date but carries no clock time → ask for the time.
+    # "1 июня" parses to a date but carries no clock time → ask only for the
+    # time (date is known, Story 12.62), not "дату и время".
     answerer, state_repo = _build(
         state=_state(dates=None), cal_settings=_FakeCalSettings()
     )
     result = await answerer.try_answer(question="1 июня", ctx=_ctx())
-    assert result.text == ASK_FOR_TIME_LINE
+    assert result.text == ASK_FOR_TIME_ONLY_LINE
     assert state_repo.upserts[-1]["current_stage"] == STAGE_AWAITING_TIME
 
 

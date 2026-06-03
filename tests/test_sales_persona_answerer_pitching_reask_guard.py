@@ -25,7 +25,7 @@ from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
-    ASK_FOR_TIME_LINE,
+    ASK_FOR_TIME_ONLY_LINE,
     PITCHING_ACCEPT_CONFIRM_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
@@ -234,7 +234,7 @@ async def test_counter_offer_with_accept_word_reroutes_to_time_ask() -> None:
         cal_settings=_FakeCalSettings(),
     )
     result = await answerer.try_answer(question="давайте на 1 июня", ctx=_ctx())
-    assert result.text == ASK_FOR_TIME_LINE
+    assert result.text == ASK_FOR_TIME_ONLY_LINE  # date known → ask only time (12.62)
     assert PITCHING_ACCEPT_CONFIRM_LINE.format(
         day_month="31 мая", time="08:00"
     ) != result.text

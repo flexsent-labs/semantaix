@@ -150,4 +150,7 @@ development_status:
   12-58-availability-inquiry-no-hitl: review
   12-59-capacity-question-copy: review
   12-60-vague-time-window: review
+  12-61-vague-window-completion-path: review
+  12-62-clarify-only-missing-time: review
+  12-63-capacity-derive-from-catalog: review
   epic-12-retrospective: optional
