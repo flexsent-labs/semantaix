@@ -139,4 +139,8 @@ development_status:
   12-47-bilingual-deterministic-lines: review
   12-48-pitching-counteroffer-numeric-date: review
   12-49-price-multiword-service-match: review
+  12-50-english-date-time-parsing: review
+  12-51-pitching-counteroffer-time-carryover: review
+  12-52-localize-remaining-funnel-lines: review
+  12-53-price-subject-mismatch-escalation: review
   epic-12-retrospective: optional

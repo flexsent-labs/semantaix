@@ -30,10 +30,14 @@ from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
+    CLOSING_HANDOFF_LINE_EN,
     HITL_REASON_SCOPING_COMPLETE,
     RESPONSE_MODE_SALES_ESCALATION,
     SCOPING_COMPLETE_HANDOFF_LINE,
+    SCOPING_COMPLETE_HANDOFF_LINE_EN,
     SLOT_BUSY_LINE,
+    SLOT_FREE_HANDOFF_LINE,
+    STAGE_CLOSING,
     STAGE_NEW,
     STAGE_PITCHING,
     STAGE_PRICING,
@@ -726,3 +730,128 @@ async def test_pitching_numeric_counteroffer_is_busy_checked() -> None:
     )
     assert SLOT_BUSY_LINE in (result.text or "")  # 16:00 on 3 June is busy
     assert freebusy.calls == 1  # the numeric counter-offer WAS checked
+
+
+# --- R11-1 (round 11): negotiation — re-check the customer's counter-time -----
+# After a busy verdict offers an alternative (08:00), a follow-up naming a
+# DIFFERENT time ("а давайте тогда в 12:00", date implied by context) must be
+# checked and confirmed/declined — never silently booked at the offered 08:00.
+
+
+def _pitch_state_0800(*, intent_dates: str = "завтра в 14:00") -> dict[str, Any]:
+    """Pitching, having offered 30 May 08:00 as the alternative."""
+    return {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates=intent_dates).to_dict(),
+        "last_proposal": {"alternative_iso": "2026-05-30T08:00:00+03:00"},
+    }
+
+
+def _busy_blocks_may30_noon() -> tuple[BusyInterval, ...]:
+    """30 May 2026 blocked 11:00–13:00 → 12:00 busy, 08:00 free."""
+    return (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_pitching_timeonly_counteroffer_rechecks_new_time_not_proposal() -> None:
+    answerer, _s, _, freebusy = _build(
+        state=_pitch_state_0800(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_may30_noon()),  # 12:00 busy
+    )
+    result = await answerer.try_answer(question="а давайте тогда в 12:00", ctx=_ctx())
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text  # checked 12:00 (busy) — did NOT book 08:00
+    assert "на 08:00" not in text  # never confirmed the bot's own slot
+    assert freebusy.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pitching_correction_picks_nonproposal_time() -> None:
+    answerer, _s, _, freebusy = _build(
+        state=_pitch_state_0800(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_may30_noon()),
+    )
+    result = await answerer.try_answer(
+        question="Нет, мне нужно именно в 12:00, а не в 08:00", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text  # re-checked 12:00, the time they want
+    assert freebusy.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pitching_timeonly_counteroffer_free_confirms_new_time() -> None:
+    answerer, _s, _, freebusy = _build(
+        state=_pitch_state_0800(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # 12:00 free
+    )
+    result = await answerer.try_answer(question="а давайте в 12:00", ctx=_ctx())
+    assert result.text == SLOT_FREE_HANDOFF_LINE
+    assert freebusy.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pitching_bare_acceptance_still_confirms_offered_slot() -> None:
+    # No competing time → genuine acceptance of the offered 08:00 (no re-check).
+    answerer, _s, _, freebusy = _build(
+        state=_pitch_state_0800(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_may30_noon()),
+    )
+    result = await answerer.try_answer(question="да, отлично, давайте", ctx=_ctx())
+    text = result.text or ""
+    assert "08:00" in text  # confirmed the offered slot
+    assert freebusy.calls == 0  # acceptance does not re-query the calendar
+
+
+# --- N3 (round 11, Story 12.52): remaining funnel lines mirror the language ---
+# 12.47 missed the pitching-followup and closing handoffs; an English thread
+# that reaches them (a closure, or a non-counter follow-up) must stay English.
+
+
+@pytest.mark.asyncio
+async def test_pitching_followup_en_localizes_handoff() -> None:
+    answerer, _s, _, freebusy = _build(
+        state=_pitch_state_0800(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    # English, no concrete time, not an acceptance → pitching-followup handoff.
+    result = await answerer.try_answer(
+        question="Thanks, I'll think about it.", ctx=_ctx()
+    )
+    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE_EN
+    assert freebusy.calls == 0  # no counter time → no re-check
+
+
+@pytest.mark.asyncio
+async def test_closing_en_localizes_handoff() -> None:
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, _, _ = _build(
+        state=state,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+    )
+    result = await answerer.try_answer(question="Thank you!", ctx=_ctx())
+    assert result.text == CLOSING_HANDOFF_LINE_EN

@@ -19,6 +19,7 @@ from services.api.app.calendar.service_resolver import (
     Ambiguous,
     NoMatch,
     Resolved,
+    extract_all_clocks,
     extract_requested_start,
     resolve_service,
 )
@@ -442,3 +443,121 @@ def test_clarifying_copy_constants_are_russian_nonempty() -> None:
         assert copy.strip()
         assert any(ord(ch) >= 1024 for ch in copy)  # contains Cyrillic
     assert "{options}" in CLARIFY_AMBIGUOUS
+
+
+# --- Story 12.50 (round-11 R11-2): English date/time support -----------------
+# The bot must parse English relative days, am/pm clocks, weekday and
+# "<month> <day>" forms to the SAME tz-aware datetime as their Russian
+# equivalents, so an English booking reaches the same busy check.
+# _NOW is Friday 5 June 2026, noon Moscow.
+
+
+def test_en_tomorrow_2pm() -> None:
+    r = extract_requested_start(text="tomorrow at 2pm", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
+
+
+def test_en_today_10am() -> None:
+    r = extract_requested_start(text="today at 10am", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 5, 10, 0, tzinfo=MOSCOW)
+
+
+def test_en_tomorrow_with_minutes_pm() -> None:
+    r = extract_requested_start(text="tomorrow at 2:30pm", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 14, 30, tzinfo=MOSCOW)
+
+
+def test_en_noon_and_midnight_edges() -> None:
+    assert extract_requested_start(
+        text="tomorrow at 12pm", now=_NOW, project_tz=MOSCOW
+    ) == datetime(2026, 6, 6, 12, 0, tzinfo=MOSCOW)
+    assert extract_requested_start(
+        text="tomorrow at 12am", now=_NOW, project_tz=MOSCOW
+    ) == datetime(2026, 6, 6, 0, 0, tzinfo=MOSCOW)
+
+
+def test_en_day_after_tomorrow() -> None:
+    r = extract_requested_start(
+        text="day after tomorrow at 8am", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 7, 8, 0, tzinfo=MOSCOW)
+
+
+def test_en_weekday_resolves_to_next_occurrence() -> None:
+    # Friday 5 June → next Monday is 8 June.
+    r = extract_requested_start(text="on Monday at 9am", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 8, 9, 0, tzinfo=MOSCOW)
+
+
+def test_en_month_day_order() -> None:
+    r = extract_requested_start(text="June 7 at 11am", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 7, 11, 0, tzinfo=MOSCOW)
+
+
+def test_en_day_month_order_with_ordinal_and_of() -> None:
+    r = extract_requested_start(
+        text="7th of June at 11:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 7, 11, 0, tzinfo=MOSCOW)
+
+
+def test_en_month_day_in_past_rolls_to_next_year() -> None:
+    r = extract_requested_start(text="January 3 at 10am", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2027, 1, 3, 10, 0, tzinfo=MOSCOW)
+
+
+def test_en_time_without_day_is_none() -> None:
+    assert extract_requested_start(text="at 2pm", now=_NOW, project_tz=MOSCOW) is None
+
+
+def test_en_invalid_ampm_hour_is_none() -> None:
+    # 14pm is nonsensical; conservative parser declines rather than guessing.
+    assert extract_requested_start(
+        text="tomorrow at 14pm", now=_NOW, project_tz=MOSCOW
+    ) is None
+
+
+def test_en_24h_clock_still_parses_with_en_day() -> None:
+    r = extract_requested_start(text="tomorrow at 14:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
+
+
+# --- Story 12.51 (round-11 R11-1): extract_all_clocks ------------------------
+
+
+def test_extract_all_clocks_two_hh_mm_times() -> None:
+    assert extract_all_clocks("именно в 12:00, а не в 08:00") == [(12, 0), (8, 0)]
+
+
+def test_extract_all_clocks_ampm() -> None:
+    assert extract_all_clocks("what about 10am or 2pm?") == [(10, 0), (14, 0)]
+
+
+def test_extract_all_clocks_russian_hours_form() -> None:
+    assert extract_all_clocks("давайте в 3 часа") == [(3, 0)]
+
+
+def test_extract_all_clocks_invalid_ampm_dropped() -> None:
+    assert extract_all_clocks("14pm") == []
+
+
+def test_extract_all_clocks_dedupes() -> None:
+    assert extract_all_clocks("в 12:00, ещё раз в 12:00") == [(12, 0)]
+
+
+def test_extract_all_clocks_none() -> None:
+    assert extract_all_clocks("без времени") == []
+
+
+def test_en_non_month_word_is_not_a_date() -> None:
+    # "<digit> <word>" where the word isn't a month → no date, no guess.
+    assert extract_requested_start(
+        text="5 cats at 10am", now=_NOW, project_tz=MOSCOW
+    ) is None
+
+
+def test_en_invalid_calendar_day_is_none() -> None:
+    # A valid month with an impossible day declines (conservative).
+    assert extract_requested_start(
+        text="February 30 at 10am", now=_NOW, project_tz=MOSCOW
+    ) is None
