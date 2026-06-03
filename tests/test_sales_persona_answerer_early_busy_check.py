@@ -30,8 +30,10 @@ from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
+    _RETURNING_NO_GREETING_DIRECTIVE,
     CLOSING_HANDOFF_LINE_EN,
     HITL_REASON_SCOPING_COMPLETE,
+    MIXED_OUT_OF_SCOPE_SUFFIX,
     RESPONSE_MODE_SALES_ESCALATION,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE_EN,
@@ -855,3 +857,86 @@ async def test_closing_en_localizes_handoff() -> None:
     )
     result = await answerer.try_answer(question="Thank you!", ctx=_ctx())
     assert result.text == CLOSING_HANDOFF_LINE_EN
+
+
+# --- D5 (round 12, Story 12.54): mixed-intent gets a one-line decline ---------
+# A message mixing a booking with an out-of-scope ask is handled by the funnel
+# (the booking), but the off-topic part was silently dropped. Append a brief
+# decline — without re-asking booking fields.
+
+
+@pytest.mark.asyncio
+async def test_mixed_intent_booking_appends_out_of_scope_decline() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_tomorrow_14()),
+    )
+    result = await answerer.try_answer(
+        question="Посоветуйте ресторан и запишите на багги завтра в 14:00, нас двое.",
+        ctx=_ctx(),
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text  # the booking part is still handled
+    assert MIXED_OUT_OF_SCOPE_SUFFIX in text  # and the restaurant ask is declined
+
+
+@pytest.mark.asyncio
+async def test_pure_booking_does_not_append_decline() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_tomorrow_14()),
+    )
+    result = await answerer.try_answer(
+        question="Запишите на багги завтра в 14:00, нас двое.", ctx=_ctx()
+    )
+    assert MIXED_OUT_OF_SCOPE_SUFFIX not in (result.text or "")  # no off-topic part
+
+
+# --- Story 12.55 (round 12): no re-greeting on a mid-thread intent switch -----
+
+
+@pytest.mark.asyncio
+async def test_returning_customer_greeting_suppresses_hello() -> None:
+    # A fresh booking after a prior handoff re-enters greeting; the prompt must
+    # tell the LLM not to say "Здравствуйте" again.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, _, _ = _build(
+        state=state, openrouter=openrouter, cal_settings=_FakeCalSettings()
+    )
+    await answerer.try_answer(question="Хочу записаться на багги", ctx=_ctx())
+    assert openrouter.calls  # the greeting LLM ran
+    assert _RETURNING_NO_GREETING_DIRECTIVE in openrouter.calls[0]["system"]
+
+
+@pytest.mark.asyncio
+async def test_first_contact_greeting_keeps_hello() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None, openrouter=openrouter, cal_settings=_FakeCalSettings()
+    )
+    await answerer.try_answer(question="Здравствуйте! Хочу багги", ctx=_ctx())
+    assert openrouter.calls
+    assert _RETURNING_NO_GREETING_DIRECTIVE not in openrouter.calls[0]["system"]
