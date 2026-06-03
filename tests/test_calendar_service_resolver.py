@@ -9,7 +9,7 @@ exercised end to end, not stubbed.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from services.api.app.calendar.service_resolver import (
@@ -20,6 +20,7 @@ from services.api.app.calendar.service_resolver import (
     NoMatch,
     Resolved,
     extract_all_clocks,
+    extract_requested_date,
     extract_requested_start,
     resolve_service,
 )
@@ -560,4 +561,33 @@ def test_en_invalid_calendar_day_is_none() -> None:
     # A valid month with an impossible day declines (conservative).
     assert extract_requested_start(
         text="February 30 at 10am", now=_NOW, project_tz=MOSCOW
+    ) is None
+
+
+# --- Story 12.60 (round-14): extract_requested_date (date without a clock) ----
+# _NOW is Friday 5 June 2026; use future days to avoid the past→next-year roll.
+
+
+def test_extract_requested_date_relative() -> None:
+    assert extract_requested_date(
+        text="завтра во второй половине дня", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 6)
+
+
+def test_extract_requested_date_numeric() -> None:
+    # Slash/ISO dates parse without a clock (a bare dotted DD.MM needs one).
+    assert extract_requested_date(
+        text="07/06 утром", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 7)
+
+
+def test_extract_requested_date_absolute_ru() -> None:
+    assert extract_requested_date(
+        text="7 июня после обеда", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 7)
+
+
+def test_extract_requested_date_none_when_no_date() -> None:
+    assert extract_requested_date(
+        text="во второй половине дня", now=_NOW, project_tz=MOSCOW
     ) is None

@@ -531,3 +531,30 @@ def extract_requested_start(
         minute,
         tzinfo=project_tz,
     )
+
+
+def extract_requested_date(
+    *,
+    text: str,
+    now: datetime,
+    project_tz: ZoneInfo,
+) -> date | None:
+    """Best-effort parse of just the requested *date* (no clock), or ``None``.
+
+    The date half of :func:`extract_requested_start` — relative word, weekday,
+    numeric/ISO/slash, or "<day> <month>" (RU or EN). Used by the vague-time
+    window flow (Story 12.60, round-14): "завтра во второй половине дня" carries
+    a date but no concrete clock, so the bot checks that day's window instead of
+    declining or asking blindly.
+    """
+    local_now = now.astimezone(project_tz)
+    lemmas = get_russian_normalizer().lemmas(text)
+    offset = _extract_day_offset(lemmas, text, local_now.weekday())
+    if offset is not None:
+        return (local_now + timedelta(days=offset)).date()
+    numeric = _extract_numeric_date(text, local_now.date())
+    if numeric is not None:
+        return numeric[0]
+    return _extract_absolute_date(
+        text.lower(), local_now.date()
+    ) or _extract_en_absolute_date(text.lower(), local_now.date())
