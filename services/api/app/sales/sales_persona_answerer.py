@@ -615,6 +615,26 @@ _RETURNING_NO_GREETING_DIRECTIVE = (
     "\n\nВАЖНО: клиент уже в этом диалоге с вами — НЕ здоровайтесь повторно "
     "(без «Здравствуйте», «Привет», «Добрый день»), отвечайте сразу по существу."
 )
+# Story 12.56 (round-13) — the directive above is "soft": the LLM sometimes
+# greets anyway. On a returning turn we DETERMINISTICALLY strip a leading
+# salutation from the reply so a re-greeting can't slip through.
+_LEADING_GREETING_RE = re.compile(
+    r"^\s*(?:здравствуй(?:те)?|здрасте|привет(?:ствую)?|здаров[ао]"
+    r"|добрый\s+(?:день|вечер)|доброе\s+утро|доброго\s+(?:дня|вечера|утра)"
+    r"|доброй\s+ночи)[\s,.!…—–-]*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_leading_greeting(text: str) -> str:
+    """Drop a leading Russian salutation (and its trailing punctuation) so a
+    returning-customer reply doesn't open with "Здравствуйте" (Story 12.56).
+    Returns the original when there's no greeting, or when nothing would remain
+    (a greeting-only reply is kept rather than emptied)."""
+    stripped = _LEADING_GREETING_RE.sub("", text, count=1).lstrip()
+    if not stripped:
+        return text
+    return stripped[0].upper() + stripped[1:]
 
 
 def _parse_count(text: str) -> int | None:
@@ -961,9 +981,13 @@ class SalesPersonaAnswerer:
         system = _build_greeting_prompt(
             today=_format_today_ru(self._clock())
         ) + reply_language_directive(question)
-        # Story 12.55 (round-12) — re-entering greeting mid-thread (returning
-        # after a handoff / an intent switch): tell the LLM not to greet again.
-        if returning:
+        # Story 12.55/12.56 — on a mid-thread re-entry (returning after a handoff
+        # / an intent switch) the bot shouldn't open with "Здравствуйте" — UNLESS
+        # the customer greeted first, in which case greeting back is natural.
+        suppress_greeting = (
+            returning and _LEADING_GREETING_RE.match(question) is None
+        )
+        if suppress_greeting:
             system += _RETURNING_NO_GREETING_DIRECTIVE
         user = f"Сообщение клиента:\n{question}"
 
@@ -1048,9 +1072,16 @@ class SalesPersonaAnswerer:
                 ),
             },
         )
+        # Story 12.56 — deterministically strip a leading salutation the LLM may
+        # have added despite the directive (only when we're suppressing).
+        reply_text = (
+            _strip_leading_greeting(next_question)
+            if suppress_greeting
+            else next_question
+        )
         return AnswerResult(
             handled=True,
-            text=next_question,
+            text=reply_text,
             metadata={
                 "answerer": NAME,
                 "stage_before": STAGE_NEW,

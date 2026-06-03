@@ -45,6 +45,7 @@ from services.api.app.sales.sales_persona_answerer import (
     STAGE_PRICING,
     STAGE_SCOPING,
     SalesPersonaAnswerer,
+    _strip_leading_greeting,
 )
 
 _NOW = datetime(2026, 5, 29, 9, 0, tzinfo=UTC)  # 12:00 Moscow, Fri 29 May
@@ -940,3 +941,121 @@ async def test_first_contact_greeting_keeps_hello() -> None:
     await answerer.try_answer(question="Здравствуйте! Хочу багги", ctx=_ctx())
     assert openrouter.calls
     assert _RETURNING_NO_GREETING_DIRECTIVE not in openrouter.calls[0]["system"]
+
+
+# --- Story 12.56 (round-13): deterministically strip a re-greeting -----------
+# The soft no-greeting directive (12.55) isn't always obeyed; on a returning
+# turn we strip a leading salutation from the reply so it can't slip through.
+
+
+def test_strip_leading_greeting_removes_salutation() -> None:
+    assert (
+        _strip_leading_greeting("Здравствуйте! На какой день перенести бронь?")
+        == "На какой день перенести бронь?"
+    )
+    assert _strip_leading_greeting("Привет, чем помочь?") == "Чем помочь?"
+    assert _strip_leading_greeting("Добрый день! Уточните дату.") == "Уточните дату."
+
+
+def test_strip_leading_greeting_keeps_non_greeting() -> None:
+    assert (
+        _strip_leading_greeting("На какой день перенести бронь?")
+        == "На какой день перенести бронь?"
+    )
+
+
+def test_strip_leading_greeting_keeps_when_only_greeting() -> None:
+    # Nothing would remain → keep the original rather than emit an empty reply.
+    assert _strip_leading_greeting("Здравствуйте.") == "Здравствуйте."
+
+
+@pytest.mark.asyncio
+async def test_returning_reentry_strips_hello_from_reply() -> None:
+    # «перенести бронь» is a sales intent → from closing it re-enters greeting
+    # (returning=True). Even if the LLM greets, the reply must not.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {},
+            "next_question": "Здравствуйте! На какой день перенести бронь?",
+        }
+    )
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, _, _ = _build(
+        state=state, openrouter=openrouter, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="А можно перенести бронь на другой день?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "Здравствуйте" not in text
+    assert text.startswith("На какой день")
+
+
+@pytest.mark.asyncio
+async def test_first_contact_reply_keeps_hello() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {}, "next_question": "Здравствуйте! Чем могу помочь?"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None, openrouter=openrouter, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="Здравствуйте, хочу багги", ctx=_ctx()
+    )
+    assert "Здравствуйте" in (result.text or "")  # first contact still greets
+
+
+# --- K1 (round-13): the nearest-free alternative is current-time aware --------
+# Regression guard: when "now" is mid-morning and today is busy 13:00–16:30,
+# the proposed alternative is the next free slot >= now (10:00), never the
+# day's opening hour (which is already in the past). Pins `now` so it can't
+# silently revert to a static opening-hour suggestion.
+
+
+@pytest.mark.asyncio
+async def test_nearest_free_alternative_is_now_aware() -> None:
+    now = datetime(2026, 5, 29, 6, 41, tzinfo=UTC)  # 09:41 Moscow, Fri
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "сегодня в 14:00"}, "next_question": "?"}
+    )
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 29, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 29, 16, 30, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer = SalesPersonaAnswerer(
+        state_repo=_FakeStateRepo(initial=None),
+        services_repo=_NoOpServicesRepo(),
+        openrouter=openrouter,
+        normalizer=get_russian_normalizer(),
+        clock=lambda: now,
+        bot_persona_getter=lambda: "Анна",
+        calendar_settings_repo=_FakeCalSettings(),
+        calendar_token_provider=_TokenProvider(),
+        calendar_freebusy_client=_FreeBusy(busy=busy),
+        operator_chat_resolver=lambda op: 42,
+    )
+    ctx = AnswerContext(
+        chat_id=_CHAT_ID,
+        customer_username="@artur",
+        trace_id="trc",
+        now=now,
+        project_id=_PROJECT_ID,
+    )
+    result = await answerer.try_answer(
+        question="Хочу сегодня в 14:00 на багги, нас двое, одна багги.", ctx=ctx
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text
+    assert "10:00" in text  # next free slot >= now
+    assert "09:00" not in text  # never the pre-now opening hour

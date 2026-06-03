@@ -145,4 +145,5 @@ development_status:
   12-53-price-subject-mismatch-escalation: review
   12-54-mixed-intent-out-of-scope-decline: review
   12-55-no-regreeting-midthread: review
+  12-56-deterministic-no-regreeting: review
   epic-12-retrospective: optional
