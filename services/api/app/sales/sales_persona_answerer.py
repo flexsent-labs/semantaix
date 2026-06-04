@@ -50,6 +50,7 @@ from services.api.app.calendar.service_resolver import (
     extract_all_clocks,
     extract_requested_date,
     extract_requested_start,
+    names_invalid_date,
 )
 from services.api.app.rag import RagChunk
 from services.api.app.sales.acceptance import is_acceptance
@@ -182,6 +183,18 @@ CAPACITY_ESCALATION_LINE = "Уточняю у коллег, какие вари�
 CAPACITY_ESCALATION_LINE_EN = (
     "Let me check the options with my colleagues and get right back to you."
 )
+# Story 16 (round-16 R16-1) — an impossible calendar date («31 июня», «31.06»)
+# is rejected with a clarify, never accepted as a booking.
+INVALID_DATE_CLARIFY_LINE = (
+    "Такой даты не существует. Уточните, пожалуйста, желаемую дату."
+)
+INVALID_DATE_CLARIFY_LINE_EN = (
+    "That date doesn't exist. Could you confirm the date you'd like?"
+)
+# Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack, not a
+# booking-handoff line.
+GRATITUDE_ACK_LINE = "Пожалуйста! Обращайтесь, если будут вопросы."
+GRATITUDE_ACK_LINE_EN = "You're welcome! Feel free to reach out anytime."
 # Story 12.59 (round-14) - "сколько багги нужно / понадобится / вместит" is a
 # capacity question, NOT a price ask ("сколько стоит") or a headcount answer.
 _CAPACITY_QUESTION_RE = re.compile(
@@ -288,6 +301,49 @@ def is_availability_inquiry(question: str) -> bool:
     """True for a "is this slot free?" question with no booking-commit verb."""
     return bool(_AVAILABILITY_INQUIRY_RE.search(question)) and not _BOOKING_COMMIT_RE.search(
         question
+    )
+
+
+# Story 16 (round-16 R16-4) — gratitude / smalltalk («спасибо большое!»).
+_GRATITUDE_RE = re.compile(
+    r"спасибо|благодар|\bспс\b|очень\s+помог|вы\s+помог", re.IGNORECASE | re.UNICODE
+)
+# A decline/closure word alongside the thanks («всё, спасибо», «нет, спасибо»)
+# means the customer is finishing — that stays a closure (the operator follows
+# up), not a chit-chat ack.
+_GRATITUDE_DECLINE_RE = re.compile(
+    r"\bнет\b|\bвс[её]\b|не\s+надо|не\s+нужн|отказ", re.IGNORECASE | re.UNICODE
+)
+
+
+def is_gratitude(question: str) -> bool:
+    """True for a PURE thank-you turn (thanks with no decline/closure word)."""
+    return bool(_GRATITUDE_RE.search(question)) and not _GRATITUDE_DECLINE_RE.search(
+        question
+    )
+
+
+# Story 16 (round-16 R16-3) — an eligibility / policy QUESTION («можно ли с
+# ребёнком?», «нужны ли права?») — a condition-of-use ask, not a booking. A
+# distinctive eligibility noun PLUS a permission/question marker, and no
+# booking-commit verb (so «запишите, едем с ребёнком» stays a booking).
+_ELIGIBILITY_NOUN_RE = re.compile(
+    r"ребён|ребен|\bдет(?:и|ьм|ей|ям|ск)|возраст|беремен|\bсобак|\bживотн"
+    r"|\bправа?х?\b|новичк|\bопыт|\bвес\b|инвалид",
+    re.IGNORECASE | re.UNICODE,
+)
+_ELIGIBILITY_MARKER_RE = re.compile(
+    r"можн\w*|нужн\w*|допуск\w*|разреш\w*|\bли\b|скольк\w*\s+лет|со\s+скольк",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_eligibility_question(question: str) -> bool:
+    """True for an eligibility/policy question (round-16 R16-3)."""
+    return (
+        bool(_ELIGIBILITY_NOUN_RE.search(question))
+        and bool(_ELIGIBILITY_MARKER_RE.search(question))
+        and not _BOOKING_COMMIT_RE.search(question)
     )
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
@@ -1007,6 +1063,31 @@ class SalesPersonaAnswerer:
         if is_capacity_question(question):
             return await self._handle_capacity_question(question=question, ctx=ctx)
 
+        # Story 16 (round-16 R16-1) — an impossible calendar date («31 июня»,
+        # «31.06») is rejected with a clarify, never accepted as a booking. Fires
+        # before the funnel so the bad date never reaches the slot check.
+        if names_invalid_date(
+            question, now=self._clock(), project_tz=ZoneInfo(ctx.timezone)
+        ):
+            return self._handle_invalid_date(ctx=ctx)
+
+        # Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack,
+        # not a booking-handoff. Gated on not-sales so «спасибо, запишите» books.
+        if is_gratitude(question) and not is_sales_intent(
+            question, normalizer=self._normalizer
+        ):
+            return self._handle_gratitude(ctx=ctx)
+
+        # Story 16 (round-16 R16-3) — an eligibility/policy question («можно с
+        # ребёнком?») is answered as a QUESTION: RAG-grounded if the catalog has
+        # the policy, else deferred to a human — never a booking handoff.
+        if is_eligibility_question(question):
+            return await self._answer_concept_via_rag(
+                term=question,
+                ctx=ctx,
+                current_stage=str(state.get("current_stage") if state else STAGE_NEW),
+            )
+
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
                 return _skip("not_sales_intent")
@@ -1192,6 +1273,13 @@ class SalesPersonaAnswerer:
         merged = self._dates_with_raw_fallback(
             intent=merged, question=question, ctx=ctx
         )
+        # Story 16 (round-16 R16-2) — «<день1> или <день2> в HH:MM» → an explicit
+        # per-day verdict, so the confirmed day isn't left unstated.
+        multi_date = await self._maybe_answer_multi_date(
+            question=question, ctx=ctx, stage_before=STAGE_NEW
+        )
+        if multi_date is not None:
+            return multi_date
         # Story 12.58 (round-14) — a pure availability INQUIRY («…в 16:30
         # свободно?») gets a plain verdict, never a booking handoff/HITL. Checked
         # before the busy-intercept so an inquiry isn't turned into a booking.
@@ -1296,6 +1384,46 @@ class SalesPersonaAnswerer:
             metadata={
                 "answerer": NAME,
                 "sales_turn_kind": "out_of_scope_decline",
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_invalid_date(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 16 (round-16 R16-1) — reject an impossible date with a clarify;
+        funnel state left intact, no escalation."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "invalid_date"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                INVALID_DATE_CLARIFY_LINE,
+                INVALID_DATE_CLARIFY_LINE_EN,
+                language=ctx.language,
+            ),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "invalid_date",
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_gratitude(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 16 (round-16 R16-4) — courteous ack for a thank-you; never a
+        booking-handoff line. No ``_persist`` (funnel left intact)."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "gratitude"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                GRATITUDE_ACK_LINE, GRATITUDE_ACK_LINE_EN, language=ctx.language
+            ),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "gratitude",
                 "suppress_followup": True,
             },
         )
@@ -1562,6 +1690,13 @@ class SalesPersonaAnswerer:
                     )
         # Not complete → keep scoping: forward the next-field question.
         if not merged.is_complete(required):
+            # Story 16 (round-16 R16-2) — «<день1> или <день2> в HH:MM» → an
+            # explicit per-day verdict.
+            multi_date = await self._maybe_answer_multi_date(
+                question=question, ctx=ctx, stage_before=STAGE_SCOPING
+            )
+            if multi_date is not None:
+                return multi_date
             # Story 12.58 (round-14) — a mid-scoping availability INQUIRY gets a
             # plain verdict (no handoff/HITL), checked before the busy-intercept.
             inquiry = await self._maybe_answer_availability_inquiry(
@@ -2361,6 +2496,83 @@ class SalesPersonaAnswerer:
                 "stage_before": stage_before,
                 "stage_after": STAGE_PITCHING,
                 "sales_turn_kind": "vague_window_offer",
+            },
+        )
+
+    async def _maybe_answer_multi_date(
+        self, *, question: str, ctx: AnswerContext, stage_before: str
+    ) -> AnswerResult | None:
+        """Story 16 (round-16 R16-2) — «<день1> или <день2> в HH:MM» gets an
+        EXPLICIT per-day verdict («6 июня в 12:00 - свободно; 7 июня в 12:00 -
+        свободно. Какой день вам удобнее?»), so the customer can tell which day
+        is confirmed instead of one unstated verdict. ``None`` unless the turn
+        offers two distinct dates with a clock and the calendar can verify both.
+        Russian-only by design (gated on «или»)."""
+        if not re.search(r"\bили\b", question, re.IGNORECASE | re.UNICODE):
+            return None
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        tz = cal.project_tz
+        clocks = extract_all_clocks(question)
+        if not clocks:
+            return None  # no time → let the slot-fill flow ask for one
+        hour, minute = clocks[0]
+        dates: list[date] = []
+        for part in re.split(r"\bили\b", question, flags=re.IGNORECASE | re.UNICODE):
+            parsed = extract_requested_date(text=part, now=ctx.now, project_tz=tz)
+            if parsed is not None and parsed not in dates:
+                dates.append(parsed)
+        if len(dates) < 2:
+            return None  # not actually two distinct date options
+        operator = cal.settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        verdicts: list[str] = []
+        for day in dates[:2]:
+            start = datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz)
+            availability = await check_requested_availability(
+                project_id=cal.project_id,
+                requested_start=start,
+                operator=operator,
+                operator_chat_id=operator_chat_id,
+                service_rule=cal.service_rule,
+                token_provider=self._calendar_token_provider,
+                freebusy_client=self._calendar_freebusy_client,
+                now=ctx.now,
+                project_tz=tz,
+                lookahead_days=cal.settings.lookahead_days,
+                country_code=ctx.country_code,
+                trace_id=ctx.trace_id,
+            )
+            if availability.status == STATUS_AVAILABLE:
+                word = "свободно"
+            elif availability.status == STATUS_UNAVAILABLE:
+                word = "занято"
+            else:
+                return None  # can't verify both → fall through to the normal flow
+            verdicts.append(
+                f"{day.day} {_MONTHS_GENITIVE[day.month]} "
+                f"в {start.strftime('%H:%M')} - {word}"
+            )
+        logger.info(
+            "sales_multi_date_verdict",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "dates": [d.isoformat() for d in dates[:2]],
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text="; ".join(verdicts) + ". Какой день вам удобнее?",
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "multi_date_verdict",
+                "suppress_followup": True,
             },
         )
 

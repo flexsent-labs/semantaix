@@ -22,6 +22,7 @@ from services.api.app.calendar.service_resolver import (
     extract_all_clocks,
     extract_requested_date,
     extract_requested_start,
+    names_invalid_date,
     resolve_service,
 )
 from services.api.app.calendar.settings_repository import ServiceRule
@@ -591,3 +592,17 @@ def test_extract_requested_date_none_when_no_date() -> None:
     assert extract_requested_date(
         text="во второй половине дня", now=_NOW, project_tz=MOSCOW
     ) is None
+
+
+def test_sunday_weekday_resolves() -> None:
+    # Round-16 regression: «воскресенье» lemmatizes to «воскресение»; both must
+    # resolve to Sunday (the next one). _NOW is Friday 5 June → Sun 7 June.
+    r = extract_requested_start(text="в воскресенье в 12:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 7, 12, 0, tzinfo=MOSCOW)
+
+
+def test_names_invalid_date_helper() -> None:
+    assert names_invalid_date("31 июня в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert names_invalid_date("31.06 в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert not names_invalid_date("в 14.30", now=_NOW, project_tz=MOSCOW)
+    assert not names_invalid_date("30 июня в 14:00", now=_NOW, project_tz=MOSCOW)

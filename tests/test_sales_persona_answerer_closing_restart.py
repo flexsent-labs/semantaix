@@ -152,12 +152,13 @@ async def test_closing_with_new_booking_intent_restarts_funnel() -> None:
 
 @pytest.mark.asyncio
 async def test_closing_with_non_sales_reply_stays_sticky() -> None:
-    # A non-booking reply in closing keeps the existing sticky handoff (the human
-    # still owns the conversation) — the LLM is never called.
+    # A non-booking, non-gratitude reply in closing keeps the existing sticky
+    # handoff (the human still owns the conversation) — the LLM is never called.
+    # (A pure thank-you is handled separately as gratitude — Story 16/R16-4.)
     answerer, state_repo, openrouter = _build()
     _seed_closing(state_repo)
 
-    result = await answerer.try_answer(question="спасибо", ctx=_ctx())
+    result = await answerer.try_answer(question="понятно", ctx=_ctx())
 
     assert result.text == CLOSING_HANDOFF_LINE
     assert result.metadata["sales_turn_kind"] == "closing_followup"

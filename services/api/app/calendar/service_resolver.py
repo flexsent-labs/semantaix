@@ -25,6 +25,7 @@ is configurable as data (project-context: Russian-first content is data).
 
 from __future__ import annotations
 
+import calendar
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -120,6 +121,9 @@ _WEEKDAYS: dict[str, int] = {
     "пятница": 4,
     "суббота": 5,
     "воскресенье": 6,
+    # pymorphy3 lemmatizes «воскресенье»/«в воскресенье» → «воскресение»; match
+    # that lemma too so Sunday is parsed (round-16 bug — Sunday never resolved).
+    "воскресение": 6,
 }
 
 # Story 12.50 (round-11 R11-2) — English day anchors. The Russian normalizer
@@ -342,6 +346,31 @@ def _extract_en_absolute_date(text: str, today: date) -> date | None:
                 candidate = _safe_date(year=today.year + 1, month=month, day=day)
             return candidate
     return None
+
+
+def names_invalid_date(text: str, *, now: datetime, project_tz: ZoneInfo) -> bool:
+    """True when ``text`` names a calendar date that doesn't exist — a Russian
+    "<day> <month>" or a "DD.MM" whose day exceeds that month's length (round-16
+    R16-1: «31 июня», «30 февраля», «31.06»). A "HH.MM" clock is excluded (its
+    second number isn't a valid 1-12 month). Leap-February uses ``now``'s year.
+    Distinct from "no date given" — lets the caller clarify instead of handing
+    off a booking on an impossible date.
+    """
+    year = now.astimezone(project_tz).year
+
+    def _out_of_range(month: int, day: int) -> bool:
+        if not (1 <= month <= 12) or day < 1:
+            return False
+        return day > calendar.monthrange(year, month)[1]
+
+    for match in _ABS_DATE_RE.finditer(text.lower()):
+        month = _month_from_token(match.group(2))
+        if month is not None and _out_of_range(month, int(match.group(1))):
+            return True
+    for match in _DOTTED_DATE_RE.finditer(text):
+        if _out_of_range(int(match.group(2)), int(match.group(1))):
+            return True
+    return False
 
 
 def _safe_date(*, year: int, month: int, day: int) -> date | None:
