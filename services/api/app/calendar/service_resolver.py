@@ -142,14 +142,65 @@ _EN_WEEKDAYS: dict[str, int] = {
 
 # "в 15:00" / "в 15.00" — explicit hour:minute.
 _HH_MM = re.compile(r"\b(\d{1,2})[:.](\d{2})\b")
-# "в 3 часа" / "в 15 часов" / "в 9 час" — hour + час-stem, minute defaults to 0.
-_HH_CLOCK = re.compile(
-    r"\b(\d{1,2})\s*час(?:а|ов|у)?\b",
-    re.IGNORECASE | re.UNICODE,
-)
 # Story 12.50 (round-11 R11-2) — English am/pm clock: "2pm", "10am", "2:30pm",
 # "2 pm". Checked BEFORE _HH_MM so "2:30pm" reads as 14:30, not 02:30.
 _AMPM_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\b", re.IGNORECASE)
+
+# Story 12.68/12.70 (round-17 R17-1/R17-3) — Russian cardinal number WORDS for
+# clock hours ("в три часа дня" → 15:00) and relative offsets ("через два часа").
+# Small map (1-12, with the gendered один/одна, два/две) — anything outside it is
+# declined rather than guessed.
+_WORD_NUMBERS: dict[str, int] = {
+    "один": 1,
+    "одна": 1,
+    "одно": 1,
+    "два": 2,
+    "две": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
+    "одиннадцать": 11,
+    "двенадцать": 12,
+}
+# Longest-first so the alternation prefers "двенадцать" over a "две" prefix.
+_WORD_HOURS_ALT = "|".join(sorted(_WORD_NUMBERS, key=len, reverse=True))
+
+# Story 12.68 (round-17 R17-1) — part-of-day qualifier that promotes a 1-12 hour
+# to 24h: "утра"/"ночи" keep it (12 → 0), "дня"/"вечера" add 12 (12 stays 12).
+_DAYPART = r"(?:утр[аоу]м?|дн[яёе]м?|вечер[ао]м?|ноч[ьи]ю?)"
+# "в три часа дня" / "в 3 часа" / "в час дня" — an optional cardinal (digit or
+# word; bare "час" means one o'clock) + час-stem + an optional part-of-day.
+_CLOCK_CHAS_RE = re.compile(
+    rf"\b(?:(?P<num>\d{{1,2}}|{_WORD_HOURS_ALT})\s*)?час(?:а|ов|у)?\b"
+    rf"(?:\s+(?P<qual>{_DAYPART}))?",
+    re.IGNORECASE | re.UNICODE,
+)
+# "в девять утра" / "в 9 утра" / "в семь вечера" — a cardinal directly followed
+# by a part-of-day, with no "час" word in between.
+_CLOCK_DAYPART_RE = re.compile(
+    rf"\b(?P<num>\d{{1,2}}|{_WORD_HOURS_ALT})\s+(?P<qual>{_DAYPART})\b",
+    re.IGNORECASE | re.UNICODE,
+)
+# "в полдень" → 12:00, "в полночь" → 00:00 (incl. the полу- genitive forms).
+_NOON_MIDNIGHT_RE = re.compile(
+    r"\b(?P<noon>полдень|полудень)\b"
+    r"|\b(?P<mid>полночь|полуночь|полночи|полуночи)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+# Story 12.70 (round-17 R17-3) — relative offset "через N <unit>" measured from
+# "now": "через два часа", "через час", "через 30 минут", "через 3 дня",
+# "через полчаса", "через неделю". The count may be a digit, a number word, or
+# "пол" (half); a missing count means one.
+_THROUGH_RE = re.compile(
+    rf"\bчерез\s+(?:(?P<num>\d{{1,3}}|пол|{_WORD_HOURS_ALT})\s*)?"
+    r"(?P<unit>час\w*|минут\w*|мин\b|недел\w*|нед\b|дн\w*|день|ден[ьёе]\w*)",
+    re.IGNORECASE | re.UNICODE,
+)
 
 # Absolute calendar dates: "1 июня", "2 июня", "15 сентября". The scoping LLM
 # frequently *resolves* a relative reference ("в понедельник", even "завтра")
@@ -228,59 +279,110 @@ def _ampm_to_hm(match: re.Match[str]) -> tuple[int, int] | None:
     return hour, minute
 
 
-def _extract_clock(text: str) -> tuple[int, int] | None:
-    """Return ``(hour, minute)`` if exactly one valid clock time is present.
+def _apply_daypart(hour: int, qual: str | None) -> int | None:
+    """Promote a 1-12 ``hour`` to 24h using a part-of-day qualifier, or ``None``
+    when the result is out of range.
 
-    Conservative: an out-of-range value (hour > 23, minute > 59) yields
-    ``None``; the answerer then clarifies instead of guessing.
+    "утра"/"ночи" (morning/night) keep the hour, mapping 12 → 0 (полночь side);
+    "дня"/"вечера" (afternoon/evening) add 12, leaving 12 as noon.
     """
-    ampm = _AMPM_RE.search(text)
-    if ampm is not None:
-        return _ampm_to_hm(ampm)
-    hm = _HH_MM.search(text)
-    if hm is not None:
-        hour, minute = int(hm.group(1)), int(hm.group(2))
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            return hour, minute
-        return None
-    clock = _HH_CLOCK.search(text)
-    if clock is not None:
-        hour = int(clock.group(1))
-        if 0 <= hour <= 23:
-            return hour, 0
-        return None
+    if qual is not None:
+        q = qual.lower()
+        if q.startswith("утр") or q.startswith("ноч"):
+            hour = 0 if hour == 12 else hour
+        elif q.startswith("дн") or q.startswith("веч"):
+            hour = hour if hour == 12 else hour + 12
+    if 0 <= hour <= 23:
+        return hour
     return None
+
+
+def _scan_clocks(text: str) -> list[tuple[int, int, int, int]]:
+    """Every valid clock time in ``text`` as ``(hour, minute, start, end)``.
+
+    A single scanner shared by :func:`_extract_clock` and
+    :func:`extract_all_clocks`. It recognises (in priority order, so that a
+    higher-priority match wins any character it overlaps): am/pm, the noon/
+    midnight words, the word-or-digit "N часов [дня]" form, the bare
+    "N <part-of-day>" form, and explicit "HH:MM"/"HH.MM". The accepted matches
+    are returned sorted by their position in the text.
+    """
+    groups: list[list[tuple[int, int, int, int]]] = []
+
+    ampm: list[tuple[int, int, int, int]] = []
+    for m in _AMPM_RE.finditer(text):
+        hm = _ampm_to_hm(m)
+        if hm is not None:
+            ampm.append((m.start(), m.end(), hm[0], hm[1]))
+    groups.append(ampm)
+
+    noon: list[tuple[int, int, int, int]] = []
+    for m in _NOON_MIDNIGHT_RE.finditer(text):
+        hour = 12 if m.group("noon") else 0
+        noon.append((m.start(), m.end(), hour, 0))
+    groups.append(noon)
+
+    for regex in (_CLOCK_CHAS_RE, _CLOCK_DAYPART_RE):
+        chas: list[tuple[int, int, int, int]] = []
+        for m in regex.finditer(text):
+            num = m.group("num")
+            qual = m.group("qual")
+            if num is None and qual is None:
+                continue  # a bare "час" is too ambiguous to be a clock
+            base = int(num) if num and num.isdigit() else (
+                _WORD_NUMBERS[num.lower()] if num else 1
+            )
+            hour = _apply_daypart(base, qual)
+            if hour is not None:
+                chas.append((m.start(), m.end(), hour, 0))
+        groups.append(chas)
+
+    hhmm: list[tuple[int, int, int, int]] = []
+    for m in _HH_MM.finditer(text):
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            hhmm.append((m.start(), m.end(), hour, minute))
+    groups.append(hhmm)
+
+    accepted: list[tuple[int, int, int, int]] = []
+    for group in groups:  # priority order
+        for cand in group:
+            if any(
+                not (cand[1] <= a[0] or cand[0] >= a[1]) for a in accepted
+            ):
+                continue  # overlaps an already-accepted, higher-priority match
+            accepted.append(cand)
+    accepted.sort(key=lambda c: (c[0], c[1]))
+    return [(hour, minute, start, end) for (start, end, hour, minute) in accepted]
+
+
+def _extract_clock(text: str) -> tuple[int, int] | None:
+    """Return the ``(hour, minute)`` of the LAST valid clock in ``text``.
+
+    Last-wins (Story 12.69, round-17 R17-2): when a message restates the time
+    ("в 14:00… нет, лучше в 12:00") the corrected, later value is the one used.
+    ``None`` when no valid clock is present, so the answerer clarifies instead
+    of guessing.
+    """
+    clocks = _scan_clocks(text)
+    if not clocks:
+        return None
+    hour, minute, _, _ = clocks[-1]
+    return hour, minute
 
 
 def extract_all_clocks(text: str) -> list[tuple[int, int]]:
     """Every distinct ``(hour, minute)`` clock time in ``text``, in order.
 
-    Covers am/pm ("10am", "2:30pm"), explicit "HH:MM"/"HH.MM", and the Russian
-    "N часов" form. Used by the pitching negotiation (Story 12.51, round-11
-    R11-1) to tell a counter-offered time apart from the bot's own proposal
-    when a follow-up names a bare time ("а давайте тогда в 12:00").
+    Covers am/pm ("10am", "2:30pm"), explicit "HH:MM"/"HH.MM", the Russian
+    "N часов" form, and word-form times ("три часа дня", "полдень"). Used by the
+    pitching negotiation (Story 12.51, round-11 R11-1) to tell a counter-offered
+    time apart from the bot's own proposal when a follow-up names a bare time.
     """
-    found: list[tuple[int, int]] = []
-    chars = list(text)
-    for match in _AMPM_RE.finditer(text):
-        converted = _ampm_to_hm(match)
-        if converted is not None:
-            found.append(converted)
-        for i in range(*match.span()):  # blank in place so HH:MM skips "2:30pm"
-            chars[i] = " "
-    work = "".join(chars)
-    for match in _HH_MM.finditer(work):
-        hour, minute = int(match.group(1)), int(match.group(2))
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            found.append((hour, minute))
-    for match in _HH_CLOCK.finditer(work):
-        hour = int(match.group(1))
-        if 0 <= hour <= 23:
-            found.append((hour, 0))
     distinct: list[tuple[int, int]] = []
-    for clock in found:
-        if clock not in distinct:
-            distinct.append(clock)
+    for hour, minute, _, _ in _scan_clocks(text):
+        if (hour, minute) not in distinct:
+            distinct.append((hour, minute))
     return distinct
 
 
@@ -496,6 +598,58 @@ def _extract_day_offset(
     return None
 
 
+def _extract_relative_offset(text: str, local_now: datetime) -> datetime | None:
+    """Resolve a "через N <unit>" offset against ``local_now``, or ``None``.
+
+    Story 12.70 (round-17 R17-3). Hours/minutes give a full instant
+    (``now + delta``); a day/week offset keeps ``now``'s time-of-day unless the
+    text also names an explicit clock ("через 3 дня в 14:00"). "пол" means half
+    (полчаса → 30 min, полдня → 12 h). An unrecognised count/unit → ``None``.
+    """
+    m = _THROUGH_RE.search(text)
+    if m is None:
+        return None
+    num_raw = m.group("num")
+    unit = m.group("unit").lower()
+    half = num_raw is not None and num_raw.lower() == "пол"
+    if num_raw is None or half:
+        count = 1
+    elif num_raw.isdigit():
+        count = int(num_raw)
+    else:
+        # The regex's number alternation is built from _WORD_NUMBERS, so a
+        # non-digit, non-"пол" match is always a known word.
+        count = _WORD_NUMBERS[num_raw.lower()]
+
+    if unit.startswith("час"):
+        return local_now + (
+            timedelta(minutes=30) if half else timedelta(hours=count)
+        )
+    if unit.startswith("мин"):
+        return local_now + timedelta(minutes=count)
+    if unit.startswith("нед"):
+        target = local_now + timedelta(weeks=count)
+    elif unit.startswith("дн") or unit.startswith("ден"):
+        target = local_now + (timedelta(hours=12) if half else timedelta(days=count))
+    else:  # pragma: no cover - regex only yields the units handled above
+        return None
+
+    # Day/week offset: honour an explicit clock if one is also named, else keep
+    # the current time-of-day.
+    remainder = text[: m.start()] + " " + text[m.end() :]
+    clock = _extract_clock(remainder)
+    if clock is not None:
+        return datetime(
+            target.year,
+            target.month,
+            target.day,
+            clock[0],
+            clock[1],
+            tzinfo=target.tzinfo,
+        )
+    return target
+
+
 def extract_requested_start(
     *,
     text: str,
@@ -519,6 +673,14 @@ def extract_requested_start(
     lemmatizer drops the ``:`` separator.
     """
     local_now = now.astimezone(project_tz)
+
+    # Story 12.70 (round-17 R17-3) — a relative "через N <unit>" offset resolves
+    # to a concrete instant up front; it carries both date and time, so it wins
+    # over the day-anchor + clock path below.
+    relative = _extract_relative_offset(text, local_now)
+    if relative is not None:
+        return relative
+
     lemmas = get_russian_normalizer().lemmas(text)
     offset = _extract_day_offset(lemmas, text, local_now.weekday())
 

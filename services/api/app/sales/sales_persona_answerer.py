@@ -36,6 +36,7 @@ from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.calendar.availability import (
     REASON_DATE_EXCEPTION,
     REASON_IN_PAST,
+    REASON_OUTSIDE_LOOKAHEAD,
     REASON_OUTSIDE_WORKING_HOURS,
     REASON_WRONG_SERVICE_DAY,
 )
@@ -405,28 +406,44 @@ SLOT_BUSY_LINE_EN = "Unfortunately, that time is already taken."
 # Story 12.29 — the availability engine already distinguishes *why* a slot is
 # unavailable; surface that as distinct customer copy instead of mislabeling
 # every unavailable slot "занято" (busy). A 23:00 request is outside working
-# hours, not booked by someone else. Unmapped reasons (plain `busy`, the rare
-# `outside_lookahead`, or `None`) keep SLOT_BUSY_LINE as the safe default.
+# hours, not booked by someone else. Unmapped reasons (plain `busy` or `None`)
+# keep SLOT_BUSY_LINE as the safe default.
 SLOT_OFF_HOURS_LINE = "К сожалению, это время вне рабочих часов."
 SLOT_WRONG_DAY_LINE = "К сожалению, в этот день услуга недоступна."
 SLOT_CLOSED_DATE_LINE = "К сожалению, в этот день мы не работаем."
 SLOT_IN_PAST_LINE = "К сожалению, это время уже прошло."
+# Story 12.71 (round-17 R17-4) — a date past the bookable horizon is "too far
+# ahead", NOT "занято" (taken). Honest copy instead of a false busy verdict.
+SLOT_TOO_FAR_LINE = "К сожалению, так далеко вперёд бронирование пока недоступно."
 SLOT_OFF_HOURS_LINE_EN = "Unfortunately, that time is outside our working hours."
 SLOT_WRONG_DAY_LINE_EN = "Unfortunately, the service isn't available that day."
 SLOT_CLOSED_DATE_LINE_EN = "Unfortunately, we're closed that day."
 SLOT_IN_PAST_LINE_EN = "Unfortunately, that time has already passed."
+SLOT_TOO_FAR_LINE_EN = "Unfortunately, we can't take bookings that far ahead yet."
 _UNAVAILABLE_LEAD_LINES: dict[str, str] = {
     REASON_OUTSIDE_WORKING_HOURS: SLOT_OFF_HOURS_LINE,
     REASON_WRONG_SERVICE_DAY: SLOT_WRONG_DAY_LINE,
     REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE,
     REASON_IN_PAST: SLOT_IN_PAST_LINE,
+    REASON_OUTSIDE_LOOKAHEAD: SLOT_TOO_FAR_LINE,
 }
 _UNAVAILABLE_LEAD_LINES_EN: dict[str, str] = {
     REASON_OUTSIDE_WORKING_HOURS: SLOT_OFF_HOURS_LINE_EN,
     REASON_WRONG_SERVICE_DAY: SLOT_WRONG_DAY_LINE_EN,
     REASON_DATE_EXCEPTION: SLOT_CLOSED_DATE_LINE_EN,
     REASON_IN_PAST: SLOT_IN_PAST_LINE_EN,
+    REASON_OUTSIDE_LOOKAHEAD: SLOT_TOO_FAR_LINE_EN,
 }
+# Story 12.71 (round-17 R17-4) — when a slot is unavailable AND no alternative
+# exists, the verdict is followed by a SINGLE coherent escalation clause — never
+# the booking-confirmation handoff ("передам … на подтверждение"), which would
+# contradict the verdict (a slot can't be both taken and being booked). A human
+# still picks up (the turn escalates), but the copy promises a fitting time, not
+# a confirmation.
+BUSY_NO_SLOT_HANDOFF_TAIL = " Передам ваш запрос коллеге - подберут время."
+BUSY_NO_SLOT_HANDOFF_TAIL_EN = (
+    " I'll pass your request to a colleague to find a time."
+)
 # Story 12.11 - when the customer declines the field just asked ("не нужно",
 # "0", "без водителей"), record this sentinel so the funnel advances instead of
 # re-asking forever. Non-None → satisfies completeness; reads cleanly in the
@@ -2314,9 +2331,11 @@ class SalesPersonaAnswerer:
             slot = _format_alternative_tail(alternative, ctx.language)
             turn_kind = "scoping_complete_busy_alternative"
         else:
-            slot = " " + localize(
-                SCOPING_COMPLETE_HANDOFF_LINE,
-                SCOPING_COMPLETE_HANDOFF_LINE_EN,
+            # Story 12.71 (round-17 R17-4) — a coherent escalation clause, NOT
+            # the booking-confirmation handoff (which contradicts the verdict).
+            slot = localize(
+                BUSY_NO_SLOT_HANDOFF_TAIL,
+                BUSY_NO_SLOT_HANDOFF_TAIL_EN,
                 language=ctx.language,
             )
             turn_kind = "scoping_complete_busy_no_slot"
@@ -4037,6 +4056,8 @@ class SalesPersonaAnswerer:
 
 
 __all__ = [
+    "BUSY_NO_SLOT_HANDOFF_TAIL",
+    "BUSY_NO_SLOT_HANDOFF_TAIL_EN",
     "CLOSING_HANDOFF_LINE",
     "EMPTY_CATALOG_ESCALATION_LINE",
     "EQUIPMENT_ACK_LINE",
@@ -4060,6 +4081,7 @@ __all__ = [
     "SCOPING_COMPLETE_HANDOFF_LINE",
     "SLOT_BUSY_LINE",
     "SLOT_FREE_HANDOFF_LINE",
+    "SLOT_TOO_FAR_LINE",
     "STAGE_AWAITING_OPERATOR_PRICE",
     "STAGE_CLOSING",
     "STAGE_PITCHING",

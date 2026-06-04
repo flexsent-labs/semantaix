@@ -38,6 +38,14 @@ STATUS_UNAVAILABLE = "unavailable"
 STATUS_NOT_CONNECTED = "not_connected"
 STATUS_ERROR = "error"
 
+# Story 12.71 (round-17 R17-4) — the generic ``lookahead_days`` bounds the
+# "find me a slot" scan; it must NOT make a customer's *specifically named*
+# future date read as "busy". When the requested date sits beyond the generic
+# horizon we widen the freebusy window (and the availability horizon) to cover
+# it, up to this defensive cap so a "1 января 2099" can't ask the backend for a
+# decades-long window. Beyond the cap the slot stays ``outside_lookahead``.
+_REQUESTED_LOOKAHEAD_CAP_DAYS = 400
+
 ERROR_RECONNECT_NEEDED = "reconnect_needed"
 ERROR_TOKEN_NOT_FOUND = "token_not_found"
 ERROR_PROVIDER_ERROR = "provider_error"
@@ -107,6 +115,17 @@ async def check_requested_availability(
     ):
         return RequestedAvailability(status=STATUS_NOT_CONNECTED)
 
+    # Widen the effective horizon to cover a specifically-named far-future date
+    # (Story 12.71, R17-4), capped so the freebusy query window stays bounded.
+    days_to_requested = (
+        requested_start.astimezone(project_tz).date()
+        - now.astimezone(project_tz).date()
+    ).days
+    effective_lookahead = max(
+        lookahead_days,
+        min(days_to_requested + 1, _REQUESTED_LOOKAHEAD_CAP_DAYS),
+    )
+
     try:
         access_token = await token_provider.get_access_token(
             project_id,
@@ -115,7 +134,7 @@ async def check_requested_availability(
             trace_id=trace_id,
         )
         time_min = now
-        time_max = now + timedelta(days=lookahead_days)
+        time_max = now + timedelta(days=effective_lookahead)
         free_busy = await freebusy_client.query_busy(
             access_token=access_token,
             time_min=time_min,
@@ -137,7 +156,7 @@ async def check_requested_availability(
 
     parsed_rule = parse_service_rule(
         service_rule,
-        lookahead_days=lookahead_days,
+        lookahead_days=effective_lookahead,
         country_code=country_code,
     )
     result = compute_availability(
@@ -161,7 +180,9 @@ async def check_requested_availability(
 
     # Unavailable — offer the nearest free slot from the requested day forward.
     requested_date = requested_start.astimezone(project_tz).date()
-    horizon_date = (now.astimezone(project_tz) + timedelta(days=lookahead_days)).date()
+    horizon_date = (
+        now.astimezone(project_tz) + timedelta(days=effective_lookahead)
+    ).date()
     alternative = find_earliest_slot(
         now=now,
         window=(requested_date, horizon_date),

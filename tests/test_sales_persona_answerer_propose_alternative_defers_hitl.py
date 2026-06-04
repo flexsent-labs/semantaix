@@ -39,6 +39,7 @@ from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
+    BUSY_NO_SLOT_HANDOFF_TAIL,
     MATERIAL_DISPATCH_FALLBACK_LINE,
     PITCHING_ACCEPT_CONFIRM_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
@@ -279,7 +280,10 @@ async def test_busy_no_alternative_still_escalates() -> None:
     )
     text = result.text or ""
     assert SLOT_BUSY_LINE in text
-    assert SCOPING_COMPLETE_HANDOFF_LINE in text
+    # Story 12.71 (round-17 R17-4) — coherent escalation clause, not the
+    # contradictory booking-confirmation handoff.
+    assert text == SLOT_BUSY_LINE + BUSY_NO_SLOT_HANDOFF_TAIL
+    assert SCOPING_COMPLETE_HANDOFF_LINE not in text
     assert result.response_mode == "sales_escalation"
     assert result.metadata["escalate"] is True
     assert result.metadata["hitl_reason"] == "sales_scoping_complete"

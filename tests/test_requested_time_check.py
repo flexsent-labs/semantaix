@@ -169,3 +169,79 @@ async def test_provider_error_is_error() -> None:
     )
     assert result.status == "error"
     assert result.reason == "provider_error"
+
+
+# --- Story 12.71 (round-17 R17-4): a specifically-named future date beyond the
+# generic lookahead is still verified against the calendar (the lookahead bounds
+# the "find me a slot" scan, not an explicit "is THIS date free?" check). ------
+
+
+class _RecordingFreeBusy:
+    """Captures the query window so we can assert it covers the requested date."""
+
+    def __init__(self, *, busy: tuple[BusyInterval, ...] = ()) -> None:
+        self._busy = busy
+        self.time_min: datetime | None = None
+        self.time_max: datetime | None = None
+
+    async def query_busy(
+        self, *, access_token, time_min, time_max, trace_id, calendar_id="primary"
+    ) -> FreeBusy:
+        self.time_min = time_min
+        self.time_max = time_max
+        return FreeBusy(calendar_id="primary", busy=self._busy)
+
+
+async def _check_at(requested_start, *, freebusy, lookahead_days=60):
+    return await check_requested_availability(
+        project_id=1,
+        requested_start=requested_start,
+        operator="@op",
+        operator_chat_id=42,
+        service_rule=_rule(),
+        token_provider=_TokenProvider(),
+        freebusy_client=freebusy,
+        now=_NOW,
+        project_tz=_TZ,
+        lookahead_days=lookahead_days,
+        country_code="RU",
+        trace_id="t-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_far_future_free_date_is_available() -> None:
+    # 15 Dec 2026 is ~200 days past _NOW (29 May) — beyond the 60-day lookahead,
+    # but with no events it must read FREE, not a false "busy".
+    requested = datetime(2026, 12, 15, 14, 0, tzinfo=_TZ)
+    fb = _RecordingFreeBusy()
+    result = await _check_at(requested, freebusy=fb)
+    assert result == RequestedAvailability(status="available", reason=None)
+    # The freebusy window was extended to actually cover the requested instant.
+    assert fb.time_max is not None and fb.time_max >= requested
+
+
+@pytest.mark.asyncio
+async def test_far_future_busy_date_offers_same_day_alternative() -> None:
+    requested = datetime(2026, 12, 15, 14, 0, tzinfo=_TZ)
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 12, 15, 13, 30, tzinfo=_TZ),
+            end=datetime(2026, 12, 15, 15, 0, tzinfo=_TZ),
+        ),
+    )
+    result = await _check_at(requested, freebusy=_FreeBusy(busy=busy))
+    assert result.status == "unavailable"
+    assert result.reason == "busy"
+    assert result.alternative == datetime(2026, 12, 15, 9, 0, tzinfo=_TZ)
+
+
+@pytest.mark.asyncio
+async def test_beyond_safety_cap_stays_outside_lookahead() -> None:
+    # A date past the ~400-day safety cap is still declined as outside the
+    # bookable horizon (reason outside_lookahead) — never a false "busy".
+    requested = datetime(2027, 12, 15, 14, 0, tzinfo=_TZ)  # ~1.5 years out
+    result = await _check_at(requested, freebusy=_FreeBusy())
+    assert result.status == "unavailable"
+    assert result.reason == "outside_lookahead"
+    assert result.alternative is None

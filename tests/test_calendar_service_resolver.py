@@ -606,3 +606,197 @@ def test_names_invalid_date_helper() -> None:
     assert names_invalid_date("31.06 в 14:00", now=_NOW, project_tz=MOSCOW)
     assert not names_invalid_date("в 14.30", now=_NOW, project_tz=MOSCOW)
     assert not names_invalid_date("30 июня в 14:00", now=_NOW, project_tz=MOSCOW)
+
+
+# --- Story 12.68 (round-17 R17-1): word-form / colloquial precise times -------
+# «в полдень» / «в три часа дня» / «в девять утра» are precise times in words and
+# must resolve to a concrete HH:MM, then run the normal availability check. This
+# is distinct from R14-1's genuinely vague windows ("во второй половине дня").
+
+
+def test_word_form_noon_resolves() -> None:
+    r = extract_requested_start(text="завтра в полдень", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 12, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_midnight_resolves() -> None:
+    r = extract_requested_start(text="завтра в полночь", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 0, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_three_pm_resolves() -> None:
+    # «в три часа дня» → 15:00 (the day-part qualifier promotes 3 → 15).
+    r = extract_requested_start(
+        text="завтра в три часа дня", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 15, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_nine_am_resolves() -> None:
+    # «в девять утра» → 09:00 (no «час» word — the day-part anchors it).
+    r = extract_requested_start(
+        text="завтра в девять утра", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 9, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_seven_pm_resolves() -> None:
+    r = extract_requested_start(
+        text="завтра в семь вечера", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 19, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_one_pm_chas_dnya() -> None:
+    # «в час дня» → 13:00 (bare «час» means one o'clock; «дня» promotes it).
+    r = extract_requested_start(text="завтра в час дня", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 13, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_bare_hour_no_qualifier() -> None:
+    # «в три часа» with no part-of-day mirrors the digit «в 3 часа» → 03:00.
+    r = extract_requested_start(
+        text="завтра в три часа", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 3, 0, tzinfo=MOSCOW)
+
+
+def test_word_form_midnight_twelve_noch() -> None:
+    # «двенадцать ночи» → 00:00 (12 at night is midnight, not noon).
+    r = extract_requested_start(
+        text="завтра в двенадцать ночи", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 0, 0, tzinfo=MOSCOW)
+
+
+def test_cardinal_without_chas_or_daypart_not_a_time() -> None:
+    # A bare cardinal that is a headcount, not a clock — declines (no «час», no
+    # day-part). Prevents «нас пятеро»/«пять человек» from being read as 05:00.
+    assert (
+        extract_requested_start(
+            text="завтра, пять человек", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_bare_chas_word_alone_is_not_a_time() -> None:
+    # A lone «час» (no number, no day-part) is ambiguous (often "an hour") — the
+    # parser declines rather than guessing 01:00.
+    assert (
+        extract_requested_start(text="завтра час", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_extract_all_clocks_includes_word_forms() -> None:
+    # The shared clock scanner now sees word-form times too, in text order.
+    assert extract_all_clocks("в два часа дня или в полдень") == [(14, 0), (12, 0)]
+
+
+def test_extract_all_clocks_ampm_overlapping_hhmm_not_double_counted() -> None:
+    # "2:30 pm" is a single time (14:30): the higher-priority am/pm match wins and
+    # the overlapping bare "2:30" is dropped, not counted as a second clock.
+    assert extract_all_clocks("давайте в 2:30 pm") == [(14, 30)]
+
+
+# --- Story 12.69 (round-17 R17-2): in-message self-correction (last wins) -----
+# When a single message restates the time ("X… нет, лучше Y"), the LAST value
+# must win so the verdict reflects the corrected slot.
+
+
+def test_self_correction_last_time_wins() -> None:
+    r = extract_requested_start(
+        text="9 июня в 14:00, хотя нет, лучше в 12:00",
+        now=_NOW,
+        project_tz=MOSCOW,
+    )
+    assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
+
+
+def test_self_correction_word_form_last_wins() -> None:
+    r = extract_requested_start(
+        text="завтра в два часа дня, нет, лучше в четыре часа дня",
+        now=_NOW,
+        project_tz=MOSCOW,
+    )
+    assert r == datetime(2026, 6, 6, 16, 0, tzinfo=MOSCOW)
+
+
+def test_single_time_unaffected_by_last_wins() -> None:
+    # A message with one time still resolves to that time (no regression).
+    r = extract_requested_start(text="завтра в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
+
+
+# --- Story 12.70 (round-17 R17-3): relative offsets («через N часов») ----------
+# «через два часа» resolves against "now" to a concrete datetime and runs the
+# normal busy check, instead of falling through to a generic handoff.
+
+
+def test_relative_offset_two_hours_word() -> None:
+    # _NOW = 5 June 12:00 → +2h = 14:00 same day.
+    r = extract_requested_start(
+        text="через два часа на багги", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 5, 14, 0, tzinfo=MOSCOW)
+
+
+def test_relative_offset_one_hour_implicit() -> None:
+    r = extract_requested_start(text="можно через час?", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 5, 13, 0, tzinfo=MOSCOW)
+
+
+def test_relative_offset_minutes_digit() -> None:
+    r = extract_requested_start(text="через 30 минут", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 5, 12, 30, tzinfo=MOSCOW)
+
+
+def test_relative_offset_half_hour() -> None:
+    r = extract_requested_start(text="через полчаса", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 5, 12, 30, tzinfo=MOSCOW)
+
+
+def test_relative_offset_three_days() -> None:
+    # «через 3 дня» → +3 days, same time of day.
+    r = extract_requested_start(text="через 3 дня", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 8, 12, 0, tzinfo=MOSCOW)
+
+
+def test_relative_offset_three_days_with_explicit_clock() -> None:
+    # A day offset that also names a clock keeps the named time, not "now"'s.
+    r = extract_requested_start(
+        text="через 3 дня в 14:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 8, 14, 0, tzinfo=MOSCOW)
+
+
+def test_relative_offset_one_day_word() -> None:
+    # «через день» → +1 day.
+    r = extract_requested_start(text="через день", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 12, 0, tzinfo=MOSCOW)
+
+
+def test_relative_offset_week() -> None:
+    # «через неделю» → +7 days.
+    r = extract_requested_start(text="через неделю", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 12, 12, 0, tzinfo=MOSCOW)
+
+
+def test_relative_offset_unknown_unit_is_none() -> None:
+    # «через дорогу» (across the road) carries no time unit → no datetime.
+    assert (
+        extract_requested_start(text="через дорогу", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+def test_relative_offset_word_number_out_of_map_is_none() -> None:
+    # A number word outside the small word→int grammar isn't recognised, so the
+    # whole "через …" offset fails to match and the parser declines.
+    assert (
+        extract_requested_start(
+            text="через сто часов", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )

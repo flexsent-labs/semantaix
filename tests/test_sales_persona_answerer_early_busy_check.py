@@ -34,6 +34,8 @@ from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     _RETURNING_NO_GREETING_DIRECTIVE,
     ASK_FOR_TIME_LINE,
+    BUSY_NO_SLOT_HANDOFF_TAIL,
+    BUSY_NO_SLOT_HANDOFF_TAIL_EN,
     CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
     GRATITUDE_ACK_LINE,
@@ -47,6 +49,7 @@ from services.api.app.sales.sales_persona_answerer import (
     SLOT_BUSY_LINE,
     SLOT_FREE_HANDOFF_LINE,
     SLOT_FREE_INQUIRY_LINE,
+    SLOT_TOO_FAR_LINE,
     STAGE_CLOSING,
     STAGE_NEW,
     STAGE_PITCHING,
@@ -324,13 +327,74 @@ async def test_greeting_busy_no_alternative_escalates_immediately() -> None:
         question="хочу забронировать багги завтра в 14:00", ctx=_ctx()
     )
     text = result.text or ""
+    # Story 12.71 (round-17 R17-4) — busy + no alternative is ONE coherent
+    # message: the busy verdict + a colleague-will-find-a-time clause. It must
+    # NOT merge the booking-confirmation handoff ("передам … на подтверждение"),
+    # which would contradict "занято".
     assert SLOT_BUSY_LINE in text
-    assert SCOPING_COMPLETE_HANDOFF_LINE in text
+    assert text == SLOT_BUSY_LINE + BUSY_NO_SLOT_HANDOFF_TAIL
+    assert SCOPING_COMPLETE_HANDOFF_LINE not in text
+    assert "на подтверждение" not in text
     assert "Ближайшее свободное время" not in text
     assert result.response_mode == RESPONSE_MODE_SALES_ESCALATION
     assert result.metadata["escalate"] is True
     assert result.metadata["hitl_reason"] == HITL_REASON_SCOPING_COMPLETE
     assert result.metadata["stage_after"] == STAGE_PITCHING
+
+
+@pytest.mark.asyncio
+async def test_greeting_busy_no_alternative_en_coherent_tail() -> None:
+    # The same coherent (non-contradictory) copy in English.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "tomorrow at 2pm"},
+            "next_question": "How many people?",
+        }
+    )
+    answerer, _state_repo, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_whole_window()),
+    )
+    result = await answerer.try_answer(
+        question="I want to book a buggy tomorrow at 2pm", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert text.endswith(BUSY_NO_SLOT_HANDOFF_TAIL_EN)
+    assert SCOPING_COMPLETE_HANDOFF_LINE_EN not in text
+
+
+@pytest.mark.asyncio
+async def test_far_future_free_booking_is_not_falsely_busy() -> None:
+    # Story 12.71 (round-17 R17-4) — «15 декабря» (≈200 days out, no events) is
+    # FREE: the early busy-intercept stays silent and the funnel proceeds. With
+    # the old 60-day window it falsely reported "занято".
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "15 декабря в 14:00"},
+            "next_question": "Сколько человек поедет?",
+        }
+    )
+    answerer, _state_repo, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="можно 15 декабря в 14:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE not in text
+    assert SLOT_TOO_FAR_LINE not in text
+    assert text == "Сколько человек поедет?"
+    assert result.metadata["stage_after"] == STAGE_SCOPING
+    assert freebusy.calls == 1
 
 
 # --- AC 3 -------------------------------------------------------------------
