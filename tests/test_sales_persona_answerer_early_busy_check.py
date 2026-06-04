@@ -26,6 +26,7 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.calendar.access_token_cache import CalendarReconnectNeeded
 from services.api.app.calendar.calendar_client import BusyInterval, FreeBusy
+from services.api.app.calendar.service_resolver import names_invalid_date
 from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
@@ -35,8 +36,10 @@ from services.api.app.sales.sales_persona_answerer import (
     ASK_FOR_TIME_LINE,
     CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
+    GRATITUDE_ACK_LINE,
     HITL_REASON_CAPACITY,
     HITL_REASON_SCOPING_COMPLETE,
+    INVALID_DATE_CLARIFY_LINE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
     RESPONSE_MODE_SALES_ESCALATION,
     SCOPING_COMPLETE_HANDOFF_LINE,
@@ -56,6 +59,8 @@ from services.api.app.sales.sales_persona_answerer import (
     detect_vague_window,
     is_availability_inquiry,
     is_capacity_question,
+    is_eligibility_question,
+    is_gratitude,
 )
 
 _NOW = datetime(2026, 5, 29, 9, 0, tzinfo=UTC)  # 12:00 Moscow, Fri 29 May
@@ -1557,3 +1562,237 @@ async def test_capacity_question_without_headcount_escalates() -> None:
         question="Сколько багги нужно для поездки?", ctx=_ctx()
     )
     assert result.text == CAPACITY_ESCALATION_LINE
+
+
+# --- Round-16: invalid date (R16-1), gratitude (R16-4), eligibility (R16-3), multi-date (R16-2)
+
+
+def test_names_invalid_date_flags_impossible_only() -> None:
+    tz = ZoneInfo("Europe/Moscow")
+    now = datetime(2026, 6, 4, 9, 0, tzinfo=tz)
+
+    def inv(t: str) -> bool:
+        return names_invalid_date(t, now=now, project_tz=tz)
+
+    assert inv("Можно записаться 31 июня в 14:00 на багги?")
+    assert inv("31.06 в 14:00")
+    assert inv("30 февраля в 10:00")
+    assert not inv("5 июня в 14:00")  # valid
+    assert not inv("завтра в 14.30")  # HH.MM clock, not a date
+    assert not inv("31 мая в 14:00")  # May has 31 days
+
+
+@pytest.mark.asyncio
+async def test_invalid_date_clarifies_not_handoff() -> None:
+    answerer, _s, openrouter, freebusy = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="Можно записаться 31 июня в 14:00 на багги, нас двое?", ctx=_ctx()
+    )
+    assert result.text == INVALID_DATE_CLARIFY_LINE
+    assert "передам" not in (result.text or "").lower()  # not a booking handoff
+    assert openrouter.calls == []  # deterministic, no LLM
+
+
+def test_is_gratitude_pure_thanks_only() -> None:
+    assert is_gratitude("Спасибо большое, вы очень помогли!")
+    assert is_gratitude("спасибо")
+    assert not is_gratitude("всё, спасибо")  # decline → closure, not chit-chat
+    assert not is_gratitude("нет, спасибо")
+    assert not is_gratitude("А завтра свободно?")
+
+
+@pytest.mark.asyncio
+async def test_gratitude_gets_ack_not_handoff() -> None:
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="Спасибо большое, вы очень помогли!", ctx=_ctx()
+    )
+    assert result.text == GRATITUDE_ACK_LINE
+    assert result.metadata.get("escalate") is not True
+    assert openrouter.calls == []
+
+
+def test_is_eligibility_question_matches_policy_questions() -> None:
+    assert is_eligibility_question("А можно кататься на багги с ребёнком 5 лет?")
+    assert is_eligibility_question("Нужны ли права на багги?")
+    assert not is_eligibility_question("Запишите багги завтра в 14:00, нас двое")
+    assert not is_eligibility_question("А в 16:30 свободно?")
+
+
+@pytest.mark.asyncio
+async def test_eligibility_no_policy_defers_not_handoff() -> None:
+    # No RAG policy → _answer_concept_via_rag escalates as unknown (handled=False),
+    # so the inbound defers to a human — NOT a booking handoff.
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="А можно кататься на багги с ребёнком 5 лет?", ctx=_ctx()
+    )
+    assert result.handled is False
+    assert result.metadata.get("skip_reason") == "concept_unknown"
+
+
+@pytest.mark.asyncio
+async def test_eligibility_grounded_when_policy_in_catalog() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"text": "Да, с детьми от 7 лет можно."})
+    answerer = SalesPersonaAnswerer(
+        state_repo=_FakeStateRepo(initial=None),
+        services_repo=_NoOpServicesRepo(),
+        openrouter=openrouter,
+        normalizer=get_russian_normalizer(),
+        clock=lambda: _NOW,
+        bot_persona_getter=lambda: "Анна",
+        rag_retriever=_StubRag(
+            [RagChunk(id=1, source_id="kb", chunk_text="Дети допускаются с 7 лет.", score=0.95)]
+        ),
+        grounding_threshold_getter=lambda: 0.6,
+        calendar_settings_repo=_FakeCalSettings(),
+        calendar_token_provider=_TokenProvider(),
+        calendar_freebusy_client=_FreeBusy(),
+        operator_chat_resolver=lambda op: 42,
+    )
+    result = await answerer.try_answer(
+        question="Можно с ребёнком 5 лет?", ctx=_ctx()
+    )
+    assert result.text == "Да, с детьми от 7 лет можно."  # grounded from the catalog
+
+
+@pytest.mark.asyncio
+async def test_multi_date_gives_per_day_verdict() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # both days free
+    )
+    result = await answerer.try_answer(
+        question="Можно в субботу или в воскресенье в 12:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "30 мая" in text and "31 мая" in text  # both candidate days named
+    assert "свободно" in text
+    assert "Какой день" in text
+    assert result.metadata.get("escalate") is not True
+
+
+@pytest.mark.asyncio
+async def test_multi_date_one_busy_one_free() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),  # 30 May 12:00 busy, 31 May free
+    )
+    result = await answerer.try_answer(
+        question="Можно в субботу или в воскресенье в 12:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "занято" in text and "свободно" in text
+
+
+@pytest.mark.asyncio
+async def test_multi_date_no_time_falls_through() -> None:
+    # «или» but no clock → not a multi-date verdict (slot-fill flow handles it).
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "Во сколько?"})
+    answerer, _s, _, _ = _build(
+        state=None, openrouter=openrouter, cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+    )
+    result = await answerer.try_answer(
+        question="Можно в субботу или в воскресенье на багги?", ctx=_ctx()
+    )
+    assert "Какой день" not in (result.text or "")  # no per-day verdict without a time
+
+
+@pytest.mark.asyncio
+async def test_multi_date_mid_scoping_per_day_verdict() -> None:
+    # Covers the scoping-stage multi-date hook.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=_scoping_state(intent=Intent(headcount=2)),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="Можно в субботу или в воскресенье в 12:00 на багги?", ctx=_ctx()
+    )
+    assert "Какой день" in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_multi_date_calendar_disabled_falls_through() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(enabled=False),  # cal context is None
+        token_provider=_TokenProvider(),
+    )
+    result = await answerer.try_answer(
+        question="Можно в субботу или в воскресенье в 12:00 на багги?", ctx=_ctx()
+    )
+    assert "Какой день" not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_multi_date_single_date_falls_through() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 12:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    # «или» present but only one parseable date → not a multi-date verdict.
+    result = await answerer.try_answer(
+        question="Можно в субботу или попозже в 12:00 на багги?", ctx=_ctx()
+    )
+    assert "Какой день" not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_multi_date_unverifiable_falls_through() -> None:
+    # Calendar can't verify (reconnect needed) → no per-day verdict.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_RaisingTokenProvider(),  # → STATUS_NOT_CONNECTED
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="Можно в субботу или в воскресенье в 12:00 на багги?", ctx=_ctx()
+    )
+    assert "Какой день" not in (result.text or "")
