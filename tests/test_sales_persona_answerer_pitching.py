@@ -24,6 +24,7 @@ from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     ASK_FOR_TIME_LINE,
     ASK_FOR_TIME_ONLY_LINE,
+    BUSY_NO_SLOT_HANDOFF_TAIL,
     MATERIAL_DISPATCH_FALLBACK_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SLOT_BUSY_LINE,
@@ -243,7 +244,10 @@ async def test_requested_time_unavailable_no_alternative_hands_off() -> None:
     text = result.text or ""
     assert SLOT_WRONG_DAY_LINE in text
     assert SLOT_BUSY_LINE not in text
-    assert SCOPING_COMPLETE_HANDOFF_LINE in text
+    # Story 12.71 (round-17 R17-4) — reason lead + a coherent escalation clause,
+    # never the contradictory booking-confirmation handoff.
+    assert text == SLOT_WRONG_DAY_LINE + BUSY_NO_SLOT_HANDOFF_TAIL
+    assert SCOPING_COMPLETE_HANDOFF_LINE not in text
     assert result.metadata["sales_turn_kind"] == "scoping_complete_busy_no_slot"
     # Story 12.22 — the no-alternative path keeps escalating: the customer
     # has nothing to accept, so a human picks up immediately.
