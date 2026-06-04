@@ -27,10 +27,12 @@ from services.api.app.answerers import AnswerContext
 from services.api.app.calendar.access_token_cache import CalendarReconnectNeeded
 from services.api.app.calendar.calendar_client import BusyInterval, FreeBusy
 from services.api.app.calendar.settings_repository import ServiceRule
+from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import (
     _RETURNING_NO_GREETING_DIRECTIVE,
+    ASK_FOR_TIME_LINE,
     CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
     HITL_REASON_CAPACITY,
@@ -48,6 +50,8 @@ from services.api.app.sales.sales_persona_answerer import (
     STAGE_PRICING,
     STAGE_SCOPING,
     SalesPersonaAnswerer,
+    _parse_buggy_seats,
+    _parse_headcount,
     _strip_leading_greeting,
     detect_vague_window,
     is_availability_inquiry,
@@ -1382,3 +1386,174 @@ async def test_vague_window_fully_busy_falls_back_to_nearest_free() -> None:
         merged_intent=Intent(dates="завтра"), stage_before=STAGE_SCOPING,
     )
     assert r is not None and "09:00" in (r.text or "")  # morning fallback
+
+
+# --- Round-15: vague-window on complete (12.61), preserve date (12.62), capacity derive (12.63)
+
+
+class _StubRag:
+    def __init__(self, chunks: list[RagChunk]) -> None:
+        self._chunks = chunks
+
+    def retrieve(self, *, query: str, limit: int = 3, project_id=None) -> list[RagChunk]:
+        return list(self._chunks)
+
+
+def _complete_scoping_state() -> dict[str, Any]:
+    intent = Intent(headcount=2, vehicle_count=1, difficulty="новичок", drivers="сами")
+    return {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_SCOPING,
+        "collected_intent": intent.to_dict(),
+        "last_proposal": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_booking_vague_window_proposes_slot() -> None:
+    # Story 12.61 — a vague time on an ALREADY-COMPLETE booking proposes a
+    # concrete window slot, not the generic ask-for-time.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра во второй половине дня"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=_complete_scoping_state(),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # afternoon free
+    )
+    result = await answerer.try_answer(
+        question="Хотим завтра во второй половине дня", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "Да, есть свободное время" in text  # window-propose, not the bland ask
+    assert text != ASK_FOR_TIME_LINE
+
+
+@pytest.mark.asyncio
+async def test_awaiting_time_bare_time_preserves_prior_date() -> None:
+    # Story 12.62 — after asking only for the time (date known), a bare-time
+    # reply must re-attach the prior date so the slot check still runs.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "в 14:00"}, "next_question": "ок"}
+    )
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": "awaiting_time",
+        "collected_intent": Intent(dates="завтра", headcount=2).to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, _, freebusy = _build(
+        state=state,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=_busy_blocks_tomorrow_14()),  # завтра 14:00 busy
+    )
+    result = await answerer.try_answer(question="в 14:00", ctx=_ctx())
+    # The date «завтра» was preserved + combined with 14:00 → busy verdict
+    # (without preservation, "в 14:00" alone is unparseable → a blind handoff).
+    assert SLOT_BUSY_LINE in (result.text or "")
+    assert freebusy.calls == 1
+
+
+def test_parse_headcount_words_and_digits() -> None:
+    assert _parse_headcount("Нас восемь человек") == 8
+    assert _parse_headcount("Нас 12 человек") == 12
+    assert _parse_headcount("нас двое") == 2
+    assert _parse_headcount("просто вопрос") is None
+
+
+def test_parse_buggy_seats_is_buggy_specific() -> None:
+    assert _parse_buggy_seats("Багги - до 4 человек, Ивановский водопад") == 4
+    assert _parse_buggy_seats("4 человека на одну багги") == 4
+    # A quadbike capacity must NOT be read as buggy capacity.
+    assert _parse_buggy_seats("3 командных квадроцикла (2 по 2 чел.)") is None
+    assert _parse_buggy_seats("Багги Yamaha Viking 700") is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_derived_from_catalog_seats() -> None:
+    # Story 12.63 — with a buggy capacity in the catalog, derive the count.
+    answerer = SalesPersonaAnswerer(
+        state_repo=_FakeStateRepo(initial=None),
+        services_repo=_NoOpServicesRepo(),
+        openrouter=_FakeOpenRouter(),
+        normalizer=get_russian_normalizer(),
+        clock=lambda: _NOW,
+        bot_persona_getter=lambda: "Анна",
+        rag_retriever=_StubRag(
+            [RagChunk(id=1, source_id="kb", chunk_text="Багги - до 4 человек", score=0.9)]
+        ),
+        calendar_settings_repo=_FakeCalSettings(),
+        calendar_token_provider=_TokenProvider(),
+        calendar_freebusy_client=_FreeBusy(),
+        operator_chat_resolver=lambda op: 42,
+    )
+    result = await answerer.try_answer(
+        question="Нас восемь человек, сколько багги нам понадобится?", ctx=_ctx()
+    )
+    assert result.text == "На 8 человек понадобится примерно 2 багги."  # ceil(8/4)
+    assert result.metadata.get("escalate") is not True  # answered, not escalated
+
+
+@pytest.mark.asyncio
+async def test_capacity_no_catalog_data_escalates() -> None:
+    # No RAG / no buggy capacity → fall back to the HITL escalation.
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="Нас восемь человек, сколько багги нам понадобится?", ctx=_ctx()
+    )
+    assert result.text == CAPACITY_ESCALATION_LINE
+    assert result.metadata.get("hitl_reason") == HITL_REASON_CAPACITY
+
+
+@pytest.mark.asyncio
+async def test_capacity_catalog_without_buggy_capacity_escalates() -> None:
+    # RAG present but no buggy-capacity chunk → no derivation → HITL escalation.
+    answerer = SalesPersonaAnswerer(
+        state_repo=_FakeStateRepo(initial=None),
+        services_repo=_NoOpServicesRepo(),
+        openrouter=_FakeOpenRouter(),
+        normalizer=get_russian_normalizer(),
+        clock=lambda: _NOW,
+        bot_persona_getter=lambda: "Анна",
+        rag_retriever=_StubRag(
+            [RagChunk(id=1, source_id="kb", chunk_text="Квадроцикл - 2 чел.", score=0.9)]
+        ),
+        calendar_settings_repo=_FakeCalSettings(),
+        calendar_token_provider=_TokenProvider(),
+        calendar_freebusy_client=_FreeBusy(),
+        operator_chat_resolver=lambda op: 42,
+    )
+    result = await answerer.try_answer(
+        question="Нас 8 человек, сколько багги нужно?", ctx=_ctx()
+    )
+    assert result.text == CAPACITY_ESCALATION_LINE  # derivation found no buggy seats
+    assert result.metadata.get("hitl_reason") == HITL_REASON_CAPACITY
+
+
+def test_preserve_prior_date_noop_when_no_prior_date() -> None:
+    # A bare-time reply with no prior date to attach → returned unchanged.
+    answerer, _s, _, _ = _build(state=None)
+    merged = answerer._preserve_prior_date(
+        merged=Intent(dates="в 14:00"),
+        state={"collected_intent": Intent(dates=None).to_dict()},
+        ctx=_ctx(),
+    )
+    assert merged.dates == "в 14:00"
+
+
+@pytest.mark.asyncio
+async def test_capacity_question_without_headcount_escalates() -> None:
+    # A capacity question with no parseable headcount → can't derive → HITL.
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="Сколько багги нужно для поездки?", ctx=_ctx()
+    )
+    assert result.text == CAPACITY_ESCALATION_LINE

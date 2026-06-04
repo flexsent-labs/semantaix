@@ -197,6 +197,51 @@ def is_capacity_question(question: str) -> bool:
     return bool(_CAPACITY_QUESTION_RE.search(question))
 
 
+# Story 12.63 (round-15) — derive a buggy-count recommendation from catalog
+# capacity when present, else escalate. Headcount from digits or a small set of
+# Russian numerals/collectives; seats-per-buggy parsed BUGGY-specifically from
+# the RAG so a quadbike figure («2 чел. на квадрике») never leaks in.
+_RU_HEADCOUNT_WORDS: dict[str, int] = {
+    "один": 1, "одного": 1,
+    "два": 2, "две": 2, "двое": 2, "двоих": 2, "вдвоём": 2, "вдвоем": 2,
+    "три": 3, "трое": 3, "троих": 3, "втроём": 3, "втроем": 3,
+    "четыре": 4, "четверо": 4, "четверых": 4, "вчетвером": 4,
+    "пять": 5, "пятеро": 5, "пятерых": 5, "впятером": 5,
+    "шесть": 6, "шестеро": 6, "семь": 7, "семеро": 7,
+    "восемь": 8, "восьмеро": 8, "девять": 9, "десять": 10,
+    "одиннадцать": 11, "двенадцать": 12,
+}
+_BUGGY_CAPACITY_RE = re.compile(
+    r"багг\w*[^.\n]{0,40}?(\d+)\s*(?:чел|человек|мест|пассажир)"
+    r"|(\d+)\s*(?:чел|человек|мест|пассажир)[^.\n]{0,40}?багг",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _parse_headcount(text: str) -> int | None:
+    """Headcount from a digit or a Russian numeral/collective («восемь», «двое»)."""
+    digits = _parse_count(text)
+    if digits is not None:
+        return digits
+    low = text.lower()
+    for word, value in _RU_HEADCOUNT_WORDS.items():
+        if re.search(rf"\b{word}\b", low):
+            return value
+    return None
+
+
+def _parse_buggy_seats(text: str) -> int | None:
+    """Seats-per-buggy from a catalog chunk that states it («Багги — до 4
+    человек»). BUGGY-specific (requires «багг» beside the number), so a quadbike
+    capacity never matches. ``None`` when the chunk states no buggy capacity."""
+    match = _BUGGY_CAPACITY_RE.search(text)
+    if match is None:
+        return None
+    # One alternative matched, so its `\d+` group is a digit string.
+    seats = int(match.group(1) or match.group(2))
+    return seats if seats > 0 else None
+
+
 # Story 12.58 (round-14) — an availability INQUIRY («свободно ли?», «занято?»)
 # vs a booking REQUEST. An inquiry that doesn't carry a booking-commit verb is
 # answered with a plain verdict and never escalates / opens a HITL ticket.
@@ -347,6 +392,15 @@ ASK_FOR_TIME_LINE = (
 ASK_FOR_TIME_LINE_EN = (
     "Could you let me know the desired date and time? "
     "I'll check the calendar and confirm."
+)
+# Story 12.62 (round-15) — when the DATE is already known, ask only for the
+# time (the date is re-attached deterministically on the reply, so it isn't
+# lost to the intent_merge replace).
+ASK_FOR_TIME_ONLY_LINE = (
+    "Уточните, пожалуйста, желаемое время - проверю по календарю и подтвержу."
+)
+ASK_FOR_TIME_ONLY_LINE_EN = (
+    "Could you let me know the desired time? I'll check the calendar and confirm."
 )
 # Story 12.19 — acknowledgement when the customer accepts the offered
 # alternative slot in pitching ("да" / "давайте на 31-ое в 8"). Names the slot
@@ -951,7 +1005,7 @@ class SalesPersonaAnswerer:
         # it by escalating to a human with checking-options copy — never thank
         # and hand off the mis-read booking. Fires in any state.
         if is_capacity_question(question):
-            return self._handle_capacity_question(question=question, ctx=ctx)
+            return await self._handle_capacity_question(question=question, ctx=ctx)
 
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
@@ -1246,13 +1300,71 @@ class SalesPersonaAnswerer:
             },
         )
 
-    def _handle_capacity_question(
+    async def _buggy_seats_from_catalog(self, *, ctx: AnswerContext) -> int | None:
+        """Seats-per-buggy from the RAG catalog when it states it, else ``None``
+        (Story 12.63). Best-effort + BUGGY-specific — today the live catalog
+        carries no buggy capacity, so this returns ``None`` and the caller
+        escalates; it auto-derives once a «Багги — до N человек» line exists."""
+        if self._rag is None:
+            return None
+        chunks = await asyncio.to_thread(
+            self._rag.retrieve,
+            query="сколько человек вмещает багги вместимость мест",
+            limit=5,
+            project_id=ctx.project_id,
+        )
+        for chunk in chunks:
+            seats = _parse_buggy_seats(chunk.chunk_text)
+            if seats is not None:
+                return seats
+        return None
+
+    async def _derive_buggy_count(
+        self, *, question: str, ctx: AnswerContext
+    ) -> tuple[int, int] | None:
+        """``(headcount, buggy_count)`` derived from the question's headcount and
+        the catalog's seats-per-buggy, or ``None`` when either is unavailable."""
+        headcount = _parse_headcount(question)
+        if headcount is None or headcount <= 0:
+            return None
+        seats = await self._buggy_seats_from_catalog(ctx=ctx)
+        if seats is None:
+            return None
+        return headcount, (headcount + seats - 1) // seats  # ceil division
+
+    async def _handle_capacity_question(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        """Story 12.59 (round-14) - escalate a capacity question to a human with
-        checking-options copy (never the booking thank-you). No ``_persist`` —
-        the funnel (if any) is left intact for the customer's next on-topic turn.
+        """Story 12.59/12.63 — answer a capacity question. Derive a buggy-count
+        recommendation from the catalog when the data is there; otherwise
+        escalate to a human with checking-options copy (never the booking
+        thank-you). No ``_persist`` — the funnel (if any) is left intact.
         """
+        derived = await self._derive_buggy_count(question=question, ctx=ctx)
+        if derived is not None:
+            headcount, count = derived
+            logger.info(
+                "sales_answerer_handled",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "sales_turn_kind": "capacity_answered",
+                    "headcount": headcount,
+                    "buggy_count": count,
+                },
+            )
+            return AnswerResult(
+                handled=True,
+                text=localize(
+                    f"На {headcount} человек понадобится примерно {count} багги.",
+                    f"For {headcount} people you'd need about {count} buggies.",
+                    language=ctx.language,
+                ),
+                metadata={
+                    "answerer": NAME,
+                    "sales_turn_kind": "capacity_answered",
+                    "suppress_followup": True,
+                },
+            )
         logger.info(
             "sales_answerer_handled",
             extra={
@@ -1520,6 +1632,7 @@ class SalesPersonaAnswerer:
             stage_before=STAGE_SCOPING,
             base_metadata=media_metadata,
             dispatch_fallback=dispatch_fallback,
+            question=question,
         )
 
     async def _handle_awaiting_time(
@@ -1547,10 +1660,16 @@ class SalesPersonaAnswerer:
         if isinstance(outcome, AnswerResult):
             return outcome
         merged, _next_question, _extracted = outcome
+        # Story 12.62 (round-15) — when we asked only for the time (date already
+        # known), a bare-time reply ("в 15:00") would REPLACE dates and drop the
+        # date (intent_merge replaces). Re-attach the prior date so the slot
+        # check gets a full date+time.
+        merged = self._preserve_prior_date(merged=merged, state=state, ctx=ctx)
         return await self._complete_booking(
             ctx=ctx,
             intent=merged,
             stage_before=STAGE_AWAITING_TIME,
+            question=question,
         )
 
     async def _handle_pitching(
@@ -1756,6 +1875,40 @@ class SalesPersonaAnswerer:
             },
         )
 
+    def _preserve_prior_date(
+        self, *, merged: Intent, state: dict[str, Any], ctx: AnswerContext
+    ) -> Intent:
+        """Story 12.62 (round-15) — re-attach a previously-collected date when
+        this turn's reply is time-only. ``intent_merge`` REPLACES ``dates``, so a
+        bare "в 15:00" after we asked only-for-time would drop the date. When the
+        merged dates carries a clock but no parseable full date, and the prior
+        stored dates had a parseable date, rebuild "<YYYY-MM-DD> HH:MM"."""
+        tz = ZoneInfo(ctx.timezone)
+        new_dates = merged.dates if isinstance(merged.dates, str) else None
+        if not new_dates:
+            return merged
+        if (
+            extract_requested_start(text=new_dates, now=ctx.now, project_tz=tz)
+            is not None
+        ):
+            return merged  # already a full date+time
+        clocks = extract_all_clocks(new_dates)
+        if not clocks:
+            return merged  # no time either → nothing to combine
+        prior = Intent.from_dict(state.get("collected_intent") or {})
+        prior_dates = prior.dates if isinstance(prior.dates, str) else None
+        prior_date = (
+            extract_requested_date(text=prior_dates, now=ctx.now, project_tz=tz)
+            if prior_dates
+            else None
+        )
+        if prior_date is None:
+            return merged
+        hour, minute = clocks[0]
+        return replace(
+            merged, dates=f"{prior_date.isoformat()} {hour:02d}:{minute:02d}"
+        )
+
     async def _complete_booking(
         self,
         *,
@@ -1764,6 +1917,7 @@ class SalesPersonaAnswerer:
         stage_before: str,
         base_metadata: dict[str, Any] | None = None,
         dispatch_fallback: bool = False,
+        question: str | None = None,
     ) -> AnswerResult:
         """Scoping is complete - check the requested time, then confirm/hand off.
 
@@ -1775,6 +1929,21 @@ class SalesPersonaAnswerer:
             off with the generic completion line (a human picks up).
         """
         base_metadata = base_metadata or {}
+        # Story 12.61 (round-15) — a COMPLETE booking with a VAGUE time
+        # ("во второй половине дня") proposes a concrete slot in that window,
+        # same as the greeting/scoping hook — instead of falling to the generic
+        # ask-for-time. The handler no-ops (returns None) when there's no vague
+        # window or a concrete time IS present, so concrete bookings are
+        # unaffected. ``question`` is None for legacy callers (no vague check).
+        if question is not None:
+            vague = await self._maybe_answer_vague_window(
+                question=question,
+                ctx=ctx,
+                merged_intent=intent,
+                stage_before=stage_before,
+            )
+            if vague is not None:
+                return vague
         # Story 12.10 — no concrete time yet, but the calendar can check one:
         # ask for date+time instead of a blind hand off. Bounded to one ask —
         # the follow-up arrives with stage_before == STAGE_AWAITING_TIME.
@@ -1842,7 +2011,19 @@ class SalesPersonaAnswerer:
         A plain handled reply (no escalation / HITL ticket). The stage
         transition is what bounds the ask to a single round.
         """
-        text = localize(ASK_FOR_TIME_LINE, ASK_FOR_TIME_LINE_EN, language=ctx.language)
+        # Story 12.62 (round-15) — if the customer already gave a date but no
+        # time, ask only for the time (the date is preserved on the reply by
+        # ``_preserve_prior_date``); otherwise ask for date+time.
+        tz = ZoneInfo(ctx.timezone)
+        has_date = bool(intent.dates) and (
+            extract_requested_date(text=intent.dates, now=ctx.now, project_tz=tz)
+            is not None
+        )
+        text = localize(
+            ASK_FOR_TIME_ONLY_LINE if has_date else ASK_FOR_TIME_LINE,
+            ASK_FOR_TIME_ONLY_LINE_EN if has_date else ASK_FOR_TIME_LINE_EN,
+            language=ctx.language,
+        )
         if dispatch_fallback:
             text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         await self._persist(
