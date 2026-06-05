@@ -52,8 +52,10 @@ from services.api.app.calendar.service_resolver import (
     extract_requested_date,
     extract_requested_start,
     names_invalid_date,
+    names_past_date,
 )
 from services.api.app.rag import RagChunk
+from services.api.app.russian_text.normalizer import RussianNormalizer
 from services.api.app.sales.acceptance import is_acceptance
 from services.api.app.sales.cancel_intent import is_cancellation
 from services.api.app.sales.client_materials_repository import ClientMaterial
@@ -191,6 +193,23 @@ INVALID_DATE_CLARIFY_LINE = (
 )
 INVALID_DATE_CLARIFY_LINE_EN = (
     "That date doesn't exist. Could you confirm the date you'd like?"
+)
+# Story 12.73 (round-18 R18-1) — an explicit past date («вчера в 14:00») is
+# rejected with a clarify, never handed off as a valid booking.
+PAST_DATE_CLARIFY_LINE = (
+    "Эта дата уже прошла. Уточните, пожалуйста, желаемую дату."
+)
+PAST_DATE_CLARIFY_LINE_EN = (
+    "That date is in the past. Could you confirm the date you'd like?"
+)
+# Story 12.74 (round-18 R18-6) — unintelligible input («asdfgh qwerty фыва»)
+# gets a clarification, never a booking handoff (and never flips to English).
+GIBBERISH_CLARIFY_LINE = (
+    "Извините, не совсем понял. Подскажите, пожалуйста, дату, время и услугу?"
+)
+GIBBERISH_CLARIFY_LINE_EN = (
+    "Sorry, I didn't quite catch that. Could you tell me the date, time, "
+    "and service?"
 )
 # Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack, not a
 # booking-handoff line.
@@ -346,6 +365,26 @@ def is_eligibility_question(question: str) -> bool:
         and bool(_ELIGIBILITY_MARKER_RE.search(question))
         and not _BOOKING_COMMIT_RE.search(question)
     )
+
+
+# Story 12.74 (round-18 R18-6) — detect unintelligible input (keyboard-mash) so
+# it gets a clarification instead of a booking handoff. Conservative: fires only
+# when the message has Cyrillic context AND not a single word-like token is a
+# known Russian word. A real word (even one, e.g. «в», «хочу», «баги») or any
+# typo that pymorphy still recognises keeps the message out of this branch, so a
+# typo-heavy-but-real booking is never mistaken for gibberish.
+_CYRILLIC_PRESENT_RE = re.compile(r"[а-яё]", re.IGNORECASE | re.UNICODE)
+_WORD_TOKEN_RE = re.compile(r"[a-zа-яё]{2,}", re.IGNORECASE | re.UNICODE)
+
+
+def is_gibberish(question: str, *, normalizer: RussianNormalizer) -> bool:
+    """True when ``question`` is keyboard-mash with no recognisable word."""
+    if not _CYRILLIC_PRESENT_RE.search(question):
+        return False  # purely Latin / non-Cyrillic — left to the normal flow
+    tokens = _WORD_TOKEN_RE.findall(question)
+    if not tokens:
+        return False  # no word-like tokens (pure digits/punctuation)
+    return not any(normalizer.is_known_word(token) for token in tokens)
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 EMPTY_CATALOG_ESCALATION_LINE_EN = (
@@ -638,6 +677,8 @@ class LlmSchemaViolation(Exception):
 
 class _Normalizer(Protocol):
     def lemmas(self, text: str) -> list[str]: ...
+
+    def is_known_word(self, token: str) -> bool: ...
 
 
 class _StateRepo(Protocol):
@@ -1088,6 +1129,14 @@ class SalesPersonaAnswerer:
         ):
             return self._handle_invalid_date(ctx=ctx)
 
+        # Story 12.73 (round-18 R18-1) — an explicit PAST date («вчера в 14:00»)
+        # is rejected with a clarify, never handed off as a valid booking. Fires
+        # before the funnel (and regardless of calendar connectivity).
+        if names_past_date(
+            question, now=self._clock(), project_tz=ZoneInfo(ctx.timezone)
+        ):
+            return self._handle_past_date(ctx=ctx)
+
         # Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack,
         # not a booking-handoff. Gated on not-sales so «спасибо, запишите» books.
         if is_gratitude(question) and not is_sales_intent(
@@ -1104,6 +1153,14 @@ class SalesPersonaAnswerer:
                 ctx=ctx,
                 current_stage=str(state.get("current_stage") if state else STAGE_NEW),
             )
+
+        # Story 12.74 (round-18 R18-6) — unintelligible keyboard-mash gets a
+        # clarification, never a booking handoff. Gated on not-sales so a real
+        # (even typo-heavy) booking is never swallowed. Fires in any state.
+        if is_gibberish(question, normalizer=self._normalizer) and not is_sales_intent(
+            question, normalizer=self._normalizer
+        ):
+            return self._handle_gibberish(ctx=ctx)
 
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
@@ -1297,6 +1354,13 @@ class SalesPersonaAnswerer:
         )
         if multi_date is not None:
             return multi_date
+        # Story 12.77 (round-18 R18-5) — «<booking1> и <booking2>» (two distinct
+        # date+time bookings) → a per-slot verdict, never one slot silently dropped.
+        two_bookings = await self._maybe_answer_two_bookings(
+            question=question, ctx=ctx, stage_before=STAGE_NEW
+        )
+        if two_bookings is not None:
+            return two_bookings
         # Story 12.58 (round-14) — a pure availability INQUIRY («…в 16:30
         # свободно?») gets a plain verdict, never a booking handoff/HITL. Checked
         # before the busy-intercept so an inquiry isn't turned into a booking.
@@ -1422,6 +1486,48 @@ class SalesPersonaAnswerer:
             metadata={
                 "answerer": NAME,
                 "sales_turn_kind": "invalid_date",
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_past_date(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 12.73 (round-18 R18-1) — reject a past date with a clarify;
+        funnel state left intact, no escalation."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "past_date"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                PAST_DATE_CLARIFY_LINE,
+                PAST_DATE_CLARIFY_LINE_EN,
+                language=ctx.language,
+            ),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "past_date",
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_gibberish(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 12.74 (round-18 R18-6) — clarify on unintelligible input; never a
+        booking handoff. No ``_persist`` (funnel left intact)."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "gibberish"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                GIBBERISH_CLARIFY_LINE,
+                GIBBERISH_CLARIFY_LINE_EN,
+                language=ctx.language,
+            ),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "gibberish",
                 "suppress_followup": True,
             },
         )
@@ -1714,6 +1820,13 @@ class SalesPersonaAnswerer:
             )
             if multi_date is not None:
                 return multi_date
+            # Story 12.77 (round-18 R18-5) — two distinct date+time bookings →
+            # a per-slot verdict (neither slot dropped).
+            two_bookings = await self._maybe_answer_two_bookings(
+                question=question, ctx=ctx, stage_before=STAGE_SCOPING
+            )
+            if two_bookings is not None:
+                return two_bookings
             # Story 12.58 (round-14) — a mid-scoping availability INQUIRY gets a
             # plain verdict (no handoff/HITL), checked before the busy-intercept.
             inquiry = await self._maybe_answer_availability_inquiry(
@@ -2515,6 +2628,83 @@ class SalesPersonaAnswerer:
                 "stage_before": stage_before,
                 "stage_after": STAGE_PITCHING,
                 "sales_turn_kind": "vague_window_offer",
+            },
+        )
+
+    async def _maybe_answer_two_bookings(
+        self, *, question: str, ctx: AnswerContext, stage_before: str
+    ) -> AnswerResult | None:
+        """Story 12.77 (round-18 R18-5) — «<booking1> и <booking2>», where each
+        side carries its OWN concrete date+time, gets a per-slot verdict («30 мая
+        в 12:00 - свободно; 31 мая в 15:00 - свободно. Подтвердить оба или выбрать
+        один?») so the second slot isn't silently dropped.
+
+        Distinct from the «или» multi-date handler (one shared clock, two day
+        options). Gated strictly on «и» splitting the turn into ≥2 parts that EACH
+        parse to a concrete date+time, so a stray «и» («я и друг … в 12:00») —
+        only one parseable booking — falls through. ``None`` when the calendar
+        can't verify both. Russian-only by design.
+        """
+        if not re.search(r"\bи\b", question, re.IGNORECASE | re.UNICODE):
+            return None
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        tz = cal.project_tz
+        starts: list[datetime] = []
+        for part in re.split(r"\bи\b", question, flags=re.IGNORECASE | re.UNICODE):
+            parsed = extract_requested_start(text=part, now=ctx.now, project_tz=tz)
+            if parsed is not None and parsed not in starts:
+                starts.append(parsed)
+        if len(starts) < 2:
+            return None  # not two distinct concrete bookings
+        operator = cal.settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        verdicts: list[str] = []
+        for start in starts[:2]:
+            availability = await check_requested_availability(
+                project_id=cal.project_id,
+                requested_start=start,
+                operator=operator,
+                operator_chat_id=operator_chat_id,
+                service_rule=cal.service_rule,
+                token_provider=self._calendar_token_provider,
+                freebusy_client=self._calendar_freebusy_client,
+                now=ctx.now,
+                project_tz=tz,
+                lookahead_days=cal.settings.lookahead_days,
+                country_code=ctx.country_code,
+                trace_id=ctx.trace_id,
+            )
+            if availability.status == STATUS_AVAILABLE:
+                word = "свободно"
+            elif availability.status == STATUS_UNAVAILABLE:
+                word = "занято"
+            else:
+                return None  # can't verify both → fall through to the normal flow
+            verdicts.append(
+                f"{start.day} {_MONTHS_GENITIVE[start.month]} "
+                f"в {start.strftime('%H:%M')} - {word}"
+            )
+        logger.info(
+            "sales_two_bookings_verdict",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "starts": [s.isoformat() for s in starts[:2]],
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text="; ".join(verdicts) + ". Подтвердить оба или выбрать один?",
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "two_bookings_verdict",
+                "suppress_followup": True,
             },
         )
 

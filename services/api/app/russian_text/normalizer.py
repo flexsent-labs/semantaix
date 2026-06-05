@@ -57,6 +57,14 @@ class RussianNormalizer:
                 result.append(lemma)
         return result
 
+    def is_known_word(self, token: str) -> bool:
+        """True if ``token`` is a dictionary-known Russian word (Story 12.74).
+
+        Used by the gibberish guard to tell real words from keyboard-mash; a
+        non-word like "фыва" / Latin token is unknown to the morphology.
+        """
+        return self._morph.word_is_known(token.lower())
+
     def contains_profanity(
         self, text: str, *, custom_lemmas: Iterable[str] | None = None
     ) -> bool:

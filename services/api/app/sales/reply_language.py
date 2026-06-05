@@ -21,15 +21,18 @@ _EN_REPLY_DIRECTIVE = (
 
 
 def detect_language(text: str | None) -> str:
-    """Return ``"en"`` when ``text`` is predominantly Latin script, else ``"ru"``.
+    """Return ``"en"`` only for a purely-Latin message, else ``"ru"``.
 
-    Russian is the default: empty / non-Latin / Cyrillic-dominant text → ``"ru"``.
+    Russian is the default and wins whenever ANY Cyrillic is present (Story
+    12.74, round-18 R18-6): a Cyrillic-context conversation must not flip to
+    English on stray Latin tokens or gibberish («asdfgh qwerty фыва»). Only text
+    with Latin letters and no Cyrillic at all → ``"en"``.
     """
     if not text:
         return "ru"
-    cyrillic = len(_CYRILLIC_RE.findall(text))
-    latin = len(_LATIN_RE.findall(text))
-    if latin > 0 and latin > cyrillic:
+    if _CYRILLIC_RE.search(text):
+        return "ru"
+    if _LATIN_RE.search(text):
         return "en"
     return "ru"
 

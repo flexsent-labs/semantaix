@@ -161,4 +161,10 @@ development_status:
   12-69-self-correction-last-wins: review
   12-70-relative-time-offsets: review
   12-71-far-future-date-not-falsely-busy: review
+  12-72-ordinal-date-words: review
+  12-73-reject-past-date: review
+  12-74-gibberish-clarify-and-language: review
+  12-75-relative-now: review
+  12-76-compact-no-colon-time: review
+  12-77-two-bookings-per-slot-verdict: review
   epic-12-retrospective: optional
