@@ -297,6 +297,25 @@ _HALF_FORM_RE = re.compile(
     rf"\bпол(?P<ord>{_ORDINAL_SIMPLE_ALT})(?:\s+(?P<qual>{_DAYPART}))?",
     re.IGNORECASE | re.UNICODE,
 )
+# Story 12.83 (round-20 R20-3) — «без <minutes> <hour>» («без пятнадцати три» =
+# 14:45): N minutes before the named (upcoming) hour. Minutes are the common
+# genitive forms incl. «четверти» (quarter = 15); the hour is a cardinal word or
+# «час» (= 1). Longest-first so «двадцати пяти» beats «двадцати».
+_BEFORE_MINUTES: dict[str, int] = {
+    "пяти": 5,
+    "десяти": 10,
+    "пятнадцати": 15,
+    "четверти": 15,
+    "двадцати пяти": 25,
+    "двадцати": 20,
+}
+_BEFORE_MINUTES_ALT = "|".join(sorted(_BEFORE_MINUTES, key=len, reverse=True))
+_BEFORE_HOUR_ALT = "час\\w*|" + _WORD_HOURS_ALT
+_BEFORE_RE = re.compile(
+    rf"\bбез\s+(?P<min>{_BEFORE_MINUTES_ALT})\s+(?P<hour>{_BEFORE_HOUR_ALT})"
+    rf"(?:\s+(?P<qual>{_DAYPART}))?",
+    re.IGNORECASE | re.UNICODE,
+)
 
 # Absolute calendar dates: "1 июня", "2 июня", "15 сентября". The scoping LLM
 # frequently *resolves* a relative reference ("в понедельник", even "завтра")
@@ -418,20 +437,25 @@ def _scan_clocks(text: str) -> list[tuple[int, int, int, int]]:
         noon.append((m.start(), m.end(), hour, 0))
     groups.append(noon)
 
-    for regex in (_CLOCK_CHAS_RE, _CLOCK_DAYPART_RE):
-        chas: list[tuple[int, int, int, int]] = []
-        for m in regex.finditer(text):
-            num = m.group("num")
-            qual = m.group("qual")
-            if num is None and qual is None:
-                continue  # a bare "час" is too ambiguous to be a clock
-            base = int(num) if num and num.isdigit() else (
-                _WORD_NUMBERS[num.lower()] if num else 1
-            )
-            hour = _apply_daypart(base, qual)
-            if hour is not None:
-                chas.append((m.start(), m.end(), hour, 0))
-        groups.append(chas)
+    # «без <minutes> <hour>» → N min before the named hour («без пятнадцати три»
+    # → 14:45). Higher priority than the day-part group so «без … три ночи» isn't
+    # mis-read as «три ночи».
+    before: list[tuple[int, int, int, int]] = []
+    for m in _BEFORE_RE.finditer(text):
+        hword = m.group("hour").lower()
+        hour_n = 1 if hword.startswith("час") else _WORD_NUMBERS[hword]
+        hour = 12 if hour_n == 1 else hour_n - 1
+        minute = 60 - _BEFORE_MINUTES[m.group("min").lower()]
+        qual = m.group("qual")
+        if qual is not None:
+            promoted = _apply_daypart(hour, qual)
+            if promoted is None:  # pragma: no cover - defensive; unreachable for 1-12
+                continue
+            hour = promoted
+        elif 1 <= hour <= 7:  # bare → daytime default (round-20 R20-3)
+            hour += 12
+        before.append((m.start(), m.end(), hour, minute))
+    groups.append(before)
 
     # Half-form «пол<ordinal>» → (ordinal-1):30; «полпервого» → 12:30. A day-part
     # pins AM/PM; a bare early hour (1-7) defaults to the daytime (PM) reading.
@@ -452,6 +476,21 @@ def _scan_clocks(text: str) -> list[tuple[int, int, int, int]]:
             hour += 12
         half.append((m.start(), m.end(), hour, 30))
     groups.append(half)
+
+    for regex in (_CLOCK_CHAS_RE, _CLOCK_DAYPART_RE):
+        chas: list[tuple[int, int, int, int]] = []
+        for m in regex.finditer(text):
+            num = m.group("num")
+            qual = m.group("qual")
+            if num is None and qual is None:
+                continue  # a bare "час" is too ambiguous to be a clock
+            base = int(num) if num and num.isdigit() else (
+                _WORD_NUMBERS[num.lower()] if num else 1
+            )
+            hour = _apply_daypart(base, qual)
+            if hour is not None:
+                chas.append((m.start(), m.end(), hour, 0))
+        groups.append(chas)
 
     hhmm: list[tuple[int, int, int, int]] = []
     for m in _HH_MM.finditer(text):
