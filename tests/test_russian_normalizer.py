@@ -106,3 +106,13 @@ def test_contains_profanity_custom_lemmas_uses_only_provided_set():
         )
         is False
     )
+
+
+def test_is_known_word_recognises_real_and_rejects_gibberish():
+    # Story 12.74 (round-18 R18-6) — distinguishes real Russian words from
+    # keyboard-mash, used by the gibberish guard.
+    normalizer = RussianNormalizer()
+    assert normalizer.is_known_word("завтра") is True
+    assert normalizer.is_known_word("Хочу") is True  # case-insensitive
+    assert normalizer.is_known_word("фыва") is False
+    assert normalizer.is_known_word("asdfgh") is False

@@ -106,7 +106,12 @@ def resolve_service(
 # --- Conservative Russian date/time extraction. ----------------------------
 
 # Relative day anchors → offset in days from "today" (local project date).
+# Negative offsets («вчера», «позавчера») resolve to past dates so the past-date
+# guard (Story 12.73, round-18 R18-1) can reject them instead of silently
+# handing off a booking into the past.
 _RELATIVE_DAYS: dict[str, int] = {
+    "позавчера": -2,
+    "вчера": -1,
     "сегодня": 0,
     "завтра": 1,
     "послезавтра": 2,
@@ -200,6 +205,58 @@ _THROUGH_RE = re.compile(
     rf"\bчерез\s+(?:(?P<num>\d{{1,3}}|пол|{_WORD_HOURS_ALT})\s*)?"
     r"(?P<unit>час\w*|минут\w*|мин\b|недел\w*|нед\b|дн\w*|день|ден[ьёе]\w*)",
     re.IGNORECASE | re.UNICODE,
+)
+
+# Story 12.75 (round-18 R18-2) — «сейчас» / «прямо сейчас» → the current instant.
+# «не сейчас» (not now) is a deferral, not a booking time, so it's excluded.
+_NOW_RE = re.compile(r"\b(?:прямо\s+|прям\s+)?сейчас\b", re.IGNORECASE | re.UNICODE)
+_NOT_NOW_RE = re.compile(r"\bне\s+сейчас\b", re.IGNORECASE | re.UNICODE)
+
+# Story 12.76 (round-18 R18-3) — a no-colon compact time after «в»: «в 1400» →
+# 14:00, «в 14 00» → 14:00, «в 900» → 09:00. The «в» prefix and the trailing
+# no-more-digits guard keep it from eating counts/prices ("в 14000", "5 человек").
+_COMPACT_HHMM_RE = re.compile(
+    r"\bв\s+(\d{1,2})\s*(\d{2})(?!\d)", re.IGNORECASE | re.UNICODE
+)
+
+# Story 12.72 (round-18 R18-4) — Russian ordinal DAY words («девятого в 12:00» =
+# the 9th). Genitive ordinals 1-31, including the compound «двадцать третьего».
+_ORDINAL_UNITS: dict[str, int] = {
+    "первого": 1,
+    "второго": 2,
+    "третьего": 3,
+    "четвёртого": 4,
+    "четвертого": 4,
+    "пятого": 5,
+    "шестого": 6,
+    "седьмого": 7,
+    "восьмого": 8,
+    "девятого": 9,
+}
+_ORDINAL_SIMPLE: dict[str, int] = {
+    **_ORDINAL_UNITS,
+    "десятого": 10,
+    "одиннадцатого": 11,
+    "двенадцатого": 12,
+    "тринадцатого": 13,
+    "четырнадцатого": 14,
+    "пятнадцатого": 15,
+    "шестнадцатого": 16,
+    "семнадцатого": 17,
+    "восемнадцатого": 18,
+    "девятнадцатого": 19,
+    "двадцатого": 20,
+    "тридцатого": 30,
+}
+_ORDINAL_TENS: dict[str, int] = {"двадцать": 20, "тридцать": 30}
+_ORDINAL_UNITS_ALT = "|".join(sorted(_ORDINAL_UNITS, key=len, reverse=True))
+_ORDINAL_SIMPLE_ALT = "|".join(sorted(_ORDINAL_SIMPLE, key=len, reverse=True))
+_ORDINAL_COMPOUND_RE = re.compile(
+    rf"\b(?P<tens>двадцать|тридцать)\s+(?P<unit>{_ORDINAL_UNITS_ALT})\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_ORDINAL_SIMPLE_RE = re.compile(
+    rf"\b(?P<ord>{_ORDINAL_SIMPLE_ALT})\b", re.IGNORECASE | re.UNICODE
 )
 
 # Absolute calendar dates: "1 июня", "2 июня", "15 сентября". The scoping LLM
@@ -344,6 +401,14 @@ def _scan_clocks(text: str) -> list[tuple[int, int, int, int]]:
             hhmm.append((m.start(), m.end(), hour, minute))
     groups.append(hhmm)
 
+    # Story 12.76 (round-18 R18-3) — no-colon compact "в HHMM" / "в HH MM".
+    compact: list[tuple[int, int, int, int]] = []
+    for m in _COMPACT_HHMM_RE.finditer(text):
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            compact.append((m.start(), m.end(), hour, minute))
+    groups.append(compact)
+
     accepted: list[tuple[int, int, int, int]] = []
     for group in groups:  # priority order
         for cand in group:
@@ -450,6 +515,44 @@ def _extract_en_absolute_date(text: str, today: date) -> date | None:
     return None
 
 
+def _ordinal_day(text: str) -> int | None:
+    """Resolve a Russian ordinal day word to its 1-31 number, or ``None``.
+
+    Compound forms («двадцать третьего») win over the bare unit so "двадцать
+    третьего" reads 23, not 3.
+    """
+    compound = _ORDINAL_COMPOUND_RE.search(text)
+    if compound is not None:
+        return _ORDINAL_TENS[compound.group("tens").lower()] + _ORDINAL_UNITS[
+            compound.group("unit").lower()
+        ]
+    simple = _ORDINAL_SIMPLE_RE.search(text)
+    if simple is not None:
+        return _ORDINAL_SIMPLE[simple.group("ord").lower()]
+    return None
+
+
+def _extract_ordinal_date(text: str, today: date) -> date | None:
+    """Resolve an ordinal day word to the next occurrence of that day-of-month.
+
+    Story 12.72 (round-18 R18-4): «девятого» → the next 9th (this month if it
+    hasn't passed, else a following month). Scans up to ~13 months so day
+    numbers absent from short months (e.g. «тридцать первого») still resolve.
+    """
+    day = _ordinal_day(text)
+    if day is None:
+        return None
+    year, month = today.year, today.month
+    for _ in range(13):
+        candidate = _safe_date(year=year, month=month, day=day)
+        if candidate is not None and candidate >= today:
+            return candidate
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return None
+
+
 def names_invalid_date(text: str, *, now: datetime, project_tz: ZoneInfo) -> bool:
     """True when ``text`` names a calendar date that doesn't exist — a Russian
     "<day> <month>" or a "DD.MM" whose day exceeds that month's length (round-16
@@ -473,6 +576,21 @@ def names_invalid_date(text: str, *, now: datetime, project_tz: ZoneInfo) -> boo
         if _out_of_range(int(match.group(2)), int(match.group(1))):
             return True
     return False
+
+
+def names_past_date(text: str, *, now: datetime, project_tz: ZoneInfo) -> bool:
+    """True when ``text`` resolves to a whole day strictly before today.
+
+    Story 12.73 (round-18 R18-1): «вчера» / «позавчера» (and any input that
+    resolves to a past date) should be rejected with a clarify, not handed off
+    as a valid booking. Past-time-*today* is left to the calendar's in-past
+    verdict; this guards a past *day*. Numeric/absolute dates roll forward, so
+    in practice only the explicit past-day words trigger this.
+    """
+    requested = extract_requested_date(text=text, now=now, project_tz=project_tz)
+    if requested is None:
+        return False
+    return requested < now.astimezone(project_tz).date()
 
 
 def _safe_date(*, year: int, month: int, day: int) -> date | None:
@@ -605,7 +723,12 @@ def _extract_relative_offset(text: str, local_now: datetime) -> datetime | None:
     (``now + delta``); a day/week offset keeps ``now``'s time-of-day unless the
     text also names an explicit clock ("через 3 дня в 14:00"). "пол" means half
     (полчаса → 30 min, полдня → 12 h). An unrecognised count/unit → ``None``.
+
+    Story 12.75 (round-18 R18-2): «сейчас» / «прямо сейчас» resolve to ``now``
+    itself (the «не сейчас» deferral is excluded).
     """
+    if _NOW_RE.search(text) and not _NOT_NOW_RE.search(text):
+        return local_now
     m = _THROUGH_RE.search(text)
     if m is None:
         return None
@@ -701,10 +824,13 @@ def extract_requested_start(
     else:
         # No relative/weekday/numeric anchor — accept an explicit "<day> <month>"
         # date so an LLM-resolved absolute date still reaches the calendar check.
-        # Russian month words first, then English (Story 12.50, R11-2).
-        target_date = _extract_absolute_date(
-            text.lower(), local_now.date()
-        ) or _extract_en_absolute_date(text.lower(), local_now.date())
+        # Russian month words first, then English (Story 12.50, R11-2), then an
+        # ordinal day word ("девятого" → next 9th; Story 12.72, round-18 R18-4).
+        target_date = (
+            _extract_absolute_date(text.lower(), local_now.date())
+            or _extract_en_absolute_date(text.lower(), local_now.date())
+            or _extract_ordinal_date(text.lower(), local_now.date())
+        )
         if target_date is None:
             return None
         clock_source = text
@@ -746,6 +872,8 @@ def extract_requested_date(
     numeric = _extract_numeric_date(text, local_now.date())
     if numeric is not None:
         return numeric[0]
-    return _extract_absolute_date(
-        text.lower(), local_now.date()
-    ) or _extract_en_absolute_date(text.lower(), local_now.date())
+    return (
+        _extract_absolute_date(text.lower(), local_now.date())
+        or _extract_en_absolute_date(text.lower(), local_now.date())
+        or _extract_ordinal_date(text.lower(), local_now.date())
+    )

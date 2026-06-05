@@ -23,6 +23,7 @@ from services.api.app.calendar.service_resolver import (
     extract_requested_date,
     extract_requested_start,
     names_invalid_date,
+    names_past_date,
     resolve_service,
 )
 from services.api.app.calendar.settings_repository import ServiceRule
@@ -800,3 +801,138 @@ def test_relative_offset_word_number_out_of_map_is_none() -> None:
         )
         is None
     )
+
+
+# --- Story 12.72 (round-18 R18-4): ordinal date words «девятого», «пятого» -----
+# _NOW is Friday 5 June 2026. An ordinal day word resolves to the next occurrence
+# of that day-of-month — identical to the numeric «9 июня» form.
+
+
+def test_ordinal_date_devyatogo() -> None:
+    r = extract_requested_start(text="девятого в 12:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_date_pyatogo_today() -> None:
+    # «пятого» (5th) == today (5 June) → today, future clock.
+    r = extract_requested_start(text="пятого в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 5, 14, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_date_compound_twenty_third() -> None:
+    r = extract_requested_start(
+        text="двадцать третьего в 10:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 23, 10, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_date_rolls_to_next_month() -> None:
+    # «первого» (1st) already passed this month (today is the 5th) → 1 July.
+    r = extract_requested_start(text="первого в 9:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 7, 1, 9, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_date_rolls_across_year_boundary() -> None:
+    # In mid-December «первого» (already passed) rolls past Dec → 1 Jan next year.
+    dec = datetime(2026, 12, 15, 12, 0, tzinfo=MOSCOW)
+    r = extract_requested_start(text="первого в 9:00", now=dec, project_tz=MOSCOW)
+    assert r == datetime(2027, 1, 1, 9, 0, tzinfo=MOSCOW)
+
+
+def test_ordinal_matches_numeric_for_busy_check() -> None:
+    # The whole point of R18-4: «девятого в 12:00» must resolve identically to
+    # «9 июня в 12:00» so the availability verdict is the same.
+    ordinal = extract_requested_start(
+        text="девятого в 12:00", now=_NOW, project_tz=MOSCOW
+    )
+    numeric = extract_requested_start(
+        text="9 июня в 12:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert ordinal == numeric
+
+
+def test_ordinal_date_only_via_extract_requested_date() -> None:
+    assert extract_requested_date(
+        text="девятого", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 9)
+
+
+def test_ordinal_impossible_day_declines() -> None:
+    # «тридцать девятого» (39th) parses to a number but no month has that day →
+    # the resolver declines rather than guessing.
+    assert (
+        extract_requested_date(
+            text="тридцать девятого", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+# --- Story 12.75 (round-18 R18-2): «прямо сейчас» / «сейчас» → now -------------
+
+
+def test_relative_now_pryamo_seychas() -> None:
+    r = extract_requested_start(text="можно прямо сейчас", now=_NOW, project_tz=MOSCOW)
+    assert r == _NOW
+
+
+def test_relative_now_seychas() -> None:
+    r = extract_requested_start(text="а сейчас можно?", now=_NOW, project_tz=MOSCOW)
+    assert r == _NOW
+
+
+def test_relative_ne_seychas_is_not_now() -> None:
+    # «не сейчас» is a deferral, not a booking time — declines.
+    assert (
+        extract_requested_start(text="не сейчас", now=_NOW, project_tz=MOSCOW) is None
+    )
+
+
+# --- Story 12.76 (round-18 R18-3): no-colon compact time «в 1400» / «в 14 00» --
+
+
+def test_compact_time_1400() -> None:
+    r = extract_requested_start(text="завтра в 1400", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
+
+
+def test_compact_time_spaced_14_00() -> None:
+    r = extract_requested_start(text="завтра в 14 00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
+
+
+def test_compact_time_three_digit_900() -> None:
+    r = extract_requested_start(text="завтра в 900", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 9, 0, tzinfo=MOSCOW)
+
+
+def test_compact_time_invalid_hour_is_none() -> None:
+    # «в 2500» → 25:00 is out of range → no clock parsed.
+    assert (
+        extract_requested_start(text="завтра в 2500", now=_NOW, project_tz=MOSCOW)
+        is None
+    )
+
+
+# --- Story 12.73 (round-18 R18-1): explicit past date «вчера» / «позавчера» ----
+
+
+def test_vchera_resolves_to_yesterday() -> None:
+    assert extract_requested_date(
+        text="вчера", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 4)
+
+
+def test_pozavchera_resolves_to_two_days_ago() -> None:
+    assert extract_requested_date(
+        text="позавчера", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 3)
+
+
+def test_names_past_date_helper() -> None:
+    assert names_past_date("вчера в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert names_past_date("позавчера", now=_NOW, project_tz=MOSCOW)
+    assert not names_past_date("завтра в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert not names_past_date("сегодня в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert not names_past_date("9 июня в 14:00", now=_NOW, project_tz=MOSCOW)
+    assert not names_past_date("без даты", now=_NOW, project_tz=MOSCOW)

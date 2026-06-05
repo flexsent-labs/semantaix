@@ -17,7 +17,10 @@ from services.api.app.sales.reply_language import (
         ("Hello! Can I book a buggy for 4 on June 4 at 11am? How much?", "en"),
         ("Здравствуйте!", "ru"),
         ("Можно 03.06 в 16:00 на багги, нас двое?", "ru"),
-        ("Hi, хочу багги завтра", "ru"),  # more Cyrillic than Latin -> ru
+        ("Hi, хочу багги завтра", "ru"),  # any Cyrillic context -> ru
+        # Story 12.74 (round-18 R18-6) — Latin-dominant gibberish that still has
+        # Cyrillic stays Russian; stray Latin tokens must not flip the language.
+        ("asdfgh qwerty фыва 123 ???", "ru"),
         ("", "ru"),
         (None, "ru"),
     ],

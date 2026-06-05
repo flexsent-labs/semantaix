@@ -38,11 +38,13 @@ from services.api.app.sales.sales_persona_answerer import (
     BUSY_NO_SLOT_HANDOFF_TAIL_EN,
     CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
+    GIBBERISH_CLARIFY_LINE,
     GRATITUDE_ACK_LINE,
     HITL_REASON_CAPACITY,
     HITL_REASON_SCOPING_COMPLETE,
     INVALID_DATE_CLARIFY_LINE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
+    PAST_DATE_CLARIFY_LINE,
     RESPONSE_MODE_SALES_ESCALATION,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE_EN,
@@ -63,6 +65,7 @@ from services.api.app.sales.sales_persona_answerer import (
     is_availability_inquiry,
     is_capacity_question,
     is_eligibility_question,
+    is_gibberish,
     is_gratitude,
 )
 
@@ -1860,3 +1863,207 @@ async def test_multi_date_unverifiable_falls_through() -> None:
         question="Можно в субботу или в воскресенье в 12:00 на багги?", ctx=_ctx()
     )
     assert "Какой день" not in (result.text or "")
+
+
+# --- Story 12.73 (round-18 R18-1): explicit past date → reject, not handoff ----
+
+
+@pytest.mark.asyncio
+async def test_past_date_is_rejected_not_handed_off() -> None:
+    # _NOW is Fri 29 May 2026; «вчера» = 28 May (past).
+    answerer, _s, openrouter, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="запишите нас на вчера в 14:00 на багги", ctx=_ctx()
+    )
+    assert result.text == PAST_DATE_CLARIFY_LINE
+    assert "передам" not in (result.text or "").lower()  # not a booking handoff
+    assert result.metadata.get("suppress_followup") is True
+    assert result.metadata.get("escalate") is not True
+    assert openrouter.calls == []  # deterministic, no LLM
+
+
+@pytest.mark.asyncio
+async def test_future_date_not_treated_as_past() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 14:00"}, "next_question": "Сколько человек?"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="запишите нас на завтра в 14:00 на багги", ctx=_ctx()
+    )
+    assert result.text != PAST_DATE_CLARIFY_LINE
+
+
+# --- Story 12.74 (round-18 R18-6): gibberish → Russian clarification ----------
+
+
+def test_is_gibberish_only_for_unintelligible_input() -> None:
+    n = get_russian_normalizer()
+    assert is_gibberish("asdfgh qwerty фыва 123 ???", normalizer=n)
+    assert not is_gibberish("хочу багги завтра", normalizer=n)  # real words
+    assert not is_gibberish("asdfgh qwerty 123", normalizer=n)  # no Cyrillic → skip
+    assert not is_gibberish("заброниравать баги завтре", normalizer=n)  # «баги» known
+    assert not is_gibberish("я 1 2", normalizer=n)  # Cyrillic but no 2+ letter token
+
+
+@pytest.mark.asyncio
+async def test_gibberish_gets_russian_clarification_not_handoff() -> None:
+    answerer, _s, openrouter, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="asdfgh qwerty фыва 123 ???", ctx=_ctx()
+    )
+    assert result.text == GIBBERISH_CLARIFY_LINE
+    assert "Thank you" not in (result.text or "")  # not the EN handoff
+    assert result.metadata.get("escalate") is not True
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_gibberish_in_pitching_clarifies_not_handoff() -> None:
+    # The live R18-6: chat parked in pitching, a gibberish reply must clarify,
+    # not fall to the pitching-followup booking handoff (in English).
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates="завтра в 14:00", headcount=2).to_dict(),
+        "last_proposal": {"alternative_iso": "2026-05-30T08:00:00+03:00"},
+    }
+    answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="asdfgh qwerty фыва 123 ???", ctx=_ctx()
+    )
+    assert result.text == GIBBERISH_CLARIFY_LINE
+    assert openrouter.calls == []
+
+
+# --- Story 12.77 (round-18 R18-5): two bookings «…и…» → per-slot verdicts ------
+
+
+@pytest.mark.asyncio
+async def test_two_bookings_in_one_message_gets_both_verdicts() -> None:
+    # «завтра в 12:00 и послезавтра в 15:00» — two concrete bookings, each its own
+    # time. _NOW Fri 29 May → завтра 30 May, послезавтра 31 May (both free).
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="можно завтра в 12:00 и послезавтра в 15:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "30 мая" in text and "12:00" in text
+    assert "31 мая" in text and "15:00" in text
+    assert text.count("свободно") == 2
+    assert result.metadata.get("suppress_followup") is True
+    assert result.metadata.get("escalate") is not True
+
+
+@pytest.mark.asyncio
+async def test_single_booking_not_treated_as_two() -> None:
+    # A single booking with a stray «и» («я и друг») must NOT trigger the
+    # two-bookings path (only one parseable date+time).
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 12:00"}, "next_question": "Сколько человек?"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="я и друг хотим багги завтра в 12:00", ctx=_ctx()
+    )
+    assert "Подтвердить оба" not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_two_bookings_one_busy_one_free() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),  # 30 May 12:00 busy, 31 May 15:00 free
+    )
+    result = await answerer.try_answer(
+        question="можно завтра в 12:00 и послезавтра в 15:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "занято" in text and "свободно" in text
+
+
+@pytest.mark.asyncio
+async def test_two_bookings_calendar_disabled_falls_through() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 12:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(enabled=False),  # cal context is None
+        token_provider=_TokenProvider(),
+    )
+    result = await answerer.try_answer(
+        question="можно завтра в 12:00 и послезавтра в 15:00 на багги?", ctx=_ctx()
+    )
+    assert "Подтвердить оба" not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_two_bookings_unverifiable_falls_through() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_RaisingTokenProvider(),  # → STATUS_NOT_CONNECTED
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="можно завтра в 12:00 и послезавтра в 15:00 на багги?", ctx=_ctx()
+    )
+    assert "Подтвердить оба" not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_two_bookings_mid_scoping() -> None:
+    # Covers the scoping-stage two-bookings hook.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=_scoping_state(intent=Intent(headcount=2)),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="можно завтра в 12:00 и послезавтра в 15:00 на багги?", ctx=_ctx()
+    )
+    assert "Подтвердить оба" in (result.text or "")
