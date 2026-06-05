@@ -22,6 +22,7 @@ from services.api.app.calendar.service_resolver import (
     extract_all_clocks,
     extract_requested_date,
     extract_requested_start,
+    extract_time_bound,
     names_invalid_date,
     names_past_date,
     resolve_service,
@@ -866,6 +867,121 @@ def test_ordinal_impossible_day_declines() -> None:
         )
         is None
     )
+
+
+# --- Story 12.78 (round-19 R19-3): open-ended time bounds aren't concrete ------
+# «после 15:00» / «до 14:00» / «не раньше 16:00» name a bound, not a commitment,
+# so they must NOT resolve to a concrete clock — the caller clarifies instead.
+
+
+def test_extract_time_bound_helper() -> None:
+    assert extract_time_bound("завтра после 15:00") == ("after", 15)
+    assert extract_time_bound("до 14:00") == ("before", 14)
+    assert extract_time_bound("не раньше 16:00") == ("after", 16)
+    assert extract_time_bound("где-то после 3 часов") == ("after", 3)
+    assert extract_time_bound("в 15:00") is None  # plain concrete time
+    assert extract_time_bound("до 6 июня в 14:00") is None  # a date, not a bound
+
+
+def test_open_bound_after_is_not_concrete() -> None:
+    assert (
+        extract_requested_start(
+            text="завтра после 15:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_open_bound_before_is_not_concrete() -> None:
+    assert (
+        extract_requested_start(
+            text="завтра до 14:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_open_bound_ne_ranshe_is_not_concrete() -> None:
+    assert (
+        extract_requested_start(
+            text="завтра не раньше 16:00", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_open_bound_date_still_parses() -> None:
+    # The DATE is still concrete; only the TIME is underspecified.
+    assert extract_requested_date(
+        text="завтра после 15:00", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 6)
+
+
+def test_concrete_time_without_bound_still_parses() -> None:
+    # A plain «в 15:00» (no bound word) stays a concrete commitment.
+    assert extract_requested_start(
+        text="завтра в 15:00", now=_NOW, project_tz=MOSCOW
+    ) == datetime(2026, 6, 6, 15, 0, tzinfo=MOSCOW)
+
+
+def test_odd_specific_minute_parses() -> None:
+    # Round-19 U4 guard: an odd minute «14:37» is kept exactly (not rounded).
+    assert extract_requested_start(
+        text="завтра в 14:37", now=_NOW, project_tz=MOSCOW
+    ) == datetime(2026, 6, 6, 14, 37, tzinfo=MOSCOW)
+
+
+# --- Story 12.79 (round-19 R19-2): half-form times «полвторого» (13:30) --------
+# «пол<ordinal>» = 30 min before that hour; bare forms default to the daytime
+# reading, a day-part qualifier pins AM/PM.
+
+
+def test_half_form_polvtorogo_daytime_default() -> None:
+    r = extract_requested_start(text="завтра в полвторого", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 13, 30, tzinfo=MOSCOW)
+
+
+def test_half_form_polvtorogo_dnya() -> None:
+    r = extract_requested_start(
+        text="завтра в полвторого дня", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 13, 30, tzinfo=MOSCOW)
+
+
+def test_half_form_polvtorogo_nochi() -> None:
+    r = extract_requested_start(
+        text="завтра в полвторого ночи", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 1, 30, tzinfo=MOSCOW)
+
+
+def test_half_form_polpervogo_is_noon_thirty() -> None:
+    # «полпервого» → 12:30.
+    r = extract_requested_start(text="завтра в полпервого", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 12, 30, tzinfo=MOSCOW)
+
+
+def test_half_form_poldevyatogo_stays_morning() -> None:
+    # «полдевятого» (hour 8) stays 08:30 — not promoted to PM.
+    r = extract_requested_start(
+        text="завтра в полдевятого", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 8, 30, tzinfo=MOSCOW)
+
+
+def test_half_form_above_twelve_is_not_a_clock() -> None:
+    # «полдвадцатого» (20) isn't a valid hour → no clock parsed.
+    assert (
+        extract_requested_start(
+            text="завтра в полдвадцатого", now=_NOW, project_tz=MOSCOW
+        )
+        is None
+    )
+
+
+def test_open_bound_out_of_range_hour_is_none() -> None:
+    # «после 25:00» — the bound number is out of range → not a bound.
+    assert extract_time_bound("после 25:00") is None
 
 
 # --- Story 12.75 (round-18 R18-2): «прямо сейчас» / «сейчас» → now -------------

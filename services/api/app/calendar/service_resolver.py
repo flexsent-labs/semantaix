@@ -197,6 +197,39 @@ _NOON_MIDNIGHT_RE = re.compile(
     r"|\b(?P<mid>полночь|полуночь|полночи|полуночи)\b",
     re.IGNORECASE | re.UNICODE,
 )
+
+# Story 12.79 (round-19 R19-2) — half-form times: «пол<ordinal>» = 30 min before
+# that hour («полвторого» → 1:30, «полпервого» → 12:30). Built after the ordinal
+# maps below; the regex is defined there once those exist.
+
+# Story 12.78 (round-19 R19-3) — an OPEN-ENDED time bound names a range, not a
+# commitment: «после 15:00» / «не раньше 16:00» (lower), «до 14:00» / «не позже
+# 18:00» (upper). The number must look like a clock (":MM" or "час…") so a date
+# («до 6 июня») isn't mistaken for a bound.
+_LOWER_BOUND_RE = re.compile(
+    r"(?:после|не\s+раньше|начиная\s+с|где-то\s+после)\s+(\d{1,2})(?::\d{2}|\s*час\w*)",
+    re.IGNORECASE | re.UNICODE,
+)
+_UPPER_BOUND_RE = re.compile(
+    r"(?:до|не\s+позже|не\s+позднее)\s+(\d{1,2})(?::\d{2}|\s*час\w*)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def extract_time_bound(text: str) -> tuple[str, int] | None:
+    """An open-ended time bound as ``("after"|"before", hour)``, or ``None``.
+
+    Story 12.78 (round-19 R19-3). Lets the caller treat «после 15:00» / «до
+    14:00» as underspecified (clarify) rather than booking the bare hour, and
+    lets the vague-window flow propose a slot inside the bound.
+    """
+    lower = _LOWER_BOUND_RE.search(text)
+    if lower is not None and 0 <= int(lower.group(1)) <= 23:
+        return ("after", int(lower.group(1)))
+    upper = _UPPER_BOUND_RE.search(text)
+    if upper is not None and 0 <= int(upper.group(1)) <= 23:
+        return ("before", int(upper.group(1)))
+    return None
 # Story 12.70 (round-17 R17-3) — relative offset "через N <unit>" measured from
 # "now": "через два часа", "через час", "через 30 минут", "через 3 дня",
 # "через полчаса", "через неделю". The count may be a digit, a number word, or
@@ -257,6 +290,12 @@ _ORDINAL_COMPOUND_RE = re.compile(
 )
 _ORDINAL_SIMPLE_RE = re.compile(
     rf"\b(?P<ord>{_ORDINAL_SIMPLE_ALT})\b", re.IGNORECASE | re.UNICODE
+)
+# Story 12.79 (round-19 R19-2) — half-form clock «пол<ordinal>» («полвторого»),
+# with an optional part-of-day. Reuses the ordinal vocabulary above.
+_HALF_FORM_RE = re.compile(
+    rf"\bпол(?P<ord>{_ORDINAL_SIMPLE_ALT})(?:\s+(?P<qual>{_DAYPART}))?",
+    re.IGNORECASE | re.UNICODE,
 )
 
 # Absolute calendar dates: "1 июня", "2 июня", "15 сентября". The scoping LLM
@@ -393,6 +432,26 @@ def _scan_clocks(text: str) -> list[tuple[int, int, int, int]]:
             if hour is not None:
                 chas.append((m.start(), m.end(), hour, 0))
         groups.append(chas)
+
+    # Half-form «пол<ordinal>» → (ordinal-1):30; «полпервого» → 12:30. A day-part
+    # pins AM/PM; a bare early hour (1-7) defaults to the daytime (PM) reading.
+    half: list[tuple[int, int, int, int]] = []
+    for m in _HALF_FORM_RE.finditer(text):
+        ordinal = _ORDINAL_SIMPLE[m.group("ord").lower()]
+        if not 1 <= ordinal <= 12:
+            continue  # «полдвадцатого» etc. isn't an hour
+        hour = 12 if ordinal == 1 else ordinal - 1
+        qual = m.group("qual")
+        if qual is not None:
+            # hour is 1-12, so _apply_daypart never goes out of range here.
+            promoted = _apply_daypart(hour, qual)
+            if promoted is None:  # pragma: no cover - defensive; unreachable for 1-12
+                continue
+            hour = promoted
+        elif 1 <= hour <= 7:  # bare → daytime default (round-19 R19-2)
+            hour += 12
+        half.append((m.start(), m.end(), hour, 30))
+    groups.append(half)
 
     hhmm: list[tuple[int, int, int, int]] = []
     for m in _HH_MM.finditer(text):
@@ -796,6 +855,13 @@ def extract_requested_start(
     lemmatizer drops the ``:`` separator.
     """
     local_now = now.astimezone(project_tz)
+
+    # Story 12.78 (round-19 R19-3) — an open-ended bound («после 15:00», «до
+    # 14:00») names a range, not a concrete time; decline so the caller clarifies
+    # (the vague-window flow proposes a slot inside the bound) instead of booking
+    # the bare hour.
+    if extract_time_bound(text) is not None:
+        return None
 
     # Story 12.70 (round-17 R17-3) — a relative "через N <unit>" offset resolves
     # to a concrete instant up front; it carries both date and time, so it wins
