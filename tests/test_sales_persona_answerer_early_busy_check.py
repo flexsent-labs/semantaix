@@ -2067,3 +2067,87 @@ async def test_two_bookings_mid_scoping() -> None:
         question="можно завтра в 12:00 и послезавтра в 15:00 на багги?", ctx=_ctx()
     )
     assert "Подтвердить оба" in (result.text or "")
+
+
+# --- Story 12.78 (round-19 R19-3): vague lower/upper-bound time → clarify -------
+
+
+def test_detect_vague_window_handles_open_bounds() -> None:
+    assert detect_vague_window("завтра после 15:00") == (15, 22)
+    assert detect_vague_window("завтра до 14:00") == (8, 14)
+    # The existing word-window is unchanged.
+    assert detect_vague_window("завтра во второй половине дня") == (12, 18)
+
+
+@pytest.mark.asyncio
+async def test_vague_lower_bound_proposes_slot_not_completes() -> None:
+    # «после 15:00» must NOT be booked at a bare 15:00; the bot proposes a
+    # concrete slot at/after 15:00 and asks — reusing the R14-1 clarify path.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра после 15:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # 30 May fully free
+    )
+    result = await answerer.try_answer(
+        question="хотим завтра на багги где-то после 15:00", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "15:00" in text  # first free slot at/after 15:00 is proposed
+    assert "удобное время" in text  # the clarify offer, not a bare completion
+    assert result.metadata["stage_after"] == STAGE_PITCHING
+    assert result.metadata.get("escalate") is not True  # not completed/escalated
+
+
+@pytest.mark.asyncio
+async def test_vague_upper_bound_proposes_slot() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра до 11:00"}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="можно завтра на багги до 11:00?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "удобное время" in text  # proposes + clarifies, never a bare completion
+    assert result.metadata["stage_after"] == STAGE_PITCHING
+
+
+@pytest.mark.asyncio
+async def test_global_calendar_block_is_shared_across_services() -> None:
+    # R19-1 — confirmed business rule: calendar blocking is GLOBAL per day/time
+    # (one operator, one activity at a time), not per-service. Any busy event
+    # blocks the requested buggy slot → занято.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра в 12:00"}, "next_question": "Сколько человек?"}
+    )
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),
+    )
+    result = await answerer.try_answer(
+        question="можно завтра в 12:00 на багги?", ctx=_ctx()
+    )
+    assert SLOT_BUSY_LINE in (result.text or "")

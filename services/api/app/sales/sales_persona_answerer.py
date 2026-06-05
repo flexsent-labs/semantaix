@@ -51,6 +51,7 @@ from services.api.app.calendar.service_resolver import (
     extract_all_clocks,
     extract_requested_date,
     extract_requested_start,
+    extract_time_bound,
     names_invalid_date,
     names_past_date,
 )
@@ -310,6 +311,12 @@ def detect_vague_window(question: str) -> tuple[int, int] | None:
     for pattern, start_hour, end_hour in _VAGUE_WINDOW_PATTERNS:
         if pattern.search(question):
             return (start_hour, end_hour)
+    # Story 12.78 (round-19 R19-3) — an open-ended bound is a window too: «после
+    # 15:00» → (15, 22) (to day's end, calendar-clamped); «до 14:00» → (8, 14).
+    bound = extract_time_bound(question)
+    if bound is not None:
+        kind, hour = bound
+        return (hour, 22) if kind == "after" else (8, hour)
     return None
 _BOOKING_COMMIT_RE = re.compile(
     r"запиш\w*|записа\w*|забронир\w*|бронир\w*|оформ\w*|брон[ьи]\b",
