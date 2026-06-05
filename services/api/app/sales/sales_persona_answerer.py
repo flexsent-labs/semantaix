@@ -223,6 +223,15 @@ WORKING_HOURS_LINE_EN = "We're open from {open} to {close}."
 FAQ_DEFER_LINE = "Уточню у коллег и сразу сообщу."
 FAQ_DEFER_LINE_EN = "I'll check with my colleagues and let you know."
 HITL_REASON_FAQ = "sales_faq"
+# Story 12.85 (round-21 R21-1) — a message naming TWO services («двоих на багги и
+# двоих на квадроциклах») is handled one service at a time, so the per-service
+# counts/verdicts aren't collapsed into one ambiguous reply.
+MIXED_SERVICE_CLARIFY_LINE = (
+    "Давайте оформим по одной услуге за раз. С какой начнём?"
+)
+MIXED_SERVICE_CLARIFY_LINE_EN = (
+    "Let's handle one service at a time. Which would you like to start with?"
+)
 # Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack, not a
 # booking-handoff line.
 GRATITUDE_ACK_LINE = "Пожалуйста! Обращайтесь, если будут вопросы."
@@ -441,6 +450,57 @@ def is_working_hours_question(question: str) -> bool:
 def is_duration_question(question: str) -> bool:
     """True for a trip-duration FAQ («сколько длится поездка?», «как долго?»)."""
     return bool(_DURATION_RE.search(question))
+
+
+# Story 12.84 (round-21 R21-2) — payment / location / what-to-bring FAQs. No data
+# source in config, so they defer AS A QUESTION (like duration), never a booking.
+_PAYMENT_RE = re.compile(
+    r"оплат\w*|оплачив\w*|наличны\w*|безнал\w*|\bнал\b|расплат\w*|заплат\w*"
+    r"|\bкартой\b|способ\w*\s+оплат|чем\s+(?:платить|расплачиваться)",
+    re.IGNORECASE | re.UNICODE,
+)
+_LOCATION_RE = re.compile(
+    r"где\s+(?:вы\b|вы\s|наход|это\b|ваш|тут|здесь)"
+    r"|как\s+(?:до\s+вас\s+)?(?:добраться|доехать|добир\w*|проехать|дойти|пройти)"
+    r"|\bадрес\w*|местоположен\w*|как\s+(?:вас\s+)?найти"
+    r"|откуда\s+(?:старт|выезд|выезжа)|место\s+(?:встреч\w*|сбор\w*|старт\w*)",
+    re.IGNORECASE | re.UNICODE,
+)
+_BRING_RE = re.compile(
+    r"что\s+(?:нужно\s+|надо\s+|необходимо\s+)?(?:взять|брать|приносить|захватить)"
+    r"|что\s+(?:с\s+собой|надеть)|нужно\s+ли\s+что",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_info_faq_question(question: str) -> bool:
+    """True for a deferrable info FAQ — payment, location, or what-to-bring."""
+    return bool(
+        _PAYMENT_RE.search(question)
+        or _LOCATION_RE.search(question)
+        or _BRING_RE.search(question)
+    )
+
+
+# Story 12.85 (round-21 R21-1) — recognise ≥2 distinct vehicle/service types in
+# one message so a mixed-service request is handled one at a time, not collapsed.
+_VEHICLE_TYPE_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("багг",),
+    ("квадроцикл", "квадрик", "квадро"),
+    ("эндуро",),
+    ("мотоцикл", "мотик", "мопед"),
+    ("скутер",),
+    ("питбайк",),
+    ("вездеход",),
+    ("сигвей", "гироскутер", "segway"),
+)
+
+
+def is_mixed_service_request(question: str) -> bool:
+    """True when ``question`` names two or more distinct vehicle/service types."""
+    low = question.lower()
+    hit = sum(any(stem in low for stem in group) for group in _VEHICLE_TYPE_GROUPS)
+    return hit >= 2
 
 
 def _format_working_hours(working_hours: Any) -> tuple[str, str] | None:
@@ -1246,7 +1306,7 @@ class SalesPersonaAnswerer:
                 return await self._handle_working_hours_question(
                     ctx=ctx, question=question
                 )
-            if is_duration_question(question):
+            if is_duration_question(question) or is_info_faq_question(question):
                 return self._handle_faq_defer(ctx=ctx, question=question)
 
         # Story 12.82 (round-20 R20-4) — a combined price + concrete-slot message
@@ -1457,6 +1517,10 @@ class SalesPersonaAnswerer:
         )
         if two_bookings is not None:
             return two_bookings
+        # Story 12.85 (round-21 R21-1) — a message naming two services («багги и
+        # квадроциклы») is handled one at a time, not collapsed into one verdict.
+        if is_mixed_service_request(question):
+            return self._handle_mixed_service(ctx=ctx)
         # Story 12.58 (round-14) — a pure availability INQUIRY («…в 16:30
         # свободно?») gets a plain verdict, never a booking handoff/HITL. Checked
         # before the busy-intercept so an inquiry isn't turned into a booking.
@@ -1682,6 +1746,28 @@ class SalesPersonaAnswerer:
                 "escalate": True,
                 "hitl_reason": HITL_REASON_FAQ,
                 "escalation_context": question,
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_mixed_service(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 12.85 (round-21 R21-1) — ask the customer to pick one service so
+        the two services/counts aren't collapsed into one ambiguous verdict. No
+        escalation, funnel state left intact."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "mixed_service"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                MIXED_SERVICE_CLARIFY_LINE,
+                MIXED_SERVICE_CLARIFY_LINE_EN,
+                language=ctx.language,
+            ),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "mixed_service",
                 "suppress_followup": True,
             },
         )
@@ -1981,6 +2067,10 @@ class SalesPersonaAnswerer:
             )
             if two_bookings is not None:
                 return two_bookings
+            # Story 12.85 (round-21 R21-1) — two services named mid-scoping →
+            # clarify one at a time.
+            if is_mixed_service_request(question):
+                return self._handle_mixed_service(ctx=ctx)
             # Story 12.58 (round-14) — a mid-scoping availability INQUIRY gets a
             # plain verdict (no handoff/HITL), checked before the busy-intercept.
             inquiry = await self._maybe_answer_availability_inquiry(
@@ -4486,6 +4576,7 @@ __all__ = [
     "HITL_REASON_SCOPING_COMPLETE",
     "LlmSchemaViolation",
     "MATERIAL_DISPATCH_FALLBACK_LINE",
+    "MIXED_SERVICE_CLARIFY_LINE",
     "MaterialDispatcher",
     "NAME",
     "PITCHING_ACCEPT_CONFIRM_LINE",

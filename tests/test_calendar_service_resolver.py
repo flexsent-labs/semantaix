@@ -1018,6 +1018,25 @@ def test_before_form_with_daypart_nochi() -> None:
     assert r == datetime(2026, 6, 6, 2, 45, tzinfo=MOSCOW)
 
 
+# --- Round-21 positives (W3/W4) — keep these passing -------------------------
+
+
+def test_next_week_weekday_resolves() -> None:
+    # W3: «на следующей неделе во вторник» — _NOW is Fri 5 June → next Tue 9 June.
+    r = extract_requested_start(
+        text="на следующей неделе во вторник в 12:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
+
+
+def test_digit_plus_evening_word_resolves() -> None:
+    # W4: «9 вечера» (digit + part-of-day word) → 21:00.
+    r = extract_requested_start(
+        text="завтра в 9 вечера", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 21, 0, tzinfo=MOSCOW)
+
+
 # --- Story 12.75 (round-18 R18-2): «прямо сейчас» / «сейчас» → now -------------
 
 
