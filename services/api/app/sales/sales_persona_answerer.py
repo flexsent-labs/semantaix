@@ -212,6 +212,17 @@ GIBBERISH_CLARIFY_LINE_EN = (
     "Sorry, I didn't quite catch that. Could you tell me the date, time, "
     "and service?"
 )
+# Story 12.80 (round-20 R20-1) — a working-hours FAQ is answered directly from
+# the calendar config, never routed into the booking funnel. {open}/{close} are
+# filled from the service rule's working_hours.
+WORKING_HOURS_LINE = "Работаем с {open} до {close}."
+WORKING_HOURS_LINE_EN = "We're open from {open} to {close}."
+# Story 12.81 (round-20 R20-2) — an info FAQ we can't answer from data (trip
+# duration, or working hours when the calendar is off) defers AS A QUESTION to a
+# human — never a booking handoff or a date/time ask.
+FAQ_DEFER_LINE = "Уточню у коллег и сразу сообщу."
+FAQ_DEFER_LINE_EN = "I'll check with my colleagues and let you know."
+HITL_REASON_FAQ = "sales_faq"
 # Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack, not a
 # booking-handoff line.
 GRATITUDE_ACK_LINE = "Пожалуйста! Обращайтесь, если будут вопросы."
@@ -392,6 +403,64 @@ def is_gibberish(question: str, *, normalizer: RussianNormalizer) -> bool:
     if not tokens:
         return False  # no word-like tokens (pure digits/punctuation)
     return not any(normalizer.is_known_word(token) for token in tokens)
+
+
+# Story 12.80/12.81 (round-20 R20-1/R20-2) — FAQ intents (working hours, trip
+# duration) answered/deferred as QUESTIONS, never routed into the booking funnel.
+_WORK_KEYWORD_RE = re.compile(
+    r"работа\w*|работе\w*|график|режим|открыт\w*|закрыт\w*|открыва\w*|закрыва\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+_HOURS_QUESTION_RE = re.compile(
+    r"скольк\w*|\bчасы\b|во\s+сколько|до\s+скольк\w*|со\s+скольк\w*|когда",
+    re.IGNORECASE | re.UNICODE,
+)
+# A schedule noun is itself a working-hours ask («график/режим/часы работы»,
+# «расписание») — no «сколько» needed.
+_SCHEDULE_RE = re.compile(
+    r"график\s+работ|режим\s+работ|часы\s+работ|расписани\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+_DURATION_RE = re.compile(
+    r"скольк\w*\s+(?:по\s+времени|времен\w+|длит\w*|продолж\w*)"
+    r"|\b(?:длит\w*|продолжительност\w*|длительност\w*)\b"
+    r"|как\s+долго|сколько\s+по\s+времени",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_working_hours_question(question: str) -> bool:
+    """True for a working-hours FAQ («до скольки работаете?», «часы работы»)."""
+    if _SCHEDULE_RE.search(question):
+        return True
+    return bool(_WORK_KEYWORD_RE.search(question)) and bool(
+        _HOURS_QUESTION_RE.search(question)
+    )
+
+
+def is_duration_question(question: str) -> bool:
+    """True for a trip-duration FAQ («сколько длится поездка?», «как долго?»)."""
+    return bool(_DURATION_RE.search(question))
+
+
+def _format_working_hours(working_hours: Any) -> tuple[str, str] | None:
+    """The overall ``(open, close)`` span across configured days, or ``None``.
+
+    ``working_hours`` is the service rule's ``{weekday: [[start, end], …]}`` map;
+    "HH:MM" strings compare lexically, so min/max give the day's span.
+    """
+    if not working_hours:
+        return None
+    starts: list[str] = []
+    ends: list[str] = []
+    for windows in working_hours.values():
+        for window in windows:
+            if len(window) >= 2:
+                starts.append(window[0])
+                ends.append(window[1])
+    if not starts or not ends:
+        return None
+    return (min(starts), max(ends))
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 EMPTY_CATALOG_ESCALATION_LINE_EN = (
@@ -1169,6 +1238,26 @@ class SalesPersonaAnswerer:
         ):
             return self._handle_gibberish(ctx=ctx)
 
+        # Story 12.80/12.81 (round-20 R20-1/R20-2) — FAQ intents (working hours,
+        # trip duration) are answered/deferred AS QUESTIONS, never routed into the
+        # booking funnel. Gated on not a booking-commit so «запишите …» still books.
+        if not _BOOKING_COMMIT_RE.search(question):
+            if is_working_hours_question(question):
+                return await self._handle_working_hours_question(
+                    ctx=ctx, question=question
+                )
+            if is_duration_question(question):
+                return self._handle_faq_defer(ctx=ctx, question=question)
+
+        # Story 12.82 (round-20 R20-4) — a combined price + concrete-slot message
+        # answers BOTH (availability verdict + price) in one turn, instead of the
+        # price path silently dropping the availability check.
+        combined = await self._maybe_answer_price_and_availability(
+            question=question, ctx=ctx, state=state
+        )
+        if combined is not None:
+            return combined
+
         if state is None:
             if not is_sales_intent(question, normalizer=self._normalizer):
                 return _skip("not_sales_intent")
@@ -1535,6 +1624,64 @@ class SalesPersonaAnswerer:
             metadata={
                 "answerer": NAME,
                 "sales_turn_kind": "gibberish",
+                "suppress_followup": True,
+            },
+        )
+
+    async def _handle_working_hours_question(
+        self, *, ctx: AnswerContext, question: str
+    ) -> AnswerResult:
+        """Story 12.80 (round-20 R20-1) — answer working hours from the calendar
+        config; defer as a question when there's no config. Never a booking."""
+        cal = await self._calendar_booking_context(ctx=ctx)
+        hours = (
+            _format_working_hours(getattr(cal.service_rule, "working_hours", None))
+            if cal is not None
+            else None
+        )
+        if hours is None:
+            return self._handle_faq_defer(ctx=ctx, question=question)
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "faq_working_hours"},
+        )
+        text = localize(
+            WORKING_HOURS_LINE, WORKING_HOURS_LINE_EN, language=ctx.language
+        ).format(open=hours[0], close=hours[1])
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "faq_working_hours",
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_faq_defer(
+        self, *, ctx: AnswerContext, question: str
+    ) -> AnswerResult:
+        """Story 12.81 (round-20 R20-2) — defer an info FAQ (trip duration, etc.)
+        to a human AS A QUESTION: a short ack + HITL ticket, never a booking
+        handoff or a date/time ask."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "sales_turn_kind": "faq_defer",
+                "hitl_reason": HITL_REASON_FAQ,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(FAQ_DEFER_LINE, FAQ_DEFER_LINE_EN, language=ctx.language),
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "faq_defer",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_FAQ,
+                "escalation_context": question,
                 "suppress_followup": True,
             },
         )
@@ -2792,6 +2939,96 @@ class SalesPersonaAnswerer:
             },
         )
 
+    def _availability_verdict_text(
+        self, availability: Any, ctx: AnswerContext
+    ) -> str | None:
+        """Customer-facing verdict for a checked slot, or ``None`` if unverifiable.
+
+        Shared by the availability-inquiry handler and the combined
+        price+availability handler (Story 12.82) so the wording stays in lock-step.
+        """
+        if availability.status == STATUS_AVAILABLE:
+            return localize(
+                SLOT_FREE_INQUIRY_LINE, SLOT_FREE_INQUIRY_LINE_EN, language=ctx.language
+            )
+        if availability.status == STATUS_UNAVAILABLE:
+            lead = localize(
+                _UNAVAILABLE_LEAD_LINES.get(availability.reason, SLOT_BUSY_LINE),
+                _UNAVAILABLE_LEAD_LINES_EN.get(availability.reason, SLOT_BUSY_LINE_EN),
+                language=ctx.language,
+            )
+            tail = (
+                _format_alternative_tail(availability.alternative, ctx.language)
+                if availability.alternative is not None
+                else ""
+            )
+            return f"{lead}{tail}"
+        return None  # not connected / error
+
+    async def _maybe_answer_price_and_availability(
+        self, *, question: str, ctx: AnswerContext, state: dict[str, Any] | None
+    ) -> AnswerResult | None:
+        """Story 12.82 (round-20 R20-4) — a message that is BOTH a price ask AND a
+        concrete slot gets the availability verdict AND the price reply in one
+        turn, instead of the price path silently dropping the availability check.
+
+        ``None`` unless pricing is configured, it's a price ask, a single anchoring
+        service is calendar-actionable, a concrete slot parses, and the slot is
+        verifiable — otherwise the price-only / availability-only paths handle it.
+        """
+        if self._price_lookup is None:
+            return None
+        if classify_turn(question, normalizer=self._normalizer).kind != "price_ask":
+            return None
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return None
+        start = extract_requested_start(
+            text=question, now=ctx.now, project_tz=cal.project_tz
+        )
+        if start is None:
+            return None  # no concrete slot → the price-only path handles it
+        operator = cal.settings.calendar_operator
+        operator_chat_id = (
+            self._operator_chat_resolver(operator)
+            if operator and self._operator_chat_resolver is not None
+            else None
+        )
+        availability = await check_requested_availability(
+            project_id=cal.project_id,
+            requested_start=start,
+            operator=operator,
+            operator_chat_id=operator_chat_id,
+            service_rule=cal.service_rule,
+            token_provider=self._calendar_token_provider,
+            freebusy_client=self._calendar_freebusy_client,
+            now=ctx.now,
+            project_tz=cal.project_tz,
+            lookahead_days=cal.settings.lookahead_days,
+            country_code=ctx.country_code,
+            trace_id=ctx.trace_id,
+        )
+        verdict = self._availability_verdict_text(availability, ctx)
+        if verdict is None:
+            return None  # can't verify → fall through to the normal flow
+        pricing_state = state or {
+            "current_stage": STAGE_NEW,
+            "collected_intent": Intent().to_dict(),
+        }
+        price_result = await self._handle_pricing(
+            question=question, ctx=ctx, state=pricing_state
+        )
+        if not price_result.handled:
+            return None  # pricing not configured / RAG down → fall through
+        return replace(
+            price_result,
+            text=f"{verdict} {price_result.text}",
+            metadata={
+                **price_result.metadata,
+                "sales_turn_kind": "price_and_availability",
+            },
+        )
+
     async def _maybe_answer_availability_inquiry(
         self,
         *,
@@ -2846,27 +3083,8 @@ class SalesPersonaAnswerer:
             country_code=ctx.country_code,
             trace_id=ctx.trace_id,
         )
-        if availability.status == STATUS_AVAILABLE:
-            text = localize(
-                SLOT_FREE_INQUIRY_LINE,
-                SLOT_FREE_INQUIRY_LINE_EN,
-                language=ctx.language,
-            )
-        elif availability.status == STATUS_UNAVAILABLE:
-            lead = localize(
-                _UNAVAILABLE_LEAD_LINES.get(availability.reason, SLOT_BUSY_LINE),
-                _UNAVAILABLE_LEAD_LINES_EN.get(
-                    availability.reason, SLOT_BUSY_LINE_EN
-                ),
-                language=ctx.language,
-            )
-            tail = (
-                _format_alternative_tail(availability.alternative, ctx.language)
-                if availability.alternative is not None
-                else ""
-            )
-            text = f"{lead}{tail}"
-        else:  # not connected / error - can't verify; let the normal flow decide
+        text = self._availability_verdict_text(availability, ctx)
+        if text is None:  # not connected / error - can't verify; normal flow decides
             return None
         logger.info(
             "sales_availability_inquiry_answered",
@@ -4257,6 +4475,7 @@ __all__ = [
     "BUSY_NO_SLOT_HANDOFF_TAIL_EN",
     "CLOSING_HANDOFF_LINE",
     "EMPTY_CATALOG_ESCALATION_LINE",
+    "FAQ_DEFER_LINE",
     "EQUIPMENT_ACK_LINE",
     "HITL_REASON_CALENDAR_DISABLED",
     "HITL_REASON_CLOSING_HANDOFF",
@@ -4279,6 +4498,7 @@ __all__ = [
     "SLOT_BUSY_LINE",
     "SLOT_FREE_HANDOFF_LINE",
     "SLOT_TOO_FAR_LINE",
+    "WORKING_HOURS_LINE",
     "STAGE_AWAITING_OPERATOR_PRICE",
     "STAGE_CLOSING",
     "STAGE_PITCHING",

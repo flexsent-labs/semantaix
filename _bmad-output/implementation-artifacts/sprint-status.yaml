@@ -169,4 +169,8 @@ development_status:
   12-77-two-bookings-per-slot-verdict: review
   12-78-vague-bound-time-clarify: review
   12-79-half-form-time: review
+  12-80-faq-working-hours: review
+  12-81-faq-duration-defer: review
+  12-82-combined-price-and-availability: review
+  12-83-before-form-time: review
   epic-12-retrospective: optional

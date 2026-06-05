@@ -31,6 +31,7 @@ from services.api.app.calendar.settings_repository import ServiceRule
 from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
+from services.api.app.sales.price_lookup import PriceMissing, PriceUnknownPayload
 from services.api.app.sales.sales_persona_answerer import (
     _RETURNING_NO_GREETING_DIRECTIVE,
     ASK_FOR_TIME_LINE,
@@ -38,6 +39,7 @@ from services.api.app.sales.sales_persona_answerer import (
     BUSY_NO_SLOT_HANDOFF_TAIL_EN,
     CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
+    FAQ_DEFER_LINE,
     GIBBERISH_CLARIFY_LINE,
     GRATITUDE_ACK_LINE,
     HITL_REASON_CAPACITY,
@@ -45,6 +47,7 @@ from services.api.app.sales.sales_persona_answerer import (
     INVALID_DATE_CLARIFY_LINE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
     PAST_DATE_CLARIFY_LINE,
+    PRICING_MISS_FALLBACK,
     RESPONSE_MODE_SALES_ESCALATION,
     SCOPING_COMPLETE_HANDOFF_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE_EN,
@@ -57,16 +60,20 @@ from services.api.app.sales.sales_persona_answerer import (
     STAGE_PITCHING,
     STAGE_PRICING,
     STAGE_SCOPING,
+    WORKING_HOURS_LINE,
     SalesPersonaAnswerer,
+    _format_working_hours,
     _parse_buggy_seats,
     _parse_headcount,
     _strip_leading_greeting,
     detect_vague_window,
     is_availability_inquiry,
     is_capacity_question,
+    is_duration_question,
     is_eligibility_question,
     is_gibberish,
     is_gratitude,
+    is_working_hours_question,
 )
 
 _NOW = datetime(2026, 5, 29, 9, 0, tzinfo=UTC)  # 12:00 Moscow, Fri 29 May
@@ -204,6 +211,18 @@ def _scoping_state(*, intent: Intent) -> dict[str, Any]:
     }
 
 
+class _StubPriceLookup:
+    """Minimal price lookup for the combined price+availability tests."""
+
+    def __init__(self, result: Any) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    async def lookup(self, *, project_id, intent, question, **_kwargs):
+        self.calls.append({"project_id": project_id, "question": question})
+        return self.result
+
+
 def _build(
     *,
     state: dict[str, Any] | None = None,
@@ -212,6 +231,7 @@ def _build(
     token_provider: Any | None = None,
     freebusy: _FreeBusy | None = None,
     operator_chat_resolver=None,
+    price_lookup: Any | None = None,
 ) -> tuple[SalesPersonaAnswerer, _FakeStateRepo, _FakeOpenRouter, _FreeBusy]:
     state_repo = _FakeStateRepo(initial=state)
     openrouter = openrouter or _FakeOpenRouter()
@@ -231,6 +251,7 @@ def _build(
             if operator_chat_resolver is not None
             else (lambda op: 42)
         ),
+        price_lookup=price_lookup,
     )
     return answerer, state_repo, openrouter, freebusy
 
@@ -2151,3 +2172,181 @@ async def test_global_calendar_block_is_shared_across_services() -> None:
         question="можно завтра в 12:00 на багги?", ctx=_ctx()
     )
     assert SLOT_BUSY_LINE in (result.text or "")
+
+
+# --- Story 12.80/12.81 (round-20 R20-1/R20-2): FAQ intents, not booking --------
+
+
+def test_is_working_hours_question() -> None:
+    assert is_working_hours_question("А до скольки вы вообще работаете?")
+    assert is_working_hours_question("во сколько открываетесь?")
+    assert is_working_hours_question("какой у вас график работы?")
+    assert not is_working_hours_question("сколько стоит?")
+    assert not is_working_hours_question("сколько по времени длится поездка?")
+
+
+def test_is_duration_question() -> None:
+    assert is_duration_question("Сколько по времени длится поездка на багги?")
+    assert is_duration_question("как долго катаемся?")
+    assert not is_duration_question("сколько стоит?")
+    assert not is_duration_question("до скольки работаете?")
+
+
+@pytest.mark.asyncio
+async def test_working_hours_faq_answers_from_config() -> None:
+    # The rule's working_hours are 09:00–20:00 → answered directly, not a handoff.
+    answerer, _s, openrouter, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="А до скольки вы вообще работаете?", ctx=_ctx()
+    )
+    assert result.text == WORKING_HOURS_LINE.format(open="09:00", close="20:00")
+    assert "передам" not in (result.text or "").lower()  # not a booking handoff
+    assert result.metadata.get("escalate") is not True
+    assert openrouter.calls == []  # deterministic, no LLM
+
+
+@pytest.mark.asyncio
+async def test_working_hours_faq_defers_when_calendar_off() -> None:
+    answerer, _s, _, _ = _build(
+        state=None, cal_settings=_FakeCalSettings(enabled=False)
+    )
+    result = await answerer.try_answer(
+        question="до скольки работаете?", ctx=_ctx()
+    )
+    assert result.text == FAQ_DEFER_LINE  # no config → defer as a question
+    assert "на какую дату" not in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_duration_faq_defers_not_books() -> None:
+    answerer, _s, openrouter, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="Сколько по времени длится поездка на багги?", ctx=_ctx()
+    )
+    assert result.text == FAQ_DEFER_LINE
+    assert "на какую дату" not in (result.text or "")  # NOT a date/time ask
+    assert "передам детали" not in (result.text or "").lower()  # not a booking handoff
+    assert openrouter.calls == []
+
+
+# --- Story 12.82 (round-20 R20-4): combined price + availability ---------------
+
+
+@pytest.mark.asyncio
+async def test_combined_price_and_availability_returns_both() -> None:
+    # «Сколько стоит и свободно ли завтра в 12:00?» → BOTH the availability
+    # verdict (занято) AND the price handling (here a defer), not price alone.
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    price_lookup = _StubPriceLookup(
+        PriceMissing(
+            payload=PriceUnknownPayload(
+                service=None,
+                vehicle_type=None,
+                hours=None,
+                original_question="Сколько стоит и свободно ли завтра в 12:00 на багги?",
+            )
+        )
+    )
+    answerer, _s, openrouter, _ = _build(
+        state=None,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),
+        price_lookup=price_lookup,
+    )
+    result = await answerer.try_answer(
+        question="Сколько стоит и свободно ли завтра в 12:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text  # availability verdict present (занято)
+    assert PRICING_MISS_FALLBACK in text  # price handled (defer) in the same turn
+    assert len(price_lookup.calls) == 1  # the price path actually ran
+
+
+@pytest.mark.asyncio
+async def test_price_ask_without_concrete_slot_is_price_only() -> None:
+    # A price ask with no concrete time → price-only path (combined doesn't fire).
+    price_lookup = _StubPriceLookup(
+        PriceMissing(
+            payload=PriceUnknownPayload(
+                service=None, vehicle_type=None, hours=None,
+                original_question="Сколько стоит покататься на багги?",
+            )
+        )
+    )
+    openrouter = _FakeOpenRouter()
+    # First-turn price goes through greeting (LLM extraction) → price-intercept.
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+        price_lookup=price_lookup,
+    )
+    result = await answerer.try_answer(
+        question="Сколько стоит покататься на багги?", ctx=_ctx()
+    )
+    assert result.text == PRICING_MISS_FALLBACK  # price only, no verdict glued on
+    assert SLOT_BUSY_LINE not in (result.text or "")
+
+
+def test_format_working_hours_edges() -> None:
+    assert _format_working_hours(None) is None
+    assert _format_working_hours({"mon": [["09:00", "18:00"]]}) == ("09:00", "18:00")
+    assert _format_working_hours({"mon": [[]]}) is None  # malformed window → None
+
+
+@pytest.mark.asyncio
+async def test_combined_falls_through_when_unverifiable() -> None:
+    # Slot can't be verified (not connected) → the combined handler returns None
+    # so the price-only path takes over (no half-answer with a bogus verdict).
+    price_lookup = _StubPriceLookup(
+        PriceMissing(
+            payload=PriceUnknownPayload(
+                service=None, vehicle_type=None, hours=None, original_question="q"
+            )
+        )
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_RaisingTokenProvider(),  # → STATUS_NOT_CONNECTED
+        freebusy=_FreeBusy(busy=()),
+        price_lookup=price_lookup,
+    )
+    result = await answerer._maybe_answer_price_and_availability(
+        question="Сколько стоит и свободно ли завтра в 12:00 на багги?",
+        ctx=_ctx(),
+        state=None,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_combined_falls_through_when_price_unavailable() -> None:
+    # The price lookup errors → _handle_pricing returns not-handled → the combined
+    # handler falls through rather than emitting a verdict with no price.
+    class _RaisingPrice:
+        async def lookup(self, **_kwargs):
+            raise RuntimeError("rag down")
+
+    answerer, _s, _, _ = _build(
+        state=None,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+        price_lookup=_RaisingPrice(),
+    )
+    result = await answerer._maybe_answer_price_and_availability(
+        question="Сколько стоит и свободно ли завтра в 12:00 на багги?",
+        ctx=_ctx(),
+        state=None,
+    )
+    assert result is None

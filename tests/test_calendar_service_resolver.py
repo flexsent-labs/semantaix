@@ -984,6 +984,40 @@ def test_open_bound_out_of_range_hour_is_none() -> None:
     assert extract_time_bound("после 25:00") is None
 
 
+# --- Story 12.83 (round-20 R20-3): «без N <часа>» («без пятнадцати три» = 14:45)
+
+
+def test_before_form_bez_pyatnadcati_tri() -> None:
+    r = extract_requested_start(
+        text="завтра без пятнадцати три", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 14, 45, tzinfo=MOSCOW)
+
+
+def test_before_form_bez_chetverti() -> None:
+    # «без четверти восемь» (quarter to 8) → 7:45 → daytime 19:45.
+    r = extract_requested_start(
+        text="завтра без четверти восемь", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 19, 45, tzinfo=MOSCOW)
+
+
+def test_before_form_bez_desyati_chas() -> None:
+    # «без десяти час» (ten to one) → 12:50.
+    r = extract_requested_start(
+        text="завтра без десяти час", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 12, 50, tzinfo=MOSCOW)
+
+
+def test_before_form_with_daypart_nochi() -> None:
+    # «без пятнадцати три ночи» → 02:45 (the day-part pins AM).
+    r = extract_requested_start(
+        text="завтра без пятнадцати три ночи", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 2, 45, tzinfo=MOSCOW)
+
+
 # --- Story 12.75 (round-18 R18-2): «прямо сейчас» / «сейчас» → now -------------
 
 
