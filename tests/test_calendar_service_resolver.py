@@ -1057,6 +1057,25 @@ def test_slang_service_word_does_not_block_date_parse() -> None:
     assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
 
 
+# --- Round-25 positives (A1/A2) — keep these passing -------------------------
+
+
+def test_dotted_numeric_date_resolves() -> None:
+    # A1: dotted «09.06 в 12:00» → 9 June 12:00 (numeric DD.MM date form).
+    r = extract_requested_start(
+        text="можно 09.06 в 12:00 на квадроциклах", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
+
+
+def test_opening_boundary_eight_am_resolves() -> None:
+    # A2: «ровно в 8:00» → 08:00 (the opening instant is bookable).
+    r = extract_requested_start(
+        text="завтра ровно в 8:00 на багги", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 8, 0, tzinfo=MOSCOW)
+
+
 # --- Story 12.75 (round-18 R18-2): «прямо сейчас» / «сейчас» → now -------------
 
 

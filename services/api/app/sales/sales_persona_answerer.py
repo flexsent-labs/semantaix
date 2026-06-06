@@ -217,6 +217,10 @@ GIBBERISH_CLARIFY_LINE_EN = (
 # filled from the service rule's working_hours.
 WORKING_HOURS_LINE = "Работаем с {open} до {close}."
 WORKING_HOURS_LINE_EN = "We're open from {open} to {close}."
+# Story 12.88 (round-25 R25-2) — a working-DAYS FAQ («по воскресеньям работаете?»)
+# is answered from service_days + working_hours, never routed into booking.
+WORKING_DAYS_LINE = "Работаем {days} с {open} до {close}."
+WORKING_DAYS_LINE_EN = "We're open {days} from {open} to {close}."
 # Story 12.81 (round-20 R20-2) — an info FAQ we can't answer from data (trip
 # duration, or working hours when the calendar is off) defers AS A QUESTION to a
 # human — never a booking handoff or a date/time ask.
@@ -231,6 +235,16 @@ MIXED_SERVICE_CLARIFY_LINE = (
 )
 MIXED_SERVICE_CLARIFY_LINE_EN = (
     "Let's handle one service at a time. Which would you like to start with?"
+)
+# Story 12.89 (round-25 R25-1) — more vehicles than people is implausible; flag
+# it before confirming (the people≫capacity direction needs per-vehicle data, N2).
+COUNT_MISMATCH_CLARIFY_LINE = (
+    "Вы указали {vehicles} багги на {people} - обычно нужно меньше. "
+    "Сколько багги оформить?"
+)
+COUNT_MISMATCH_CLARIFY_LINE_EN = (
+    "You've asked for {vehicles} buggies for {people} - that's usually more than "
+    "needed. How many buggies should I book?"
 )
 # Story 16 (round-16 R16-4) — gratitude / smalltalk gets a courteous ack, not a
 # booking-handoff line.
@@ -445,6 +459,66 @@ def is_working_hours_question(question: str) -> bool:
     return bool(_WORK_KEYWORD_RE.search(question)) and bool(
         _HOURS_QUESTION_RE.search(question)
     )
+
+
+# Story 12.88 (round-25 R25-2) — working-DAYS FAQ: a work keyword + a day-scope
+# marker («по воскресеньям», «в выходные», «какие дни», «по каким дням»).
+_DAYS_QUESTION_RE = re.compile(
+    r"по\s+(?:воскресень|субб|понедельник|вторник|сред|четверг|пятниц|выходн|будн|дн)"
+    r"|в\s+(?:воскресень|субботу|понедельник|вторник|среду|четверг|пятницу|выходн|будн)"
+    r"|каки\w*\s+дн|по\s+каким\s+дн|кажд\w*\s+день|ежедневн",
+    re.IGNORECASE | re.UNICODE,
+)
+_RU_WEEKDAY_ABBR: dict[str, str] = {
+    "mon": "пн",
+    "tue": "вт",
+    "wed": "ср",
+    "thu": "чт",
+    "fri": "пт",
+    "sat": "сб",
+    "sun": "вс",
+}
+_WEEKDAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def is_working_days_question(question: str) -> bool:
+    """True for a working-DAYS FAQ («по воскресеньям работаете?», «какие дни?»)."""
+    return bool(_WORK_KEYWORD_RE.search(question)) and bool(
+        _DAYS_QUESTION_RE.search(question)
+    )
+
+
+def _format_working_days(service_days: Any) -> str | None:
+    """«ежедневно» when all 7 days are configured, else the day abbreviations in
+    week order, or ``None`` when no recognised days are present."""
+    if not service_days:
+        return None
+    present = {d for d in service_days if d in _RU_WEEKDAY_ABBR}
+    if not present:
+        return None
+    if len(present) == 7:
+        return "ежедневно"
+    return ", ".join(_RU_WEEKDAY_ABBR[d] for d in _WEEKDAY_ORDER if d in present)
+
+
+def is_count_inconsistent(intent: Intent) -> bool:
+    """True when the requested vehicle count exceeds the party size — implausible
+    (more buggies than riders). Story 12.89 (round-25 R25-1). The opposite
+    direction (people ≫ per-vehicle capacity) needs catalog data (N2)."""
+    people = _as_positive_int(intent.headcount)
+    vehicles = _as_positive_int(intent.vehicle_count)
+    return people is not None and vehicles is not None and vehicles > people
+
+
+def _as_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if parsed > 0 else None
+    return None
 
 
 def is_duration_question(question: str) -> bool:
@@ -1302,6 +1376,10 @@ class SalesPersonaAnswerer:
         # trip duration) are answered/deferred AS QUESTIONS, never routed into the
         # booking funnel. Gated on not a booking-commit so «запишите …» still books.
         if not _BOOKING_COMMIT_RE.search(question):
+            if is_working_days_question(question):
+                return await self._handle_working_days_question(
+                    ctx=ctx, question=question
+                )
             if is_working_hours_question(question):
                 return await self._handle_working_hours_question(
                     ctx=ctx, question=question
@@ -1521,6 +1599,10 @@ class SalesPersonaAnswerer:
         # квадроциклы») is handled one at a time, not collapsed into one verdict.
         if is_mixed_service_request(question):
             return self._handle_mixed_service(ctx=ctx)
+        # Story 12.89 (round-25 R25-1) — more buggies than people is implausible;
+        # clarify before confirming, instead of silently saying «свободно».
+        if is_count_inconsistent(merged):
+            return self._handle_count_mismatch(ctx=ctx, intent=merged)
         # Story 12.58 (round-14) — a pure availability INQUIRY («…в 16:30
         # свободно?») gets a plain verdict, never a booking handoff/HITL. Checked
         # before the busy-intercept so an inquiry isn't turned into a booking.
@@ -1722,6 +1804,41 @@ class SalesPersonaAnswerer:
             },
         )
 
+    async def _handle_working_days_question(
+        self, *, ctx: AnswerContext, question: str
+    ) -> AnswerResult:
+        """Story 12.88 (round-25 R25-2) — answer working days + hours from the
+        calendar config; defer as a question when there's no config."""
+        cal = await self._calendar_booking_context(ctx=ctx)
+        hours = (
+            _format_working_hours(getattr(cal.service_rule, "working_hours", None))
+            if cal is not None
+            else None
+        )
+        days = (
+            _format_working_days(getattr(cal.service_rule, "service_days", None))
+            if cal is not None
+            else None
+        )
+        if hours is None or days is None:
+            return self._handle_faq_defer(ctx=ctx, question=question)
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "faq_working_days"},
+        )
+        text = localize(
+            WORKING_DAYS_LINE, WORKING_DAYS_LINE_EN, language=ctx.language
+        ).format(days=days, open=hours[0], close=hours[1])
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "faq_working_days",
+                "suppress_followup": True,
+            },
+        )
+
     def _handle_faq_defer(
         self, *, ctx: AnswerContext, question: str
     ) -> AnswerResult:
@@ -1746,6 +1863,29 @@ class SalesPersonaAnswerer:
                 "escalate": True,
                 "hitl_reason": HITL_REASON_FAQ,
                 "escalation_context": question,
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_count_mismatch(
+        self, *, ctx: AnswerContext, intent: Intent
+    ) -> AnswerResult:
+        """Story 12.89 (round-25 R25-1) — clarify an implausible vehicles>people
+        count before confirming. No escalation, funnel state left intact."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "count_mismatch"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                COUNT_MISMATCH_CLARIFY_LINE,
+                COUNT_MISMATCH_CLARIFY_LINE_EN,
+                language=ctx.language,
+            ).format(vehicles=intent.vehicle_count, people=intent.headcount),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "count_mismatch",
                 "suppress_followup": True,
             },
         )
@@ -2071,6 +2211,9 @@ class SalesPersonaAnswerer:
             # clarify one at a time.
             if is_mixed_service_request(question):
                 return self._handle_mixed_service(ctx=ctx)
+            # Story 12.89 (round-25 R25-1) — flag more buggies than people.
+            if is_count_inconsistent(merged):
+                return self._handle_count_mismatch(ctx=ctx, intent=merged)
             # Story 12.58 (round-14) — a mid-scoping availability INQUIRY gets a
             # plain verdict (no handoff/HITL), checked before the busy-intercept.
             inquiry = await self._maybe_answer_availability_inquiry(
@@ -4601,6 +4744,7 @@ __all__ = [
     "BUSY_NO_SLOT_HANDOFF_TAIL",
     "BUSY_NO_SLOT_HANDOFF_TAIL_EN",
     "CLOSING_HANDOFF_LINE",
+    "COUNT_MISMATCH_CLARIFY_LINE",
     "EMPTY_CATALOG_ESCALATION_LINE",
     "FAQ_DEFER_LINE",
     "EQUIPMENT_ACK_LINE",
@@ -4626,6 +4770,7 @@ __all__ = [
     "SLOT_BUSY_LINE",
     "SLOT_FREE_HANDOFF_LINE",
     "SLOT_TOO_FAR_LINE",
+    "WORKING_DAYS_LINE",
     "WORKING_HOURS_LINE",
     "STAGE_AWAITING_OPERATOR_PRICE",
     "STAGE_CLOSING",
