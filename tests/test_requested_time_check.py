@@ -111,6 +111,53 @@ async def test_busy_slot_is_unavailable() -> None:
     assert result.alternative == datetime(2026, 5, 30, 9, 0, tzinfo=_TZ)
 
 
+# --- Round-24 R24-1 guard (confirmed non-bug): «прямо сейчас» resolves to NOW,
+# and a now-instant goes through the same off-hours / busy guards as a stated
+# time. Live close is 21:00, so 19:00 «сейчас» is correctly free. ----------------
+
+
+@pytest.mark.parametrize(
+    "now_hour, busy_noon, expected_status, expected_reason",
+    [
+        (22, False, "unavailable", "outside_working_hours"),  # after the 21:00 close
+        (19, False, "available", None),  # in-hours: ride 19:00-20:00 < 21:00 → free
+        (12, True, "unavailable", "busy"),  # in-hours but the slot is taken
+    ],
+)
+@pytest.mark.asyncio
+async def test_now_instant_goes_through_offhours_and_busy_guards(
+    now_hour, busy_noon, expected_status, expected_reason
+) -> None:
+    now = datetime(2026, 5, 30, now_hour, 0, tzinfo=_TZ)  # Sat 30 May
+    requested = now  # «прямо сейчас» resolves to exactly "now"
+    busy = (
+        (
+            BusyInterval(
+                start=datetime(2026, 5, 30, 11, 30, tzinfo=_TZ),
+                end=datetime(2026, 5, 30, 12, 30, tzinfo=_TZ),
+            ),
+        )
+        if busy_noon
+        else ()
+    )
+    result = await check_requested_availability(
+        project_id=1,
+        requested_start=requested,
+        operator="@op",
+        operator_chat_id=42,
+        service_rule=_rule_live_hours(),
+        token_provider=_TokenProvider(),
+        freebusy_client=_FreeBusy(busy=busy),
+        now=now,
+        project_tz=_TZ,
+        lookahead_days=60,
+        country_code="RU",
+        trace_id="t-now",
+    )
+    assert result.status == expected_status
+    assert result.reason == expected_reason
+
+
 @pytest.mark.asyncio
 async def test_missing_provider_is_not_connected() -> None:
     result = await _check(token_provider=None, freebusy=_FreeBusy())
