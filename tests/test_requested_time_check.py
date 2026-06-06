@@ -236,6 +236,56 @@ async def test_far_future_busy_date_offers_same_day_alternative() -> None:
     assert result.alternative == datetime(2026, 12, 15, 9, 0, tzinfo=_TZ)
 
 
+def _rule_live_hours() -> ServiceRule:
+    # The live Buggy23 config: 08:00–21:00, 60-min slots.
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    return ServiceRule(
+        id=1,
+        project_id=1,
+        name="Аренда багги",
+        duration_minutes=60,
+        working_hours={day: [["08:00", "21:00"]] for day in week},
+        service_days=week,
+        date_exceptions=[],
+        updated_at=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "hour, minute, expected",
+    [
+        (8, 0, "available"),  # opening
+        (18, 0, "available"),  # R21-3: 18:00 ride ends 19:00 < 21:00 → FREE (non-bug)
+        (20, 0, "available"),  # last bookable start (ride ends exactly at 21:00)
+        (20, 1, "unavailable"),  # ride would end 21:01 > close → off-hours
+        (21, 0, "unavailable"),  # start at close → off-hours
+    ],
+)
+@pytest.mark.asyncio
+async def test_closing_boundary_last_start_is_close_minus_duration(
+    hour, minute, expected
+) -> None:
+    # R21-3 (confirmed non-bug): the last bookable START is close − duration, so a
+    # ride may END exactly at close (half-open). 18:00 is correctly free at the
+    # real 21:00 close; off-hours only once the ride would run past close.
+    requested = datetime(2026, 5, 30, hour, minute, tzinfo=_TZ)
+    result = await check_requested_availability(
+        project_id=1,
+        requested_start=requested,
+        operator="@op",
+        operator_chat_id=42,
+        service_rule=_rule_live_hours(),
+        token_provider=_TokenProvider(),
+        freebusy_client=_FreeBusy(),
+        now=_NOW,
+        project_tz=_TZ,
+        lookahead_days=60,
+        country_code="RU",
+        trace_id="t-boundary",
+    )
+    assert result.status == expected
+
+
 @pytest.mark.asyncio
 async def test_beyond_safety_cap_stays_outside_lookahead() -> None:
     # A date past the ~400-day safety cap is still declined as outside the

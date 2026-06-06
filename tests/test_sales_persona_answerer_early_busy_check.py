@@ -46,6 +46,7 @@ from services.api.app.sales.sales_persona_answerer import (
     HITL_REASON_SCOPING_COMPLETE,
     INVALID_DATE_CLARIFY_LINE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
+    MIXED_SERVICE_CLARIFY_LINE,
     PAST_DATE_CLARIFY_LINE,
     PRICING_MISS_FALLBACK,
     RESPONSE_MODE_SALES_ESCALATION,
@@ -73,6 +74,8 @@ from services.api.app.sales.sales_persona_answerer import (
     is_eligibility_question,
     is_gibberish,
     is_gratitude,
+    is_info_faq_question,
+    is_mixed_service_request,
     is_working_hours_question,
 )
 
@@ -2350,3 +2353,102 @@ async def test_combined_falls_through_when_price_unavailable() -> None:
         state=None,
     )
     assert result is None
+
+
+# --- Story 12.84 (round-21 R21-2): payment/location/what-to-bring FAQ defer ----
+
+
+def test_is_info_faq_question() -> None:
+    assert is_info_faq_question("А оплатить картой можно или только наличными?")
+    assert is_info_faq_question("А где вы находитесь, как до вас добраться?")
+    assert is_info_faq_question("А что взять с собой?")
+    assert not is_info_faq_question("сколько стоит?")
+    assert not is_info_faq_question("свободно ли завтра в 12:00?")
+    assert not is_info_faq_question("хочу багги завтра в 14:00")
+
+
+@pytest.mark.asyncio
+async def test_payment_faq_defers_not_books() -> None:
+    # Mid-funnel (closing) so the old path would have handed off; the FAQ branch
+    # fires first → a question-style defer, never a booking handoff.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="А оплатить картой можно или только наличными?", ctx=_ctx()
+    )
+    assert result.text == FAQ_DEFER_LINE
+    assert "передам" not in (result.text or "").lower()  # not a booking handoff
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_location_faq_defers_not_books() -> None:
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates="завтра в 14:00").to_dict(),
+        "last_proposal": {"alternative_iso": "2026-05-30T08:00:00+03:00"},
+    }
+    answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="А где вы находитесь, как до вас добраться?", ctx=_ctx()
+    )
+    assert result.text == FAQ_DEFER_LINE
+    assert "на какую дату" not in (result.text or "")
+    assert openrouter.calls == []
+
+
+# --- Story 12.85 (round-21 R21-1): mixed-service request → one-at-a-time clarify
+
+
+def test_is_mixed_service_request() -> None:
+    assert is_mixed_service_request(
+        "завтра в 15:00 двоих на багги и ещё двоих на квадроциклах"
+    )
+    assert not is_mixed_service_request("хочу багги завтра в 15:00")  # one service
+    assert not is_mixed_service_request("сколько стоит квадроцикл?")  # one service
+
+
+@pytest.mark.asyncio
+async def test_mixed_service_request_clarifies_one_at_a_time() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="Можно завтра в 15:00 двоих на багги и ещё двоих на квадроциклах?",
+        ctx=_ctx(),
+    )
+    assert result.text == MIXED_SERVICE_CLARIFY_LINE
+    assert SLOT_FREE_HANDOFF_LINE not in (result.text or "")  # not a single verdict
+    assert result.metadata.get("escalate") is not True
+
+
+@pytest.mark.asyncio
+async def test_mixed_service_mid_scoping_clarifies() -> None:
+    # Covers the scoping-stage mixed-service hook.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=_scoping_state(intent=Intent(headcount=2)),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="давайте двоих на багги и двоих на квадроциклах", ctx=_ctx()
+    )
+    assert result.text == MIXED_SERVICE_CLARIFY_LINE
