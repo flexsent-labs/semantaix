@@ -39,6 +39,7 @@ from services.api.app.calendar.availability import (
     REASON_OUTSIDE_LOOKAHEAD,
     REASON_OUTSIDE_WORKING_HOURS,
     REASON_WRONG_SERVICE_DAY,
+    _parse_windows,
 )
 from services.api.app.calendar.requested_time_check import (
     STATUS_AVAILABLE,
@@ -250,6 +251,10 @@ COUNT_MISMATCH_CLARIFY_LINE_EN = (
 # booking-handoff line.
 GRATITUDE_ACK_LINE = "Пожалуйста! Обращайтесь, если будут вопросы."
 GRATITUDE_ACK_LINE_EN = "You're welcome! Feel free to reach out anytime."
+# Story 12.92 (round-26 R26-3) — a bare greeting gets a courteous greeting +
+# booking prompt, never a booking-completion handoff.
+GREETING_SMALLTALK_LINE = "Здравствуйте! На какую дату хотите записаться?"
+GREETING_SMALLTALK_LINE_EN = "Hello! What date would you like to book?"
 # Story 12.59 (round-14) - "сколько багги нужно / понадобится / вместит" is a
 # capacity question, NOT a price ask ("сколько стоит") or a headcount answer.
 _CAPACITY_QUESTION_RE = re.compile(
@@ -382,6 +387,21 @@ def is_gratitude(question: str) -> bool:
     return bool(_GRATITUDE_RE.search(question)) and not _GRATITUDE_DECLINE_RE.search(
         question
     )
+
+
+def is_pure_greeting(question: str) -> bool:
+    """True for a bare salutation with no booking content («Здравствуйте!»).
+
+    Story 12.92 (round-26 R26-3). Uses the same leading-greeting grammar as the
+    greeting handler; True only when nothing substantive remains after stripping
+    the salutation, so «Здравствуйте, хочу багги» is NOT a pure greeting.
+    """
+    if not _LEADING_GREETING_RE.match(question):
+        return False
+    remainder = _LEADING_GREETING_RE.sub("", question, count=1).strip(
+        " \t\n\r,.!?…—–-)("
+    )
+    return remainder == ""
 
 
 # Story 16 (round-16 R16-3) — an eligibility / policy QUESTION («можно ли с
@@ -580,21 +600,27 @@ def is_mixed_service_request(question: str) -> bool:
 def _format_working_hours(working_hours: Any) -> tuple[str, str] | None:
     """The overall ``(open, close)`` span across configured days, or ``None``.
 
-    ``working_hours`` is the service rule's ``{weekday: [[start, end], …]}`` map;
-    "HH:MM" strings compare lexically, so min/max give the day's span.
+    Story 12.90 (round-26 R26-1): reuse the availability engine's ``_parse_windows``
+    so the FAQ reports the SAME hours the engine enforces and handles BOTH the
+    production flat shape ``{day: ["08:00", "21:00"]}`` and the nested
+    ``{day: [["08:00", "21:00"], …]}`` form (the old ad-hoc parser garbled the
+    flat shape to ('0', '8')). Malformed entries are skipped.
     """
     if not working_hours:
         return None
-    starts: list[str] = []
-    ends: list[str] = []
-    for windows in working_hours.values():
+    starts: list[Any] = []
+    ends: list[Any] = []
+    for raw in working_hours.values():
+        try:
+            windows = _parse_windows(raw)
+        except (ValueError, TypeError):
+            continue
         for window in windows:
-            if len(window) >= 2:
-                starts.append(window[0])
-                ends.append(window[1])
+            starts.append(window.start)
+            ends.append(window.end)
     if not starts or not ends:
         return None
-    return (min(starts), max(ends))
+    return (min(starts).strftime("%H:%M"), max(ends).strftime("%H:%M"))
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 EMPTY_CATALOG_ESCALATION_LINE_EN = (
@@ -724,6 +750,10 @@ ASK_FOR_TIME_ONLY_LINE = (
 ASK_FOR_TIME_ONLY_LINE_EN = (
     "Could you let me know the desired time? I'll check the calendar and confirm."
 )
+# Story 12.91 (round-26 R26-2) — when the TIME is given but no date, ask only for
+# the date (the time is re-attached on the reply, so intent_merge doesn't drop it).
+ASK_FOR_DATE_LINE = "Уточните, пожалуйста, на какую дату записать?"
+ASK_FOR_DATE_LINE_EN = "Could you let me know the date you'd like to book?"
 # Story 12.19 — acknowledgement when the customer accepts the offered
 # alternative slot in pitching ("да" / "давайте на 31-ое в 8"). Names the slot
 # but frames it as passed to the operator *for* confirmation — never as already
@@ -1354,6 +1384,13 @@ class SalesPersonaAnswerer:
         ):
             return self._handle_gratitude(ctx=ctx)
 
+        # Story 12.92 (round-26 R26-3) — a bare greeting («Здравствуйте!») gets a
+        # courteous greeting + booking prompt, never a booking handoff. Fires in
+        # any state. ``is_pure_greeting`` already excludes «здравствуйте, хочу
+        # багги» (booking content remains), so it books normally.
+        if is_pure_greeting(question):
+            return self._handle_greeting_smalltalk(ctx=ctx)
+
         # Story 16 (round-16 R16-3) — an eligibility/policy question («можно с
         # ребёнком?») is answered as a QUESTION: RAG-grounded if the catalog has
         # the policy, else deferred to a human — never a booking handoff.
@@ -1908,6 +1945,27 @@ class SalesPersonaAnswerer:
             metadata={
                 "answerer": NAME,
                 "sales_turn_kind": "mixed_service",
+                "suppress_followup": True,
+            },
+        )
+
+    def _handle_greeting_smalltalk(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Story 12.92 (round-26 R26-3) — courteous greeting + booking prompt for a
+        bare greeting; never a handoff. No ``_persist`` (funnel left intact)."""
+        logger.info(
+            "sales_answerer_handled",
+            extra={"trace_id": ctx.trace_id, "sales_turn_kind": "greeting"},
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                GREETING_SMALLTALK_LINE,
+                GREETING_SMALLTALK_LINE_EN,
+                language=ctx.language,
+            ),
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "greeting",
                 "suppress_followup": True,
             },
         )
@@ -2570,9 +2628,6 @@ class SalesPersonaAnswerer:
             is not None
         ):
             return merged  # already a full date+time
-        clocks = extract_all_clocks(new_dates)
-        if not clocks:
-            return merged  # no time either → nothing to combine
         prior = Intent.from_dict(state.get("collected_intent") or {})
         prior_dates = prior.dates if isinstance(prior.dates, str) else None
         prior_date = (
@@ -2580,12 +2635,23 @@ class SalesPersonaAnswerer:
             if prior_dates
             else None
         )
-        if prior_date is None:
-            return merged
-        hour, minute = clocks[0]
-        return replace(
-            merged, dates=f"{prior_date.isoformat()} {hour:02d}:{minute:02d}"
-        )
+        prior_clocks = extract_all_clocks(prior_dates) if prior_dates else []
+        clocks = extract_all_clocks(new_dates)
+        new_date = extract_requested_date(text=new_dates, now=ctx.now, project_tz=tz)
+        # Time-only reply + a prior date → combine (round-15 R-12.62).
+        if clocks and new_date is None and prior_date is not None:
+            hour, minute = clocks[0]
+            return replace(
+                merged, dates=f"{prior_date.isoformat()} {hour:02d}:{minute:02d}"
+            )
+        # Date-only reply + a prior time → combine (round-26 R26-2): after we
+        # asked «на какую дату?» the bare date keeps the time the customer gave.
+        if new_date is not None and not clocks and prior_clocks:
+            hour, minute = prior_clocks[0]
+            return replace(
+                merged, dates=f"{new_date.isoformat()} {hour:02d}:{minute:02d}"
+            )
+        return merged
 
     async def _complete_booking(
         self,
@@ -2622,6 +2688,17 @@ class SalesPersonaAnswerer:
             )
             if vague is not None:
                 return vague
+        # Story 12.91 (round-26 R26-2) — a turn carrying a TIME but no resolvable
+        # DATE must ask for the date (in ANY stage), never defer/hand off a
+        # dateless booking. Fires before the bounded date+time ask below.
+        if await self._has_time_without_date(ctx=ctx, intent=intent):
+            return await self._ask_for_date(
+                ctx=ctx,
+                intent=intent,
+                stage_before=stage_before,
+                base_metadata=base_metadata,
+                dispatch_fallback=dispatch_fallback,
+            )
         # Story 12.10 — no concrete time yet, but the calendar can check one:
         # ask for date+time instead of a blind hand off. Bounded to one ask —
         # the follow-up arrives with stage_before == STAGE_AWAITING_TIME.
@@ -2724,6 +2801,63 @@ class SalesPersonaAnswerer:
                 "stage_before": stage_before,
                 "stage_after": STAGE_AWAITING_TIME,
                 "sales_turn_kind": "awaiting_time_prompt",
+                **base_metadata,
+            },
+        )
+
+    async def _has_time_without_date(
+        self, *, ctx: AnswerContext, intent: Intent
+    ) -> bool:
+        """True when the booking carries a concrete TIME but no resolvable date
+        and the calendar can check one (Story 12.91, round-26 R26-2)."""
+        cal = await self._calendar_booking_context(ctx=ctx)
+        if cal is None:
+            return False
+        dates_text = intent.dates if isinstance(intent.dates, str) else None
+        if not dates_text or not extract_all_clocks(dates_text):
+            return False
+        return (
+            extract_requested_date(
+                text=dates_text, now=ctx.now, project_tz=cal.project_tz
+            )
+            is None
+        )
+
+    async def _ask_for_date(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        stage_before: str,
+        base_metadata: dict[str, Any],
+        dispatch_fallback: bool,
+    ) -> AnswerResult:
+        """Story 12.91 (round-26 R26-2) — ask only for the date (the time is kept
+        and re-attached on the reply by ``_preserve_prior_date``); park in
+        awaiting_time. Never a defer/handoff of a dateless booking."""
+        text = localize(ASK_FOR_DATE_LINE, ASK_FOR_DATE_LINE_EN, language=ctx.language)
+        if dispatch_fallback:
+            text = f"{text}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_AWAITING_TIME, intent=intent
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": STAGE_AWAITING_TIME,
+                "sales_turn_kind": "ask_for_date",
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": STAGE_AWAITING_TIME,
+                "sales_turn_kind": "ask_for_date",
                 **base_metadata,
             },
         )
@@ -4741,12 +4875,14 @@ class SalesPersonaAnswerer:
 
 
 __all__ = [
+    "ASK_FOR_DATE_LINE",
     "BUSY_NO_SLOT_HANDOFF_TAIL",
     "BUSY_NO_SLOT_HANDOFF_TAIL_EN",
     "CLOSING_HANDOFF_LINE",
     "COUNT_MISMATCH_CLARIFY_LINE",
     "EMPTY_CATALOG_ESCALATION_LINE",
     "FAQ_DEFER_LINE",
+    "GREETING_SMALLTALK_LINE",
     "EQUIPMENT_ACK_LINE",
     "HITL_REASON_CALENDAR_DISABLED",
     "HITL_REASON_CLOSING_HANDOFF",
