@@ -2225,6 +2225,32 @@ class SalesPersonaAnswerer:
                 stage_before=STAGE_PITCHING,
             )
 
+        # (a3) Story 12.86 (round-23 R23-3): after a FREE handoff there's no
+        # offered slot, but the customer's own prior date sits in ``intent.dates``.
+        # A later bare-time correction («лучше в 12:00 в тот же день») must carry
+        # that date and RE-CHECK the calendar — the cross-turn analogue of R17-2.
+        if not isinstance(last_proposal, dict) and isinstance(intent.dates, str):
+            prior = extract_requested_start(
+                text=intent.dates, now=now, project_tz=ZoneInfo(ctx.timezone)
+            )
+            if prior is not None:
+                new_times = [
+                    hm
+                    for hm in extract_all_clocks(question)
+                    if hm != (prior.hour, prior.minute)
+                ]
+                if len(new_times) == 1:
+                    new_start = prior.replace(
+                        hour=new_times[0][0], minute=new_times[0][1]
+                    )
+                    return await self._complete_booking(
+                        ctx=ctx,
+                        intent=replace(
+                            intent, dates=new_start.strftime("%Y-%m-%d %H:%M")
+                        ),
+                        stage_before=STAGE_PITCHING,
+                    )
+
         # (b) Acceptance of the slot we offered → confirm it (named) and close.
         if isinstance(last_proposal, dict) and is_acceptance(
             question, normalizer=self._normalizer
@@ -2955,11 +2981,11 @@ class SalesPersonaAnswerer:
     async def _maybe_answer_multi_date(
         self, *, question: str, ctx: AnswerContext, stage_before: str
     ) -> AnswerResult | None:
-        """Story 16 (round-16 R16-2) — «<день1> или <день2> в HH:MM» gets an
-        EXPLICIT per-day verdict («6 июня в 12:00 - свободно; 7 июня в 12:00 -
-        свободно. Какой день вам удобнее?»), so the customer can tell which day
-        is confirmed instead of one unstated verdict. ``None`` unless the turn
-        offers two distinct dates with a clock and the calendar can verify both.
+        """Story 16 (round-16 R16-2) / 12.87 (round-23 R23-2) — a multi-option
+        «или» turn gets an EXPLICIT per-option verdict instead of one unstated
+        one. Two shapes: «<день1> или <день2> в HH:MM» → per-DAY («…Какой день
+        вам удобнее?»); «<день> в HH:MM или в HH:MM» → per-TIME («…В какое время
+        вам удобнее?»). ``None`` unless the calendar can verify both options.
         Russian-only by design (gated on «или»)."""
         if not re.search(r"\bили\b", question, re.IGNORECASE | re.UNICODE):
             return None
@@ -2970,14 +2996,25 @@ class SalesPersonaAnswerer:
         clocks = extract_all_clocks(question)
         if not clocks:
             return None  # no time → let the slot-fill flow ask for one
-        hour, minute = clocks[0]
         dates: list[date] = []
         for part in re.split(r"\bили\b", question, flags=re.IGNORECASE | re.UNICODE):
             parsed = extract_requested_date(text=part, now=ctx.now, project_tz=tz)
             if parsed is not None and parsed not in dates:
                 dates.append(parsed)
-        if len(dates) < 2:
-            return None  # not actually two distinct date options
+        if len(dates) >= 2:
+            # Two day options sharing one time (R16-2).
+            hour, minute = clocks[0]
+            slots = [(d, hour, minute) for d in dates[:2]]
+            tail = ". Какой день вам удобнее?"
+            turn_kind = "multi_date_verdict"
+        elif len(dates) == 1 and len(clocks) >= 2:
+            # One day, two time options (R23-2).
+            day = dates[0]
+            slots = [(day, hour, minute) for (hour, minute) in clocks[:2]]
+            tail = ". В какое время вам удобнее?"
+            turn_kind = "multi_time_verdict"
+        else:
+            return None  # not actually two distinct options
         operator = cal.settings.calendar_operator
         operator_chat_id = (
             self._operator_chat_resolver(operator)
@@ -2985,7 +3022,7 @@ class SalesPersonaAnswerer:
             else None
         )
         verdicts: list[str] = []
-        for day in dates[:2]:
+        for day, hour, minute in slots:
             start = datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz)
             availability = await check_requested_availability(
                 project_id=cal.project_id,
@@ -3012,19 +3049,19 @@ class SalesPersonaAnswerer:
                 f"в {start.strftime('%H:%M')} - {word}"
             )
         logger.info(
-            "sales_multi_date_verdict",
+            "sales_multi_option_verdict",
             extra={
                 "trace_id": ctx.trace_id,
                 "stage_before": stage_before,
-                "dates": [d.isoformat() for d in dates[:2]],
+                "turn_kind": turn_kind,
             },
         )
         return AnswerResult(
             handled=True,
-            text="; ".join(verdicts) + ". Какой день вам удобнее?",
+            text="; ".join(verdicts) + tail,
             metadata={
                 "answerer": NAME,
-                "sales_turn_kind": "multi_date_verdict",
+                "sales_turn_kind": turn_kind,
                 "suppress_followup": True,
             },
         )

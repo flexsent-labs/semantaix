@@ -2452,3 +2452,133 @@ async def test_mixed_service_mid_scoping_clarifies() -> None:
         question="давайте двоих на багги и двоих на квадроциклах", ctx=_ctx()
     )
     assert result.text == MIXED_SERVICE_CLARIFY_LINE
+
+
+# --- Story 12.86 (round-23 R23-3): multi-turn time change re-runs the check ----
+
+
+@pytest.mark.asyncio
+async def test_pitching_time_change_after_free_handoff_rechecks() -> None:
+    # Turn 1 confirmed «9 июня 14:00» (free) → parked in pitching with NO offered
+    # slot (last_proposal=None). Turn 2 «лучше в 12:00 в тот же день» must carry
+    # the prior date (9 June) and RE-CHECK → 9 June 12:00 ∈ 11–13 → занято.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates="9 июня в 14:00", headcount=2).to_dict(),
+        "last_proposal": None,  # a free handoff offered no alternative
+    }
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 6, 9, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 6, 9, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer, _s, _, freebusy = _build(
+        state=state,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),
+    )
+    result = await answerer.try_answer(
+        question="Ой, а давайте лучше в 12:00 в тот же день", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert SLOT_BUSY_LINE in text  # re-checked 9 June 12:00 → занято
+    assert "Ближайшее свободное время" in text  # offered an alternative
+    assert freebusy.calls >= 1  # the calendar was actually re-queried
+
+
+@pytest.mark.asyncio
+async def test_pitching_unchanged_reply_after_free_handoff_still_hands_off() -> None:
+    # A non-time reply after a free handoff still hands off (no re-check, no crash).
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates="9 июня в 14:00", headcount=2).to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, _, _ = _build(
+        state=state, cal_settings=_FakeCalSettings(), token_provider=_TokenProvider()
+    )
+    result = await answerer.try_answer(question="хорошо, спасибо", ctx=_ctx())
+    assert SLOT_BUSY_LINE not in (result.text or "")
+
+
+# --- Story 12.87 (round-23 R23-2): multi-option TIME «или» → per-time verdict ---
+
+
+@pytest.mark.asyncio
+async def test_multi_time_or_gives_per_time_verdict() -> None:
+    # «завтра в 12:00 или в 16:00» (one date, two times) → a per-TIME verdict.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # 30 May fully free
+    )
+    result = await answerer.try_answer(
+        question="Можно завтра в 12:00 или в 16:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "12:00" in text and "16:00" in text  # both times stated
+    assert "В какое время" in text
+    assert text.count("свободно") == 2
+
+
+@pytest.mark.asyncio
+async def test_multi_time_or_one_busy_one_free() -> None:
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 30, 11, 0, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 30, 13, 0, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),  # 30 May 12:00 busy, 16:00 free
+    )
+    result = await answerer.try_answer(
+        question="Можно завтра в 12:00 или в 16:00 на багги?", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert "занято" in text and "свободно" in text
+
+
+# --- Story R17-3 lock-in (Y3): «через час» busy case → занято -----------------
+
+
+@pytest.mark.asyncio
+async def test_relative_offset_through_hour_busy_returns_zanyato() -> None:
+    # _NOW = 12:00 Moscow; «через час» = 13:00. Pin a busy block there → занято.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "через час"}, "next_question": "ок"}
+    )
+    busy = (
+        BusyInterval(
+            start=datetime(2026, 5, 29, 12, 30, tzinfo=_TOMORROW_MOSCOW),
+            end=datetime(2026, 5, 29, 13, 30, tzinfo=_TOMORROW_MOSCOW),
+        ),
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=busy),
+    )
+    result = await answerer.try_answer(
+        question="можно через час на багги, нас двое, одна багги?", ctx=_ctx()
+    )
+    assert SLOT_BUSY_LINE in (result.text or "")
