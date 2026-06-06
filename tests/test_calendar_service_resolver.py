@@ -1037,6 +1037,26 @@ def test_digit_plus_evening_word_resolves() -> None:
     assert r == datetime(2026, 6, 6, 21, 0, tzinfo=MOSCOW)
 
 
+# --- Round-24 positives (Z2/Z3) — keep these passing -------------------------
+
+
+def test_early_morning_six_am_resolves() -> None:
+    # Z3: «6 утра» (digit + «утра») → 06:00 (the early/lower off-hours bound).
+    r = extract_requested_start(
+        text="завтра в 6 утра", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 6, 6, 0, tzinfo=MOSCOW)
+
+
+def test_slang_service_word_does_not_block_date_parse() -> None:
+    # Z2: a slang service word («квадриках») doesn't prevent the date+time parse —
+    # the verdict is driven by the (global) calendar, not the service name.
+    r = extract_requested_start(
+        text="на квадриках 9 июня в 12:00", now=_NOW, project_tz=MOSCOW
+    )
+    assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
+
+
 # --- Story 12.75 (round-18 R18-2): «прямо сейчас» / «сейчас» → now -------------
 
 
