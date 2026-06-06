@@ -39,6 +39,7 @@ from services.api.app.sales.sales_persona_answerer import (
     BUSY_NO_SLOT_HANDOFF_TAIL_EN,
     CAPACITY_ESCALATION_LINE,
     CLOSING_HANDOFF_LINE_EN,
+    COUNT_MISMATCH_CLARIFY_LINE,
     FAQ_DEFER_LINE,
     GIBBERISH_CLARIFY_LINE,
     GRATITUDE_ACK_LINE,
@@ -61,8 +62,11 @@ from services.api.app.sales.sales_persona_answerer import (
     STAGE_PITCHING,
     STAGE_PRICING,
     STAGE_SCOPING,
+    WORKING_DAYS_LINE,
     WORKING_HOURS_LINE,
     SalesPersonaAnswerer,
+    _as_positive_int,
+    _format_working_days,
     _format_working_hours,
     _parse_buggy_seats,
     _parse_headcount,
@@ -70,12 +74,14 @@ from services.api.app.sales.sales_persona_answerer import (
     detect_vague_window,
     is_availability_inquiry,
     is_capacity_question,
+    is_count_inconsistent,
     is_duration_question,
     is_eligibility_question,
     is_gibberish,
     is_gratitude,
     is_info_faq_question,
     is_mixed_service_request,
+    is_working_days_question,
     is_working_hours_question,
 )
 
@@ -2582,3 +2588,120 @@ async def test_relative_offset_through_hour_busy_returns_zanyato() -> None:
         question="можно через час на багги, нас двое, одна багги?", ctx=_ctx()
     )
     assert SLOT_BUSY_LINE in (result.text or "")
+
+
+# --- Story 12.88 (round-25 R25-2): working-DAYS FAQ → answer, not booking ------
+
+
+def test_is_working_days_question() -> None:
+    assert is_working_days_question("А вы по воскресеньям вообще работаете?")
+    assert is_working_days_question("в выходные работаете?")
+    assert is_working_days_question("какие дни вы работаете?")
+    assert not is_working_days_question("до скольки работаете?")  # hours, not days
+    assert not is_working_days_question("сколько стоит?")
+
+
+@pytest.mark.asyncio
+async def test_working_days_faq_answers_from_config() -> None:
+    # The rule runs all 7 days, 09:00–20:00 → answered, never a booking handoff.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(
+        question="А вы по воскресеньям вообще работаете?", ctx=_ctx()
+    )
+    assert result.text == WORKING_DAYS_LINE.format(
+        days="ежедневно", open="09:00", close="20:00"
+    )
+    assert "передам" not in (result.text or "").lower()  # not a booking handoff
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_working_days_faq_defers_when_calendar_off() -> None:
+    answerer, _s, _, _ = _build(
+        state=None, cal_settings=_FakeCalSettings(enabled=False)
+    )
+    result = await answerer.try_answer(
+        question="по воскресеньям работаете?", ctx=_ctx()
+    )
+    assert result.text == FAQ_DEFER_LINE
+
+
+# --- Story 12.89 (round-25 R25-1): contradictory count (vehicles > people) ------
+
+
+def test_is_count_inconsistent() -> None:
+    assert is_count_inconsistent(Intent(headcount=2, vehicle_count=5))  # 5 > 2
+    assert not is_count_inconsistent(Intent(headcount=2, vehicle_count=1))
+    assert not is_count_inconsistent(Intent(headcount=2, vehicle_count=2))
+    assert not is_count_inconsistent(Intent(headcount=2))  # no vehicle_count
+    assert not is_count_inconsistent(Intent(vehicle_count=5))  # no headcount
+
+
+@pytest.mark.asyncio
+async def test_contradictory_count_clarifies_before_confirming() -> None:
+    # «двое, но 5 багги» → vehicle_count(5) > headcount(2) → clarify, not «свободно».
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"headcount": 2, "vehicle_count": 5},
+            "next_question": "ок",
+        }
+    )
+    answerer, _s, _, _ = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="Нас всего двое, но хотим сразу 5 багги, можно завтра в 15:00?",
+        ctx=_ctx(),
+    )
+    assert result.text == COUNT_MISMATCH_CLARIFY_LINE.format(vehicles=5, people=2)
+    assert SLOT_FREE_HANDOFF_LINE not in (result.text or "")  # not silently confirmed
+    assert result.metadata.get("escalate") is not True
+
+
+def test_format_working_days_edges() -> None:
+    assert _format_working_days(None) is None
+    assert _format_working_days([]) is None
+    assert _format_working_days(["xyz"]) is None  # no recognised day codes
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    assert _format_working_days(week) == "ежедневно"
+    assert _format_working_days(["mon", "wed", "fri"]) == "пн, ср, пт"
+
+
+def test_as_positive_int_edges() -> None:
+    assert _as_positive_int(True) is None  # bool is not a count
+    assert _as_positive_int(3) == 3
+    assert _as_positive_int(0) is None
+    assert _as_positive_int("4") == 4
+    assert _as_positive_int("0") is None
+    assert _as_positive_int("abc") is None
+    assert _as_positive_int(None) is None
+
+
+@pytest.mark.asyncio
+async def test_count_mismatch_mid_scoping() -> None:
+    # Covers the scoping-stage count-mismatch hook.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"vehicle_count": 5}, "next_question": "ок"}
+    )
+    answerer, _s, _, _ = _build(
+        state=_scoping_state(intent=Intent(headcount=2)),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(question="хотим сразу 5 багги", ctx=_ctx())
+    assert result.text == COUNT_MISMATCH_CLARIFY_LINE.format(vehicles=5, people=2)
