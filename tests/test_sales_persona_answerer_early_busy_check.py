@@ -34,6 +34,7 @@ from services.api.app.sales.intent import Intent
 from services.api.app.sales.price_lookup import PriceMissing, PriceUnknownPayload
 from services.api.app.sales.sales_persona_answerer import (
     _RETURNING_NO_GREETING_DIRECTIVE,
+    ASK_FOR_DATE_LINE,
     ASK_FOR_TIME_LINE,
     BUSY_NO_SLOT_HANDOFF_TAIL,
     BUSY_NO_SLOT_HANDOFF_TAIL_EN,
@@ -43,9 +44,11 @@ from services.api.app.sales.sales_persona_answerer import (
     FAQ_DEFER_LINE,
     GIBBERISH_CLARIFY_LINE,
     GRATITUDE_ACK_LINE,
+    GREETING_SMALLTALK_LINE,
     HITL_REASON_CAPACITY,
     HITL_REASON_SCOPING_COMPLETE,
     INVALID_DATE_CLARIFY_LINE,
+    MATERIAL_DISPATCH_FALLBACK_LINE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
     MIXED_SERVICE_CLARIFY_LINE,
     PAST_DATE_CLARIFY_LINE,
@@ -81,6 +84,7 @@ from services.api.app.sales.sales_persona_answerer import (
     is_gratitude,
     is_info_faq_question,
     is_mixed_service_request,
+    is_pure_greeting,
     is_working_days_question,
     is_working_hours_question,
 )
@@ -777,20 +781,18 @@ def _pricing_state() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_pricing_stage_greeting_reroutes_to_greeting_not_price() -> None:
-    openrouter = _FakeOpenRouter()
-    openrouter.queue_response(
-        {"extracted_fields": {}, "next_question": "Здравствуйте! Какие даты?"}
-    )
-    answerer, _state, _, _ = _build(
+    # Story 12.92 (round-26 R26-3) — a bare greeting in any stage gets the
+    # deterministic courteous greeting (no LLM), never a price/handoff.
+    answerer, _state, openrouter, _ = _build(
         state=_pricing_state(),
-        openrouter=openrouter,
         cal_settings=_FakeCalSettings(),
         token_provider=_TokenProvider(),
         freebusy=_FreeBusy(),
     )
     result = await answerer.try_answer(question="Здравствуйте!", ctx=_ctx())
     assert result.handled is True
-    assert result.text == "Здравствуйте! Какие даты?"  # greeting, not a price line
+    assert result.text == GREETING_SMALLTALK_LINE  # greeting, not a price line
+    assert openrouter.calls == []  # deterministic — no LLM
 
 
 @pytest.mark.asyncio
@@ -2705,3 +2707,166 @@ async def test_count_mismatch_mid_scoping() -> None:
     )
     result = await answerer.try_answer(question="хотим сразу 5 багги", ctx=_ctx())
     assert result.text == COUNT_MISMATCH_CLARIFY_LINE.format(vehicles=5, people=2)
+
+
+# --- Story 12.90 (round-26 R26-1): FAQ hours read via the engine parser --------
+
+
+def test_format_working_hours_flat_shape() -> None:
+    # Production stores {day: [start, end]} (flat); must parse, not return ('0','8').
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    assert _format_working_hours({d: ["08:00", "21:00"] for d in week}) == (
+        "08:00",
+        "21:00",
+    )
+    # The nested {day: [[start, end]]} form still works.
+    assert _format_working_hours({"mon": [["09:00", "20:00"]]}) == ("09:00", "20:00")
+
+
+def _flat_rule() -> ServiceRule:
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    return ServiceRule(
+        id=1,
+        project_id=_PROJECT_ID,
+        name="Аренда багги",
+        duration_minutes=60,
+        working_hours={d: ["08:00", "21:00"] for d in week},  # PROD flat shape
+        service_days=week,
+        date_exceptions=[],
+        updated_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_working_hours_faq_matches_engine_on_flat_shape() -> None:
+    # R26-1: with the production flat working_hours, the FAQ reports 08:00–21:00
+    # (the same window the engine enforces), not the garbled «с 0 до 8».
+    answerer, _s, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings(rules=[_flat_rule()])
+    )
+    result = await answerer.try_answer(
+        question="А со скольки и до скольки вы работаете?", ctx=_ctx()
+    )
+    assert result.text == WORKING_HOURS_LINE.format(open="08:00", close="21:00")
+    assert openrouter.calls == []
+
+
+# --- Story 12.91 (round-26 R26-2): time but no date → ask the date -------------
+
+
+@pytest.mark.asyncio
+async def test_time_without_date_asks_for_date_not_defer() -> None:
+    # Customer (in AWAITING_TIME) gives a time but no date → ask «на какую дату?»,
+    # never the unverified-slot defer.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": "awaiting_time",
+        "collected_intent": Intent(headcount=2, vehicle_count=1).to_dict(),
+        "last_proposal": None,
+    }
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {"dates": "в 16:00"}, "next_question": "ок"})
+    answerer, _s, _, _ = _build(
+        state=state,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(question="можно в 16:00", ctx=_ctx())
+    assert result.text == ASK_FOR_DATE_LINE
+    assert "Проверю это время" not in (result.text or "")  # not a defer
+
+
+@pytest.mark.asyncio
+async def test_time_then_date_combines_and_checks() -> None:
+    # Follow-up: after «в 16:00» the date «7 июня» is given → the prior time is
+    # re-attached and the full slot is checked (not asked again / deferred).
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": "awaiting_time",
+        "collected_intent": Intent(
+            headcount=2, vehicle_count=1, dates="в 16:00"
+        ).to_dict(),
+        "last_proposal": None,
+    }
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {"dates": "7 июня"}, "next_question": "ок"})
+    answerer, _s, _, freebusy = _build(
+        state=state,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # 7 June 16:00 free
+    )
+    result = await answerer.try_answer(question="7 июня", ctx=_ctx())
+    assert result.text == SLOT_FREE_HANDOFF_LINE  # combined slot checked → free
+    assert freebusy.calls >= 1
+
+
+# --- Story 12.92 (round-26 R26-3): pure greeting → courteous greeting ----------
+
+
+def test_is_pure_greeting() -> None:
+    assert is_pure_greeting("Здравствуйте!")
+    assert is_pure_greeting("Добрый день")
+    assert is_pure_greeting("привет)")
+    assert not is_pure_greeting("Здравствуйте, хочу багги завтра")  # has booking
+    assert not is_pure_greeting("сколько стоит?")
+
+
+@pytest.mark.asyncio
+async def test_pure_greeting_in_pitching_greets_not_handoff() -> None:
+    # The live R26-3: «Здравствуйте!» parked in pitching must greet + prompt,
+    # never the booking-completion handoff.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates="завтра в 14:00", headcount=2).to_dict(),
+        "last_proposal": None,
+    }
+    answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
+    result = await answerer.try_answer(question="Здравствуйте!", ctx=_ctx())
+    assert result.text == GREETING_SMALLTALK_LINE
+    assert "Передам детали коллегам" not in (result.text or "")  # not a handoff
+    assert result.metadata.get("escalate") is not True
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_greeting_with_booking_in_pricing_reroutes_to_greeting() -> None:
+    # «Здравствуйте, хочу багги завтра» is NOT a pure greeting (booking content),
+    # so it re-engages the funnel from greeting (Story 12.46), not a price line.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "завтра"}, "next_question": "На какую дату?"}
+    )
+    answerer, _state, _, _ = _build(
+        state=_pricing_state(),
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(),
+    )
+    result = await answerer.try_answer(
+        question="Здравствуйте, хочу багги завтра", ctx=_ctx()
+    )
+    assert result.text == "На какую дату?"  # rerouted to greeting/scoping
+    assert result.metadata.get("stage_after") == STAGE_SCOPING
+
+
+@pytest.mark.asyncio
+async def test_ask_for_date_dispatch_fallback_appends_note() -> None:
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer._ask_for_date(
+        ctx=_ctx(),
+        intent=Intent(dates="в 16:00"),
+        stage_before=STAGE_NEW,
+        base_metadata={},
+        dispatch_fallback=True,
+    )
+    assert ASK_FOR_DATE_LINE in result.text
+    assert MATERIAL_DISPATCH_FALLBACK_LINE in result.text
