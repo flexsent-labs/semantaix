@@ -42,7 +42,9 @@ from services.api.app.sales.state_repository import StateRepository
 _CHAT_ID = 5151
 _PROJECT_ID = 1
 _RAW_FIRST_QUESTION = "Сколько стоит 6 часов?"
-_RAW_FOLLOWUP_QUESTION = "А скидка для группы есть?"
+# A second PRICE follow-up (not a discount FAQ — round-27 R27-2 routes «скидка»
+# to the FAQ-defer path, which would no longer be a price_unknown coalesce).
+_RAW_FOLLOWUP_QUESTION = "А за 8 часов сколько будет стоить?"
 _OPERATOR_USERNAME = "@ops_demo"
 _OPERATOR_CHAT_ID = "9999"
 

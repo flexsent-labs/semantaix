@@ -41,6 +41,11 @@ _NORM = get_russian_normalizer()
         "а есть кафе поблизости?",
         "какой отель посоветуете?",
         "нужна гостиница на ночь",
+        # Story 12.93 (round-27 R27-1) — non-offered vehicles / activities.
+        "А на вертолёте у вас полетать можно?",
+        "можно яхту арендовать?",
+        "а катер есть?",
+        "хочу полетать на параплане",
     ],
 )
 def test_is_out_of_scope_positives(text: str) -> None:
@@ -54,6 +59,7 @@ def test_is_out_of_scope_positives(text: str) -> None:
         "двое",  # a field answer
         "нас четверо, одна багги",  # field answers
         "отменить бронь",  # cancellation (its own intent)
+        "хочу на квадроцикле покататься",  # quad IS offered — not out of scope
         "",  # empty
     ],
 )
@@ -138,6 +144,20 @@ async def test_out_of_scope_clean_state_declines() -> None:
     assert result.metadata.get("escalate") is not True
     assert result.metadata.get("suppress_followup") is True
     assert repo.upserts == []  # no funnel state created
+
+
+@pytest.mark.asyncio
+async def test_out_of_scope_helicopter_declines_not_handoff() -> None:
+    # Story 12.93 (round-27 R27-1) — a non-offered vehicle ("на вертолёте?")
+    # is declined + redirected, never the booking handoff.
+    answerer, repo = _build(state=None)
+    result = await answerer.try_answer(
+        question="А на вертолёте у вас полетать можно?", ctx=_ctx()
+    )
+    assert result.text == OUT_OF_SCOPE_DECLINE_LINE
+    assert result.text != SCOPING_COMPLETE_HANDOFF_LINE
+    assert result.metadata.get("escalate") is not True
+    assert repo.upserts == []  # no booking funnel created
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ Live bug (багги, 31 May 2026 13:36, Artur Yaskevich):
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -46,7 +47,11 @@ from services.api.app.sales.sales_persona_answerer import (
     GRATITUDE_ACK_LINE,
     GREETING_SMALLTALK_LINE,
     HITL_REASON_CAPACITY,
+    HITL_REASON_FAQ,
+    HITL_REASON_HUMAN_REQUEST,
     HITL_REASON_SCOPING_COMPLETE,
+    HUMAN_REQUEST_LINE,
+    HUMAN_REQUEST_LINE_EN,
     INVALID_DATE_CLARIFY_LINE,
     MATERIAL_DISPATCH_FALLBACK_LINE,
     MIXED_OUT_OF_SCOPE_SUFFIX,
@@ -82,6 +87,7 @@ from services.api.app.sales.sales_persona_answerer import (
     is_eligibility_question,
     is_gibberish,
     is_gratitude,
+    is_human_request,
     is_info_faq_question,
     is_mixed_service_request,
     is_pure_greeting,
@@ -2870,3 +2876,212 @@ async def test_ask_for_date_dispatch_fallback_appends_note() -> None:
     )
     assert ASK_FOR_DATE_LINE in result.text
     assert MATERIAL_DISPATCH_FALLBACK_LINE in result.text
+
+
+# --- Story 12.96 (round-27 R26-2): missing-date ask is DETERMINISTIC -----------
+
+
+@pytest.mark.asyncio
+async def test_time_without_date_asks_when_llm_drops_time() -> None:
+    # The live R26-2 regression: the LLM extracts NOTHING (drops «в 16:00»), so
+    # intent.dates is empty — but the raw question carries the time. The
+    # deterministic check (raw text) must still ask for the DATE (not re-ask time
+    # / hand off) and fold «в 16:00» into the persisted intent for the follow-up.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": "awaiting_time",
+        "collected_intent": Intent(headcount=2, vehicle_count=1).to_dict(),
+        "last_proposal": None,
+    }
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response({"extracted_fields": {}, "next_question": "ок"})
+    answerer, state_repo, _, _ = _build(
+        state=state,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(question="можно в 16:00 на багги", ctx=_ctx())
+    assert result.text == ASK_FOR_DATE_LINE
+    assert "Проверю это время" not in (result.text or "")  # not a defer
+    # The time is folded into the intent so the follow-up date can combine.
+    assert state_repo.upserts[-1]["collected_intent"]["dates"] == "в 16:00"
+
+
+@pytest.mark.asyncio
+async def test_has_time_without_date_false_without_clock() -> None:
+    # No clock anywhere → not a time-without-date turn (falls through to the
+    # normal ask-for-time / handoff path).
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    assert (
+        await answerer._has_time_without_date(
+            ctx=_ctx(), intent=Intent(headcount=2), question="нас двое"
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_has_time_without_date_false_when_date_resolvable() -> None:
+    # A clock AND a resolvable date present → False (the slot can be checked).
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    assert (
+        await answerer._has_time_without_date(
+            ctx=_ctx(), intent=Intent(dates="завтра в 14:00")
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_has_time_without_date_false_when_calendar_off() -> None:
+    answerer, _s, _, _ = _build(
+        state=None, cal_settings=_FakeCalSettings(enabled=False)
+    )
+    assert (
+        await answerer._has_time_without_date(
+            ctx=_ctx(), intent=Intent(dates="в 16:00")
+        )
+        is False
+    )
+
+
+def test_fold_raw_time_into_intent_branches() -> None:
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    # Already carries a clock → unchanged.
+    kept = Intent(dates="в 16:00")
+    assert answerer._fold_raw_time_into_intent(intent=kept, question="x").dates == (
+        "в 16:00"
+    )
+    # No question → unchanged.
+    bare = Intent(headcount=2)
+    assert answerer._fold_raw_time_into_intent(intent=bare, question=None) is bare
+    # Question without a clock → unchanged.
+    assert (
+        answerer._fold_raw_time_into_intent(intent=bare, question="на багги") is bare
+    )
+    # Clock only in the raw question → folded as «в HH:MM».
+    folded = answerer._fold_raw_time_into_intent(
+        intent=bare, question="можно в 16:00 на багги"
+    )
+    assert folded.dates == "в 16:00"
+
+
+# --- Story 12.94 (round-27 R27-2): discount FAQ → defer, not handoff -----------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "А у вас скидки для группы есть?",
+        "есть акции?",
+        "промокод можно применить?",
+        "а подешевле никак?",
+    ],
+)
+def test_is_info_faq_question_discounts(text: str) -> None:
+    assert is_info_faq_question(text) is True
+
+
+@pytest.mark.asyncio
+async def test_discount_question_defers_not_handoff() -> None:
+    answerer, state_repo, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="А у вас скидки для группы есть?", ctx=_ctx()
+    )
+    assert result.text == FAQ_DEFER_LINE
+    assert "Передам детали коллегам" not in (result.text or "")  # not booking copy
+    assert result.metadata["escalate"] is True
+    assert result.metadata["hitl_reason"] == HITL_REASON_FAQ
+    assert openrouter.calls == []
+    assert state_repo.upserts == []  # no funnel state created
+
+
+# --- Story 12.95 (round-27 R27-3): talk-to-a-human → distinct copy -------------
+
+
+def test_is_human_request() -> None:
+    assert is_human_request("Можно поговорить с живым человеком, а не с ботом?")
+    assert is_human_request("позовите менеджера")
+    assert is_human_request("соедините с оператором")
+    assert is_human_request("хочу со специалистом")
+    assert not is_human_request("нас двое человек")  # field answer, not a request
+    assert not is_human_request("хочу багги на 8 человек")
+    assert not is_human_request("")
+
+
+@pytest.mark.asyncio
+async def test_human_request_distinct_escalation_copy() -> None:
+    # Even in an active pitching funnel, an explicit human request gets the
+    # human-handoff line (NOT the booking-completion «детали на подтверждение»),
+    # escalates, and leaves the funnel state intact.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(dates="завтра в 14:00", headcount=2).to_dict(),
+        "last_proposal": None,
+    }
+    answerer, state_repo, openrouter, _ = _build(
+        state=state, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="Можно поговорить с живым человеком, а не с ботом?", ctx=_ctx()
+    )
+    assert result.text == HUMAN_REQUEST_LINE
+    assert "на подтверждение" not in (result.text or "")  # not booking-flavored
+    assert result.metadata["escalate"] is True
+    assert result.metadata["hitl_reason"] == HITL_REASON_HUMAN_REQUEST
+    assert result.metadata["escalation_context"]  # carries context for the operator
+    assert openrouter.calls == []
+    assert state_repo.upserts == []  # funnel untouched
+
+
+def test_human_request_localized_en() -> None:
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    ctx = replace(_ctx(), language="en")
+    result = answerer._handle_human_request(ctx=ctx)
+    assert result.text == HUMAN_REQUEST_LINE_EN
+
+
+# --- Story 12.97 (round-27 R26-1 guard): FAQ hours == engine window ------------
+
+
+def test_faq_hours_equal_engine_window_and_last_start_boundary() -> None:
+    # R26-1 is a NON-bug: the FAQ «08:00–21:00» equals the engine's working
+    # window. 20:30 reads as off-hours only because a 60-min ride ends at 21:30
+    # (last bookable START = close − duration = 20:00), NOT because the close is
+    # 18:00. Lock both: FAQ window == engine window, and the start boundary.
+    from datetime import datetime as _dt
+
+    from services.api.app.calendar.availability import (
+        compute_availability,
+        parse_service_rule,
+    )
+
+    rule = _flat_rule()  # live flat shape, 08:00–21:00, 60-min duration
+    assert _format_working_hours(rule.working_hours) == ("08:00", "21:00")
+
+    moscow = _TOMORROW_MOSCOW
+    now = _dt(2026, 5, 29, 0, 50, tzinfo=moscow)
+    parsed = parse_service_rule(rule, lookahead_days=60, country_code="RU")
+    tomorrow = _dt(2026, 5, 30, 0, 0, tzinfo=moscow)
+
+    def avail(hh: int, mm: int) -> bool:
+        start = tomorrow.replace(hour=hh, minute=mm)
+        return compute_availability(
+            now=now,
+            requested_start=start,
+            busy=(),
+            service_rule=parsed,
+            project_tz=moscow,
+        ).available
+
+    assert avail(17, 30) is True  # QA's "free" point
+    assert avail(20, 0) is True  # last bookable start (ride 20:00–21:00)
+    assert avail(20, 30) is False  # ride would end 21:30 > 21:00 close
+    assert avail(21, 0) is False

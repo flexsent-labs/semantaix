@@ -27,6 +27,7 @@ class _Normalizer(Protocol):
 # is never swallowed.
 _OUT_OF_SCOPE_LEMMAS: frozenset[str] = frozenset(
     {
+        # Dining / lodging venues.
         "ресторан",
         "кафе",
         "кафешка",
@@ -39,12 +40,28 @@ _OUT_OF_SCOPE_LEMMAS: frozenset[str] = frozenset(
         "гостиница",
         "хостел",
         "ночлег",
+        # Story 12.93 (round-27 R27-1) — vehicles / activities the buggy persona
+        # does NOT offer (aircraft, watercraft). A request to "fly a helicopter"
+        # or "rent a yacht" must be declined and redirected, never pulled into the
+        # buggy booking funnel and answered with the booking-acceptance handoff.
+        # Conservative: only unambiguous non-offered modes (no багги / квадроцикл).
+        "вертолёт",
+        "вертолет",
+        "самолёт",
+        "самолет",
+        "яхта",
+        "катер",
+        "лодка",
+        "параплан",
+        "парашют",
+        "дельтаплан",
     }
 )
 
 
 def is_out_of_scope(text: str, *, normalizer: _Normalizer) -> bool:
-    """True iff the message asks about a separate service (dining/lodging)."""
+    """True iff the message asks about a separate service the persona doesn't
+    offer (dining / lodging, or a non-buggy vehicle like a helicopter / yacht)."""
     if not text or not text.strip():
         return False
     return any(lemma in _OUT_OF_SCOPE_LEMMAS for lemma in normalizer.lemmas(text))
