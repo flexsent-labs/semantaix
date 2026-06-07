@@ -182,4 +182,9 @@ development_status:
   12-90-faq-hours-correct-shape: review
   12-91-time-without-date-asks: review
   12-92-pure-greeting-not-handoff: review
+  12-93-out-of-scope-vehicle-decline: review
+  12-94-discount-faq-defer: review
+  12-95-human-request-distinct-copy: review
+  12-96-deterministic-missing-date-ask: review
+  12-97-faq-hours-equal-engine-guard: review
   epic-12-retrospective: optional

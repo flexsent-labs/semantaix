@@ -129,6 +129,10 @@ HITL_REASON_SCOPING_COMPLETE = "sales_scoping_complete"
 # booking-of-record the bot can cancel autonomously (operators finalize
 # bookings), so the request is acknowledged and routed to a human.
 HITL_REASON_CANCELLATION = "sales_cancellation_request"
+# Story 12.95 (round-27 R27-3) — an explicit "talk to a real human / operator /
+# manager" request. It escalates to a person (like cancellation) but must use a
+# human-handoff acknowledgement distinct from the booking-completion copy.
+HITL_REASON_HUMAN_REQUEST = "sales_human_request"
 # Story 12.32 (D1) — a concrete requested time was given but the calendar could
 # not be consulted (not connected / reconnect needed / provider error). The
 # booking is escalated flagged UNVERIFIED so the operator confirms the exact
@@ -162,6 +166,13 @@ CANCELLATION_HANDOFF_LINE_EN = (
     "I'll pass your cancellation request to a colleague - they'll get in touch."
 )
 CANCELLATION_ESCALATION_CONTEXT = "Запрос на отмену брони"
+# Story 12.95 (round-27 R27-3) — distinct human-handoff copy: it does NOT presume
+# a booking ("детали на подтверждение"), it just routes the customer to a person.
+HUMAN_REQUEST_LINE = "Конечно, передаю ваш запрос менеджеру - скоро свяжутся с вами."
+HUMAN_REQUEST_LINE_EN = (
+    "Of course - I'm passing your request to a manager; they'll be in touch shortly."
+)
+HUMAN_REQUEST_ESCALATION_CONTEXT = "Запрос на разговор с человеком"
 # Story 12.34 (D7) — an out-of-scope request (dining/lodging) is politely
 # declined and redirected to buggy bookings, never accepted as a booking.
 OUT_OF_SCOPE_DECLINE_LINE = (
@@ -565,15 +576,46 @@ _BRING_RE = re.compile(
     r"|что\s+(?:с\s+собой|надеть)|нужно\s+ли\s+что",
     re.IGNORECASE | re.UNICODE,
 )
+# Story 12.94 (round-27 R27-2) — a discount / promo question is a deferrable info
+# FAQ (the catalog has no discount data), answered with the same "let me check
+# with colleagues" defer as payment/location, never a booking handoff.
+_DISCOUNT_RE = re.compile(
+    r"скидк\w*|скидок\b|акци\w*|промокод\w*|промо-?код\w*|спецпредложен\w*"
+    r"|подешевл\w*|дешевл\w*|по\s+скидк\w*",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 def is_info_faq_question(question: str) -> bool:
-    """True for a deferrable info FAQ — payment, location, or what-to-bring."""
+    """True for a deferrable info FAQ — payment, location, what-to-bring, or a
+    discount / promo question (round-27 R27-2)."""
     return bool(
         _PAYMENT_RE.search(question)
         or _LOCATION_RE.search(question)
         or _BRING_RE.search(question)
+        or _DISCOUNT_RE.search(question)
     )
+
+
+# Story 12.95 (round-27 R27-3) — an explicit request to reach a person. Precise
+# (a human/operator/manager noun or an "I want a human, not a bot" phrasing), so
+# it never swallows a booking field answer like «нас двое человек».
+_HUMAN_REQUEST_RE = re.compile(
+    r"(?:жив\w*|реальн\w*|настоящ\w*)\s+человек\w*"  # «живым человеком»
+    r"|\bоператор\w*"  # «с оператором»
+    r"|\bменеджер\w*"  # «позовите менеджера»
+    r"|\bспециалист\w*"  # «с специалистом»
+    r"|с\s+сотрудник\w*"  # «с сотрудником»
+    r"|не\s+(?:с\s+)?бот\w*"  # «не с ботом» / «не бот»
+    r"|не\s+робот\w*",  # «не робот»
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_human_request(question: str) -> bool:
+    """True for an explicit "talk to a real human / operator / manager" request
+    (round-27 R27-3)."""
+    return bool(_HUMAN_REQUEST_RE.search(question or ""))
 
 
 # Story 12.85 (round-21 R21-1) — recognise ≥2 distinct vehicle/service types in
@@ -1341,6 +1383,15 @@ class SalesPersonaAnswerer:
             return await self._handle_cancellation(
                 question=question, ctx=ctx, state=state
             )
+
+        # Story 12.95 (round-27 R27-3) — an explicit "talk to a real human /
+        # operator / manager" request routes to a person with human-handoff copy
+        # distinct from the booking-completion line. Caught before the funnel (so
+        # a pitching/scoping customer reaches a human) and is NOT gated on
+        # ``not is_sales_intent`` — the detector is precise, and the request is a
+        # human handoff even when a booking is in flight. Fires in any state.
+        if is_human_request(question):
+            return self._handle_human_request(ctx=ctx)
 
         # Story 12.34 — an out-of-scope ask (a restaurant / hotel) must be
         # politely declined, not accepted as a booking. The polite-decline
@@ -2132,6 +2183,41 @@ class SalesPersonaAnswerer:
             },
         )
 
+    def _handle_human_request(self, *, ctx: AnswerContext) -> AnswerResult:
+        """Route an explicit "talk to a human" request to a person (Story 12.95,
+        round-27 R27-3).
+
+        Escalates with HITL (like cancellation) but uses a human-handoff line
+        distinct from the booking-completion copy — it does not imply a booking
+        is being confirmed. The funnel state is left intact (no stage change) so
+        a customer who later resumes booking is not re-greeted from scratch.
+        """
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "sales_turn_kind": "human_request",
+                "hitl_reason": HITL_REASON_HUMAN_REQUEST,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=localize(
+                HUMAN_REQUEST_LINE,
+                HUMAN_REQUEST_LINE_EN,
+                language=ctx.language,
+            ),
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "sales_turn_kind": "human_request",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_HUMAN_REQUEST,
+                "escalation_context": HUMAN_REQUEST_ESCALATION_CONTEXT,
+                "suppress_followup": True,
+            },
+        )
+
     async def _extract_and_merge(
         self,
         *,
@@ -2688,10 +2774,18 @@ class SalesPersonaAnswerer:
             )
             if vague is not None:
                 return vague
-        # Story 12.91 (round-26 R26-2) — a turn carrying a TIME but no resolvable
-        # DATE must ask for the date (in ANY stage), never defer/hand off a
-        # dateless booking. Fires before the bounded date+time ask below.
-        if await self._has_time_without_date(ctx=ctx, intent=intent):
+        # Story 12.91/12.96 (round-26 R26-2, round-27 R26-2) — a turn carrying a
+        # TIME but no resolvable DATE must ask for the date (in ANY stage), never
+        # defer/hand off a dateless booking. The check is DETERMINISTIC over both
+        # ``intent.dates`` AND the raw ``question`` text, so it fires even when the
+        # LLM failed to fold a bare «в 16:00» into ``intent.dates`` (the live R26-2
+        # regression). The raw time is folded back into the intent so the
+        # follow-up date re-attaches it (``_preserve_prior_date``). Fires before
+        # the bounded date+time ask below.
+        if await self._has_time_without_date(
+            ctx=ctx, intent=intent, question=question
+        ):
+            intent = self._fold_raw_time_into_intent(intent=intent, question=question)
             return await self._ask_for_date(
                 ctx=ctx,
                 intent=intent,
@@ -2806,22 +2900,55 @@ class SalesPersonaAnswerer:
         )
 
     async def _has_time_without_date(
-        self, *, ctx: AnswerContext, intent: Intent
+        self, *, ctx: AnswerContext, intent: Intent, question: str | None = None
     ) -> bool:
         """True when the booking carries a concrete TIME but no resolvable date
-        and the calendar can check one (Story 12.91, round-26 R26-2)."""
+        and the calendar can check one (Story 12.91/12.96, round-26/27 R26-2).
+
+        Scans BOTH ``intent.dates`` and the raw ``question`` so the missing-date
+        ask fires even when the LLM dropped a bare «в 16:00» from ``intent.dates``
+        (the live R26-2 regression — the check must not depend on LLM extraction).
+        """
         cal = await self._calendar_booking_context(ctx=ctx)
         if cal is None:
             return False
-        dates_text = intent.dates if isinstance(intent.dates, str) else None
-        if not dates_text or not extract_all_clocks(dates_text):
-            return False
-        return (
-            extract_requested_date(
-                text=dates_text, now=ctx.now, project_tz=cal.project_tz
+        texts = [
+            text
+            for text in (
+                intent.dates if isinstance(intent.dates, str) else None,
+                question,
             )
-            is None
+            if text
+        ]
+        if not any(extract_all_clocks(text) for text in texts):
+            return False  # no clock anywhere → not a time-without-date turn
+        return not any(
+            extract_requested_date(text=text, now=ctx.now, project_tz=cal.project_tz)
+            is not None
+            for text in texts
         )
+
+    def _fold_raw_time_into_intent(
+        self, *, intent: Intent, question: str | None
+    ) -> Intent:
+        """Ensure ``intent.dates`` carries the customer's stated time even when the
+        LLM dropped it (Story 12.96, round-27 R26-2).
+
+        When ``intent.dates`` has no clock but the raw ``question`` does, store a
+        normalized «в HH:MM» so ``_ask_for_date`` persists it and the follow-up
+        date re-attaches it via ``_preserve_prior_date``. No-op when the intent
+        already carries a clock or the question has none.
+        """
+        dates_text = intent.dates if isinstance(intent.dates, str) else None
+        if dates_text and extract_all_clocks(dates_text):
+            return intent
+        if not question:
+            return intent
+        clocks = extract_all_clocks(question)
+        if not clocks:
+            return intent
+        hour, minute = clocks[0]
+        return intent.with_field("dates", f"в {hour:02d}:{minute:02d}")
 
     async def _ask_for_date(
         self,
@@ -4876,6 +5003,10 @@ class SalesPersonaAnswerer:
 
 __all__ = [
     "ASK_FOR_DATE_LINE",
+    "HITL_REASON_HUMAN_REQUEST",
+    "HUMAN_REQUEST_LINE",
+    "HUMAN_REQUEST_LINE_EN",
+    "is_human_request",
     "BUSY_NO_SLOT_HANDOFF_TAIL",
     "BUSY_NO_SLOT_HANDOFF_TAIL_EN",
     "CLOSING_HANDOFF_LINE",
