@@ -2471,6 +2471,36 @@ async def test_mixed_service_mid_scoping_clarifies() -> None:
     assert result.text == MIXED_SERVICE_CLARIFY_LINE
 
 
+# --- Story R30-1: mixed-service check must also fire in PITCHING stage ----------
+
+
+@pytest.mark.asyncio
+async def test_mixed_service_mid_pitching_clarifies() -> None:
+    """Mixed-service message while in PITCHING stage must return MIXED_SERVICE_CLARIFY_LINE.
+
+    Root cause of R30-1: _handle_pitching had no is_mixed_service_request check —
+    the message fell through to _handoff_after_pitching_followup, producing a
+    booking handoff copy instead of the one-at-a-time clarify line.
+    """
+    answerer, _s, openrouter, _ = _build(
+        state=_pitching_state(intent=Intent(dates="2026-05-30 14:00", headcount=2)),
+        openrouter=_FakeOpenRouter(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="нас двоих на багги и двоих на квадроциклах", ctx=_ctx()
+    )
+    assert result.text == MIXED_SERVICE_CLARIFY_LINE, (
+        f"PITCHING-stage mixed-service must produce clarify line, got: {result.text!r}"
+    )
+    assert result.metadata.get("escalate") is not True, (
+        "Mixed-service clarify must NOT escalate to HITL"
+    )
+    assert openrouter.calls == []
+
+
 # --- Story 12.86 (round-23 R23-3): multi-turn time change re-runs the check ----
 
 

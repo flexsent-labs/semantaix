@@ -2566,6 +2566,11 @@ class SalesPersonaAnswerer:
         last_proposal = state.get("last_proposal")
         now = self._clock()
 
+        # (pre-a) Story R30-1: a mixed-service message in pitching must produce the
+        # one-at-a-time clarify line, not fall through to the generic handoff.
+        if is_mixed_service_request(question):
+            return self._handle_mixed_service(ctx=ctx)
+
         # (a) Counter-offer — a new parseable date overrides the stale one.
         merged = self._merge_dates_from_customer_message(
             existing_intent=intent, question=question, now=now
