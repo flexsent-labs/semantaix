@@ -43,6 +43,7 @@ from services.api.app.sales.sales_persona_answerer import (
     CLOSING_HANDOFF_LINE_EN,
     COUNT_MISMATCH_CLARIFY_LINE,
     FAQ_DEFER_LINE,
+    FAQ_DEFER_LINE_EN,
     GIBBERISH_CLARIFY_LINE,
     GRATITUDE_ACK_LINE,
     GREETING_SMALLTALK_LINE,
@@ -71,7 +72,9 @@ from services.api.app.sales.sales_persona_answerer import (
     STAGE_PRICING,
     STAGE_SCOPING,
     WORKING_DAYS_LINE,
+    WORKING_DAYS_LINE_EN,
     WORKING_HOURS_LINE,
+    WORKING_HOURS_LINE_EN,
     SalesPersonaAnswerer,
     _as_positive_int,
     _format_working_days,
@@ -3085,3 +3088,321 @@ def test_faq_hours_equal_engine_window_and_last_start_boundary() -> None:
     assert avail(20, 0) is True  # last bookable start (ride 20:00–21:00)
     assert avail(20, 30) is False  # ride would end 21:30 > 21:00 close
     assert avail(21, 0) is False
+
+
+# --- Story 12.99 (round-28 D2): relative offsets → verdict, not date-ask ------
+
+
+@pytest.mark.asyncio
+async def test_has_time_without_date_false_for_relative_offset() -> None:
+    # «через два часа» contains word-form «два» which extract_all_clocks matches
+    # as clock 2:00. extract_requested_date cannot resolve a calendar date from a
+    # relative-duration phrase, so WITHOUT the fix _has_time_without_date = True
+    # (clock found + no date) → asks for date. After the fix: extract_requested_start
+    # resolves to now+2h, short-circuiting to False.
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer._has_time_without_date(
+        ctx=_ctx(),
+        intent=Intent(dates="через два часа"),
+        question="через два часа, нас двое",
+    )
+    assert result is False, (
+        "relative offset «через два часа» must not trigger ask-for-date "
+        "(extract_requested_start resolves it to a concrete instant)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_relative_offset_через_два_часа_not_date_ask() -> None:
+    # Full dispatch from AWAITING_TIME: LLM folds «через два часа» into dates.
+    # The slot is in the future (now=09:00 UTC = 12:00 Moscow; +2h = 14:00).
+    # 14:00 is within the rule's window (09:00–20:00) → FREE → should return
+    # SLOT_FREE_HANDOFF_LINE (or any verdict), NEVER ASK_FOR_DATE_LINE.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": "awaiting_time",
+        "collected_intent": Intent(headcount=2, vehicle_count=1).to_dict(),
+        "last_proposal": None,
+    }
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {"extracted_fields": {"dates": "через два часа"}, "next_question": "ок"}
+    )
+    answerer, _s, _, freebusy = _build(
+        state=state,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(question="через два часа", ctx=_ctx())
+    assert result.text != ASK_FOR_DATE_LINE, (
+        "«через два часа» resolves to now+2h; must NOT ask for a date"
+    )
+    assert result.text != ASK_FOR_TIME_LINE, (
+        "«через два часа» resolves to a full instant; must NOT ask for time"
+    )
+    assert freebusy.calls >= 1, "calendar must have been queried for the verdict"
+
+
+# --- Story 12.100 (round-28 D3): vague named period proposes slot, not ask ---
+
+
+@pytest.mark.asyncio
+async def test_pitching_vague_window_named_period_proposes_slot() -> None:
+    # Bug: when in STAGE_PITCHING, _handle_pitching calls _complete_booking
+    # WITHOUT question= so _maybe_answer_vague_window is bypassed, then
+    # _should_ask_for_time fires because intent.dates has no concrete start.
+    # After fix: question is passed through so the vague-window path runs.
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_PITCHING,
+        "collected_intent": Intent(headcount=2, vehicle_count=1).to_dict(),
+        "last_proposal": {"alternative_iso": "2026-05-30T09:00:00+03:00"},
+    }
+    answerer, _s, _, freebusy = _build(
+        state=state,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),  # afternoon free
+    )
+    result = await answerer.try_answer(
+        question="Хочу завтра во второй половине дня, двоих", ctx=_ctx()
+    )
+    text = result.text or ""
+    assert ASK_FOR_TIME_LINE not in text, (
+        "vague named period in pitching must propose a slot, not ask for time"
+    )
+    assert text.startswith("Да, есть свободное время"), (
+        "bot must propose a concrete afternoon slot"
+    )
+    assert freebusy.calls >= 1, "calendar must be queried for the vague window"
+
+
+@pytest.mark.asyncio
+async def test_has_time_without_date_false_for_vague_window() -> None:
+    # Guard: a vague-window question like «завтра во второй половине дня» must
+    # never trigger the ask-for-date path (no clock → already False; add explicit
+    # detect_vague_window guard for defense-in-depth).
+    answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
+    result = await answerer._has_time_without_date(
+        ctx=_ctx(),
+        intent=Intent(dates="завтра во второй половине дня"),
+        question="Хочу завтра во второй половине дня, двоих",
+    )
+    assert result is False, (
+        "vague named period must not trigger ask-for-date"
+    )
+
+
+# --- Story 12.101 (round-28 D4): capacity inverse question defers ------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "На сколько человек рассчитан один багги?",
+        "Сколько мест в одном багги?",
+        "сколько пассажиров вмещает багги?",
+        "на сколько человек вмещает один квадрик?",
+        "рассчитан на сколько человек?",
+    ],
+)
+def test_is_capacity_question_inverse_formulation(text: str) -> None:
+    # All of these are the «how many people fit per vehicle» direction, currently
+    # not matched by _CAPACITY_QUESTION_RE. After fix: True.
+    assert is_capacity_question(text) is True, (
+        f"{text!r} is a capacity-per-vehicle question → must return True"
+    )
+
+
+@pytest.mark.asyncio
+async def test_capacity_inverse_defers_to_human_not_echo() -> None:
+    # «На сколько человек рассчитан один багги?» must route to
+    # _handle_capacity_question → CAPACITY_ESCALATION_LINE, never echo the
+    # question back or fall through to LLM.
+    answerer, state_repo, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="На сколько человек рассчитан один багги?", ctx=_ctx()
+    )
+    assert result.text == CAPACITY_ESCALATION_LINE, (
+        "inverse capacity question must defer to human with CAPACITY_ESCALATION_LINE"
+    )
+    assert result.metadata.get("escalate") is True
+    assert result.metadata.get("hitl_reason") == HITL_REASON_CAPACITY
+    assert openrouter.calls == []
+
+
+# --- Story 12.102 (round-28 D5): English FAQ / intercept detectors ----------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'd like to talk to a real person",
+        "Can I speak to a human agent?",
+        "I want to talk with a real human",
+        "connect me to a manager",
+        "not a bot please",
+    ],
+)
+def test_is_human_request_english_phrases(text: str) -> None:
+    assert is_human_request(text) is True, (
+        f"{text!r} is an English human-request phrase → must return True"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Are there any discounts?",
+        "Do you have a promo code?",
+        "any special offers?",
+        "do you have coupons?",
+    ],
+)
+def test_is_info_faq_question_english_discount(text: str) -> None:
+    assert is_info_faq_question(text) is True, (
+        f"{text!r} is an English discount FAQ → must return True"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Can I pay by card?",
+        "do you accept credit card?",
+        "can I pay cash?",
+    ],
+)
+def test_is_info_faq_question_english_payment(text: str) -> None:
+    assert is_info_faq_question(text) is True, (
+        f"{text!r} is an English payment FAQ → must return True"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Where are you located?",
+        "what is your address?",
+        "how do I get there?",
+        "what are the directions?",
+    ],
+)
+def test_is_info_faq_question_english_location(text: str) -> None:
+    assert is_info_faq_question(text) is True, (
+        f"{text!r} is an English location FAQ → must return True"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "What time do you open?",
+        "when do you close?",
+        "what are your working hours?",
+        "opening hours?",
+    ],
+)
+def test_is_working_hours_question_english(text: str) -> None:
+    assert is_working_hours_question(text) is True, (
+        f"{text!r} is an English working-hours question → must return True"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Do you work on weekends?",
+        "are you open on sundays?",
+        "what days are you open?",
+        "do you work on saturday?",
+    ],
+)
+def test_is_working_days_question_english(text: str) -> None:
+    assert is_working_days_question(text) is True, (
+        f"{text!r} is an English working-days question → must return True"
+    )
+
+
+@pytest.mark.asyncio
+async def test_english_human_request_routes_to_handoff() -> None:
+    # «I'd like to talk to a real person» — from English-speaking customer — must
+    # route to HUMAN_REQUEST_LINE_EN, not to scoping / date-ask.
+    ctx = replace(_ctx(), language="en")
+    answerer, state_repo, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="I'd like to talk to a real person", ctx=ctx
+    )
+    assert result.text == HUMAN_REQUEST_LINE_EN, (
+        "English human-request must produce HUMAN_REQUEST_LINE_EN"
+    )
+    assert result.metadata.get("escalate") is True
+    assert result.metadata.get("hitl_reason") == HITL_REASON_HUMAN_REQUEST
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_english_discount_question_defers() -> None:
+    # «Are there any discounts?» from English customer → FAQ defer (not handoff).
+    ctx = replace(_ctx(), language="en")
+    answerer, state_repo, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="Are there any discounts?", ctx=ctx
+    )
+    assert result.text == FAQ_DEFER_LINE_EN, (
+        "English discount FAQ must produce FAQ_DEFER_LINE_EN"
+    )
+    assert result.metadata.get("escalate") is True
+    assert result.metadata.get("hitl_reason") == HITL_REASON_FAQ
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_english_working_hours_faq_answers_from_config() -> None:
+    # «What time do you open?» in English → WORKING_HOURS_LINE_EN (not handoff).
+    ctx = replace(_ctx(), language="en")
+    answerer, _s, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="What time do you open?", ctx=ctx
+    )
+    assert result.text == WORKING_HOURS_LINE_EN.format(open="09:00", close="20:00"), (
+        "English hours FAQ must produce WORKING_HOURS_LINE_EN from config"
+    )
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_english_working_days_faq_answers_from_config() -> None:
+    # «Do you work on weekends?» → WORKING_DAYS_LINE_EN (not handoff, not hours).
+    state = {
+        "chat_id": _CHAT_ID,
+        "project_id": _PROJECT_ID,
+        "current_stage": STAGE_CLOSING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    ctx = replace(_ctx(), language="en")
+    answerer, _s, openrouter, _ = _build(
+        state=state, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="Do you work on weekends?", ctx=ctx
+    )
+    assert result.text == WORKING_DAYS_LINE_EN.format(
+        days="every day", open="09:00", close="20:00"
+    ) or "every day" in (result.text or "") or "09:00" in (result.text or ""), (
+        "English working-days FAQ must produce WORKING_DAYS_LINE_EN from config"
+    )
+    assert openrouter.calls == []
