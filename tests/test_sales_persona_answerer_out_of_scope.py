@@ -188,3 +188,57 @@ async def test_buggy_request_with_offtopic_word_is_not_declined() -> None:
         question="хочу забронировать багги, а рядом есть ресторан?", ctx=_ctx()
     )
     assert result.text != OUT_OF_SCOPE_DECLINE_LINE
+
+
+# --- Story 12.98 (round-28 D1): «хочу» on non-offered service → decline ------
+
+
+@pytest.mark.asyncio
+async def test_хочу_на_вертолёте_declined_not_mixed_intent() -> None:
+    # «Хочу на вертолёте полетать» — is_sales_intent=True (from «хочу») but the
+    # requested service (вертолёт) is not offered. The current gate
+    # ``is_out_of_scope AND NOT is_sales_intent`` passes through this message
+    # because is_sales_intent=True. After fix: gate checks _mentions_offered_service
+    # instead, declining because вертолёт is not an offered service.
+    openrouter = _QueueOpenRouter(
+        {"extracted_fields": {}, "next_question": "Хочу помочь вам!"}
+    )
+    answerer, repo = _build(state=None, openrouter=openrouter)
+    result = await answerer.try_answer(
+        question="Хочу на вертолёте полетать", ctx=_ctx()
+    )
+    assert result.text == OUT_OF_SCOPE_DECLINE_LINE, (
+        "«хочу на вертолёте» must be declined (not an offered service) "
+        "even though is_sales_intent=True"
+    )
+    assert result.metadata.get("escalate") is not True
+    assert repo.upserts == []  # no funnel state created
+
+
+@pytest.mark.asyncio
+async def test_хочу_на_параплане_declined() -> None:
+    # Another non-offered «хочу» variant — same pattern.
+    openrouter = _QueueOpenRouter(
+        {"extracted_fields": {}, "next_question": "ок"}
+    )
+    answerer, repo = _build(state=None, openrouter=openrouter)
+    result = await answerer.try_answer(
+        question="хочу полетать на параплане", ctx=_ctx()
+    )
+    assert result.text == OUT_OF_SCOPE_DECLINE_LINE
+    assert repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_хочу_на_багги_not_declined() -> None:
+    # «хочу на багги» — offered service → NOT declined (enters funnel).
+    openrouter = _QueueOpenRouter(
+        {"extracted_fields": {"service": "багги"}, "next_question": "На какую дату?"}
+    )
+    answerer, _ = _build(state=None, openrouter=openrouter)
+    result = await answerer.try_answer(
+        question="хочу на багги", ctx=_ctx()
+    )
+    assert result.text != OUT_OF_SCOPE_DECLINE_LINE, (
+        "«хочу на багги» is an offered service → must enter funnel, not be declined"
+    )

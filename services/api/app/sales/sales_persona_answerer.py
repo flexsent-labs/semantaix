@@ -273,12 +273,26 @@ _CAPACITY_QUESTION_RE = re.compile(
     r"|помест\w*|хватит)",
     re.IGNORECASE | re.UNICODE | re.DOTALL,
 )
+# Story 12.101 (round-28 D4) — the INVERSE direction: how many people fit in
+# one vehicle (capacity-per-buggy, not buggies-for-headcount). Both directions
+# route to _handle_capacity_question → defer to human.
+_CAPACITY_INVERSE_RE = re.compile(
+    r"на\s+скольк\w*\s+человек"   # «на сколько человек рассчитан»
+    r"|скольк\w*\s+мест\w*"        # «сколько мест в багги»
+    r"|скольк\w*\s+пассажир\w*"    # «сколько пассажиров»
+    r"|рассчитан\s+на",            # «рассчитан на X человек»
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 def is_capacity_question(question: str) -> bool:
     """A "how many vehicles do we need / will fit" capacity question (round-14,
-    Story 12.59) - distinct from a price ask and a plain headcount answer."""
-    return bool(_CAPACITY_QUESTION_RE.search(question))
+    Story 12.59) - distinct from a price ask and a plain headcount answer.
+    Also matches capacity-per-vehicle questions (Story 12.101, round-28 D4)."""
+    return bool(
+        _CAPACITY_QUESTION_RE.search(question)
+        or _CAPACITY_INVERSE_RE.search(question)
+    )
 
 
 # Story 12.63 (round-15) — derive a buggy-count recommendation from catalog
@@ -462,7 +476,9 @@ def is_gibberish(question: str, *, normalizer: RussianNormalizer) -> bool:
 # Story 12.80/12.81 (round-20 R20-1/R20-2) — FAQ intents (working hours, trip
 # duration) answered/deferred as QUESTIONS, never routed into the booking funnel.
 _WORK_KEYWORD_RE = re.compile(
-    r"работа\w*|работе\w*|график|режим|открыт\w*|закрыт\w*|открыва\w*|закрыва\w*",
+    r"работа\w*|работе\w*|график|режим|открыт\w*|закрыт\w*|открыва\w*|закрыва\w*"
+    # Story 12.102 (round-28 D5) — English equivalents for «работаете?»:
+    r"|\bwork\b|\bworking\b|\bopen\b|\bopened\b",
     re.IGNORECASE | re.UNICODE,
 )
 _HOURS_QUESTION_RE = re.compile(
@@ -472,7 +488,12 @@ _HOURS_QUESTION_RE = re.compile(
 # A schedule noun is itself a working-hours ask («график/режим/часы работы»,
 # «расписание») — no «сколько» needed.
 _SCHEDULE_RE = re.compile(
-    r"график\s+работ|режим\s+работ|часы\s+работ|расписани\w*",
+    r"график\s+работ|режим\s+работ|часы\s+работ|расписани\w*"
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|(?:opening|closing|working)\s+hours?"
+    r"|what\s+(?:time|hour)\w*\s+(?:do\s+you\s+)?(?:open|close|work|operate)"
+    r"|(?:open|close)\s+(?:at|until|from|by)"
+    r"|when\s+(?:do\s+you\s+)?(?:open|close)",
     re.IGNORECASE | re.UNICODE,
 )
 _DURATION_RE = re.compile(
@@ -497,7 +518,11 @@ def is_working_hours_question(question: str) -> bool:
 _DAYS_QUESTION_RE = re.compile(
     r"по\s+(?:воскресень|субб|понедельник|вторник|сред|четверг|пятниц|выходн|будн|дн)"
     r"|в\s+(?:воскресень|субботу|понедельник|вторник|среду|четверг|пятницу|выходн|будн)"
-    r"|каки\w*\s+дн|по\s+каким\s+дн|кажд\w*\s+день|ежедневн",
+    r"|каки\w*\s+дн|по\s+каким\s+дн|кажд\w*\s+день|ежедневн"
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|(?:do\s+you\s+)?(?:work|open)\s+(?:on\s+)?(?:sunday|saturday|weekend|weekday)s?"
+    r"|what\s+days?\s+(?:are\s+you\s+open|do\s+you\s+work)"
+    r"|(?:open|working)\s+days?",
     re.IGNORECASE | re.UNICODE,
 )
 _RU_WEEKDAY_ABBR: dict[str, str] = {
@@ -561,19 +586,30 @@ def is_duration_question(question: str) -> bool:
 # source in config, so they defer AS A QUESTION (like duration), never a booking.
 _PAYMENT_RE = re.compile(
     r"оплат\w*|оплачив\w*|наличны\w*|безнал\w*|\bнал\b|расплат\w*|заплат\w*"
-    r"|\bкартой\b|способ\w*\s+оплат|чем\s+(?:платить|расплачиваться)",
+    r"|\bкартой\b|способ\w*\s+оплат|чем\s+(?:платить|расплачиваться)"
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|pay\s+(?:by|with)\s+(?:card|cash|credit)"
+    r"|\bcredit\s+card\b|\bdebit\s+card\b|\bcash\b",
     re.IGNORECASE | re.UNICODE,
 )
 _LOCATION_RE = re.compile(
     r"где\s+(?:вы\b|вы\s|наход|это\b|ваш|тут|здесь)"
     r"|как\s+(?:до\s+вас\s+)?(?:добраться|доехать|добир\w*|проехать|дойти|пройти)"
     r"|\bадрес\w*|местоположен\w*|как\s+(?:вас\s+)?найти"
-    r"|откуда\s+(?:старт|выезд|выезжа)|место\s+(?:встреч\w*|сбор\w*|старт\w*)",
+    r"|откуда\s+(?:старт|выезд|выезжа)|место\s+(?:встреч\w*|сбор\w*|старт\w*)"
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|where\s+(?:are\s+you|is\s+it\b|is\s+the)"
+    r"|\b(?:your\s+)?(?:address|location)\b"
+    r"|how\s+(?:do\s+(?:i|we)\s+)?(?:get\s+there|find\s+you)"
+    r"|\bdirection\w*\b",
     re.IGNORECASE | re.UNICODE,
 )
 _BRING_RE = re.compile(
     r"что\s+(?:нужно\s+|надо\s+|необходимо\s+)?(?:взять|брать|приносить|захватить)"
-    r"|что\s+(?:с\s+собой|надеть)|нужно\s+ли\s+что",
+    r"|что\s+(?:с\s+собой|надеть)|нужно\s+ли\s+что"
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|what\s+(?:to|should\s+(?:i|we))\s+bring"
+    r"|what\s+(?:do\s+(?:i|we)\s+)?need\s+to\s+bring",
     re.IGNORECASE | re.UNICODE,
 )
 # Story 12.94 (round-27 R27-2) — a discount / promo question is a deferrable info
@@ -581,7 +617,9 @@ _BRING_RE = re.compile(
 # with colleagues" defer as payment/location, never a booking handoff.
 _DISCOUNT_RE = re.compile(
     r"скидк\w*|скидок\b|акци\w*|промокод\w*|промо-?код\w*|спецпредложен\w*"
-    r"|подешевл\w*|дешевл\w*|по\s+скидк\w*",
+    r"|подешевл\w*|дешевл\w*|по\s+скидк\w*"
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|discount\w*|promo\s*code\w*|coupon\w*|special\s+offer\w*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -607,7 +645,13 @@ _HUMAN_REQUEST_RE = re.compile(
     r"|\bспециалист\w*"  # «с специалистом»
     r"|с\s+сотрудник\w*"  # «с сотрудником»
     r"|не\s+(?:с\s+)?бот\w*"  # «не с ботом» / «не бот»
-    r"|не\s+робот\w*",  # «не робот»
+    r"|не\s+робот\w*"  # «не робот»
+    # Story 12.102 (round-28 D5) — English equivalents:
+    r"|(?:real|actual|live|human)\s+(?:person|agent|human)"
+    r"|\bspeak\s+(?:to|with)\s+(?:a\s+)?(?:person|human|agent|manager|representative|operator)"
+    r"|\btalk\s+(?:to|with)\s+(?:a\s+)?(?:person|human|manager|agent|representative)"
+    r"|\bconnect\s+(?:me\s+)?(?:to|with)\s+(?:a\s+)?(?:person|human|agent|manager)"
+    r"|\bnot\s+(?:a\s+)?bot\b|\bno\s+bot\b",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -637,6 +681,18 @@ def is_mixed_service_request(question: str) -> bool:
     low = question.lower()
     hit = sum(any(stem in low for stem in group) for group in _VEHICLE_TYPE_GROUPS)
     return hit >= 2
+
+
+def _mentions_offered_service(question: str) -> bool:
+    """True when ``question`` explicitly names at least one offered vehicle/service.
+
+    Story 12.98 (round-28 D1) — used to gate the out-of-scope decline so that
+    «хочу на вертолёте» (is_sales_intent=True, вертолёт not offered) is declined
+    while «хочу багги» (багги IS offered) stays in the funnel.  Shares the same
+    stem list as ``_VEHICLE_TYPE_GROUPS`` to keep them in sync.
+    """
+    low = question.lower()
+    return any(any(stem in low for stem in group) for group in _VEHICLE_TYPE_GROUPS)
 
 
 def _format_working_hours(working_hours: Any) -> tuple[str, str] | None:
@@ -1339,11 +1395,15 @@ class SalesPersonaAnswerer:
         # silently dropped the off-topic ask. Append a one-line decline (both
         # intents present → genuinely mixed; a pure booking never matches
         # is_out_of_scope, so this never fires on a normal booking).
+        # Story 12.98 (round-28 D1) — also guard on _mentions_offered_service:
+        # if the message has no offered service, it was already declined as purely
+        # out-of-scope; appending the suffix would double-decline.
         if (
             result.handled
             and result.text
             and is_out_of_scope(question, normalizer=self._normalizer)
             and is_sales_intent(question, normalizer=self._normalizer)
+            and _mentions_offered_service(question)
         ):
             result = replace(
                 result,
@@ -1397,12 +1457,16 @@ class SalesPersonaAnswerer:
         # politely declined, not accepted as a booking. The polite-decline
         # ScopeGuardAnswerer runs LAST in the pipeline, so in an active funnel
         # `_handle_scoping`/`_handle_pitching` would otherwise claim the turn and
-        # emit the booking-acceptance line. Gated on ``not is_sales_intent`` so a
-        # mixed "хочу багги … и ресторан?" stays in the funnel and a field answer
-        # is never swallowed; fires in any stage and leaves funnel state intact.
+        # emit the booking-acceptance line.
+        # Story 12.98 (round-28 D1) — previously gated on ``not is_sales_intent``
+        # but that lets «хочу на вертолёте» through (is_sales_intent=True from
+        # «хочу»).  The precise guard is whether the message names an OFFERED
+        # service: if it does, the funnel must handle it even with off-topic words;
+        # if it does not, it is purely out-of-scope and must be declined.  A field
+        # answer like «нас двое человек» is also excluded (is_out_of_scope=False).
         if is_out_of_scope(
             question, normalizer=self._normalizer
-        ) and not is_sales_intent(question, normalizer=self._normalizer):
+        ) and not _mentions_offered_service(question):
             return self._handle_out_of_scope(ctx=ctx)
 
         # Story 12.59 (round-14) - a capacity question ("сколько багги нужно?")
@@ -2493,8 +2557,12 @@ class SalesPersonaAnswerer:
             existing_intent=intent, question=question, now=now
         )
         if merged.dates != intent.dates:
+            # Story 12.100 (round-28 D3) — pass question so _complete_booking
+            # can invoke _maybe_answer_vague_window for named periods like
+            # «завтра во второй половине дня» (previously question=None bypassed
+            # the vague-window check, causing _should_ask_for_time to fire).
             return await self._complete_booking(
-                ctx=ctx, intent=merged, stage_before=STAGE_PITCHING
+                ctx=ctx, intent=merged, stage_before=STAGE_PITCHING, question=question
             )
 
         # (a2) Time-only counter-offer (Story 12.51, round-11 R11-1): the
@@ -2912,6 +2980,18 @@ class SalesPersonaAnswerer:
         cal = await self._calendar_booking_context(ctx=ctx)
         if cal is None:
             return False
+        # Story 12.99 (round-28 D2) — short-circuit when the raw question already
+        # resolves to a full start datetime.  Relative offsets like «через два часа»
+        # and «прямо сейчас» parse to a concrete instant via extract_requested_start
+        # even though the word-form clock extractor picks up «два» as 2:00 and
+        # extract_requested_date returns None (no calendar date).  If the offset IS
+        # the slot there is no missing date — skip the ask-for-date path.
+        if question:
+            full_start = extract_requested_start(
+                text=question, now=ctx.now, project_tz=cal.project_tz
+            )
+            if full_start is not None:
+                return False
         texts = [
             text
             for text in (
