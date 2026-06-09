@@ -470,3 +470,50 @@ async def test_complete_json_raises_on_non_object_root(monkeypatch):
     client.api_key = "token"
     with pytest.raises(OpenRouterJsonSchemaViolation):
         await client.complete_json(system="sys", user="user")
+
+
+# ---------------------------------------------------------------------------
+# Story 12.103 — prompt-injection boundary: question wrapped in XML tags
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_answer_grounded_wraps_question_in_xml_tags(monkeypatch):
+    """answer_grounded sends the question inside <customer_question> tags, not raw."""
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+
+    await client.answer_grounded(
+        question="Какой у вас адрес?",
+        snippets=[_snippet()],
+        today_iso="2026-06-09",
+        persona_first_name="Анна",
+        persona_last_name="Иванова",
+    )
+    user_block = http_client.post.call_args.kwargs["json"]["messages"][1]["content"]
+    # Question text is present inside the XML envelope.
+    assert "<customer_question>" in user_block
+    assert "Какой у вас адрес?" in user_block
+    assert "</customer_question>" in user_block
+    # Raw "Question:\n" prefix must be absent.
+    assert "Question:\n" not in user_block
+
+
+@pytest.mark.asyncio
+async def test_verify_grounding_wraps_question_in_xml_tags(monkeypatch):
+    """verify_grounding also sends the question inside <customer_question> tags."""
+    http_client = _http_mock(monkeypatch, content="GROUNDED: yes.")
+    client = OpenRouterClient()
+    client.api_key = "token"
+
+    await client.verify_grounding(
+        question="Когда открываетесь?",
+        answer="В 9 утра.",
+        snippets=[_snippet()],
+    )
+    user_block = http_client.post.call_args.kwargs["json"]["messages"][1]["content"]
+    assert "<customer_question>" in user_block
+    assert "Когда открываетесь?" in user_block
+    assert "</customer_question>" in user_block
+    assert "Question:\n" not in user_block

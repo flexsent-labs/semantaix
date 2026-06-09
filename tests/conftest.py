@@ -27,12 +27,21 @@ def _isolate_webhook_update_claims(tmp_path, monkeypatch):
     ``.data/`` file would make the suite non-hermetic across runs. Point the
     singleton at a fresh per-test SQLite file (mirrors how the api tests reset
     ``answer_trace_repository.db_path``). No-op when the bot_gateway is not
-    imported (api / platform_common-only test runs)."""
+    imported (api / platform_common-only test runs).
+
+    Story 12.103 — also isolate the per-customer inbound rate-limit store so
+    tests that fire many messages to the same chat_id don't exhaust the budget
+    seen by later tests."""
     module = sys.modules.get("services.bot_gateway.app.main")
     if module is not None:
         monkeypatch.setattr(
             module.webhook_update_claim_repository,
             "db_path",
             str(tmp_path / "webhook_dedup.sqlite3"),
+        )
+        monkeypatch.setattr(
+            module.rate_limit_repo,
+            "db_path",
+            str(tmp_path / "rate_limit.sqlite3"),
         )
     yield
