@@ -534,6 +534,15 @@ _RU_WEEKDAY_ABBR: dict[str, str] = {
     "sat": "сб",
     "sun": "вс",
 }
+_EN_WEEKDAY_ABBR: dict[str, str] = {
+    "mon": "Mon",
+    "tue": "Tue",
+    "wed": "Wed",
+    "thu": "Thu",
+    "fri": "Fri",
+    "sat": "Sat",
+    "sun": "Sun",
+}
 _WEEKDAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -544,17 +553,19 @@ def is_working_days_question(question: str) -> bool:
     )
 
 
-def _format_working_days(service_days: Any) -> str | None:
-    """«ежедневно» when all 7 days are configured, else the day abbreviations in
-    week order, or ``None`` when no recognised days are present."""
+def _format_working_days(service_days: Any, *, language: str = "ru") -> str | None:
+    """«ежедневно» (RU) or «every day» (EN) when all 7 days are configured, else
+    the day abbreviations in week order, or ``None`` when no recognised days are
+    present.  Pass ``language='en'`` for English output."""
     if not service_days:
         return None
     present = {d for d in service_days if d in _RU_WEEKDAY_ABBR}
     if not present:
         return None
+    abbr_map = _EN_WEEKDAY_ABBR if language == "en" else _RU_WEEKDAY_ABBR
     if len(present) == 7:
-        return "ежедневно"
-    return ", ".join(_RU_WEEKDAY_ABBR[d] for d in _WEEKDAY_ORDER if d in present)
+        return "every day" if language == "en" else "ежедневно"
+    return ", ".join(abbr_map[d] for d in _WEEKDAY_ORDER if d in present)
 
 
 def is_count_inconsistent(intent: Intent) -> bool:
@@ -1968,7 +1979,10 @@ class SalesPersonaAnswerer:
             else None
         )
         days = (
-            _format_working_days(getattr(cal.service_rule, "service_days", None))
+            _format_working_days(
+                getattr(cal.service_rule, "service_days", None),
+                language=ctx.language,
+            )
             if cal is not None
             else None
         )
@@ -2551,6 +2565,11 @@ class SalesPersonaAnswerer:
         intent = Intent.from_dict(state.get("collected_intent") or {})
         last_proposal = state.get("last_proposal")
         now = self._clock()
+
+        # (pre-a) Story R30-1: a mixed-service message in pitching must produce the
+        # one-at-a-time clarify line, not fall through to the generic handoff.
+        if is_mixed_service_request(question):
+            return self._handle_mixed_service(ctx=ctx)
 
         # (a) Counter-offer — a new parseable date overrides the stale one.
         merged = self._merge_dates_from_customer_message(

@@ -2471,6 +2471,36 @@ async def test_mixed_service_mid_scoping_clarifies() -> None:
     assert result.text == MIXED_SERVICE_CLARIFY_LINE
 
 
+# --- Story R30-1: mixed-service check must also fire in PITCHING stage ----------
+
+
+@pytest.mark.asyncio
+async def test_mixed_service_mid_pitching_clarifies() -> None:
+    """Mixed-service message while in PITCHING stage must return MIXED_SERVICE_CLARIFY_LINE.
+
+    Root cause of R30-1: _handle_pitching had no is_mixed_service_request check —
+    the message fell through to _handoff_after_pitching_followup, producing a
+    booking handoff copy instead of the one-at-a-time clarify line.
+    """
+    answerer, _s, openrouter, _ = _build(
+        state=_pitching_state(intent=Intent(dates="2026-05-30 14:00", headcount=2)),
+        openrouter=_FakeOpenRouter(),
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="нас двоих на багги и двоих на квадроциклах", ctx=_ctx()
+    )
+    assert result.text == MIXED_SERVICE_CLARIFY_LINE, (
+        f"PITCHING-stage mixed-service must produce clarify line, got: {result.text!r}"
+    )
+    assert result.metadata.get("escalate") is not True, (
+        "Mixed-service clarify must NOT escalate to HITL"
+    )
+    assert openrouter.calls == []
+
+
 # --- Story 12.86 (round-23 R23-3): multi-turn time change re-runs the check ----
 
 
@@ -3404,5 +3434,58 @@ async def test_english_working_days_faq_answers_from_config() -> None:
         days="every day", open="09:00", close="20:00"
     ) or "every day" in (result.text or "") or "09:00" in (result.text or ""), (
         "English working-days FAQ must produce WORKING_DAYS_LINE_EN from config"
+    )
+    assert openrouter.calls == []
+
+
+# --- Story R29-3: _format_working_days must be language-aware -----------------
+
+
+def test_format_working_days_language_en_all_days() -> None:
+    """All 7 days with language='en' → 'every day' (not Russian 'ежедневно')."""
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    result = _format_working_days(week, language="en")
+    assert result == "every day", (
+        f"Expected 'every day', got {result!r}"
+    )
+
+
+def test_format_working_days_language_en_partial_days() -> None:
+    """Partial days with language='en' → English abbreviated day names."""
+    result = _format_working_days(["mon", "wed", "fri"], language="en")
+    assert result == "Mon, Wed, Fri", (
+        f"Expected 'Mon, Wed, Fri', got {result!r}"
+    )
+
+
+def test_format_working_days_language_ru_unchanged() -> None:
+    """Default (no language arg) and explicit language='ru' still return Russian."""
+    week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    assert _format_working_days(week) == "ежедневно"
+    assert _format_working_days(week, language="ru") == "ежедневно"
+    assert _format_working_days(["mon", "wed", "fri"], language="ru") == "пн, ср, пт"
+
+
+@pytest.mark.asyncio
+async def test_english_working_days_faq_no_russian_text_leak() -> None:
+    """«Do you work on weekends?» in English → no Russian 'ежедневно' in reply.
+
+    Root cause of R29-3: _format_working_days had no language param and always
+    returned Russian strings, which then leaked into the English template.
+    """
+    ctx = replace(_ctx(), language="en")
+    answerer, _s, openrouter, _ = _build(
+        state=None, cal_settings=_FakeCalSettings()
+    )
+    result = await answerer.try_answer(
+        question="Do you work on weekends?", ctx=ctx
+    )
+    assert result is not None
+    text = result.text or ""
+    assert "ежедневно" not in text, (
+        f"English reply must not contain Russian 'ежедневно', got: {text!r}"
+    )
+    assert "every day" in text.lower(), (
+        f"English reply must contain 'every day', got: {text!r}"
     )
     assert openrouter.calls == []
