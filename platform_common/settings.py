@@ -142,6 +142,11 @@ class AppSettings(BaseSettings):
     # out and retries — a retry would otherwise be deduplicated by the Story
     # 12.24 claim into permanent customer silence.
     inbound_pipeline_timeout_seconds: float = 40.0
+    # Story 12.103 (INPUT SECURITY) — per-customer message size cap and rate limit.
+    inbound_max_message_chars: int = 1000
+    inbound_rate_limit_messages: int = 10
+    inbound_rate_limit_window_seconds: int = 300
+    inbound_rate_limit_db_path: str = ".data/semantaix_rate_limits.db"
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50

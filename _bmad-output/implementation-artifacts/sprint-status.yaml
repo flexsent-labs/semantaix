@@ -40,7 +40,7 @@
 #   13-03 ∥ 13-04 after 13-02; 13-05 after 13-04.
 
 generated: 2026-05-23
-last_updated: 2026-05-31
+last_updated: 2026-06-09
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -192,4 +192,5 @@ development_status:
   12-100-vague-window-named-period-no-date-ask: review
   12-101-capacity-per-buggy-question-defers-not-echoes: review
   12-102-english-faq-and-intercept-detectors: review
+  12-103-inbound-security-hardening: review
   epic-12-retrospective: optional

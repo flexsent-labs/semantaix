@@ -184,7 +184,7 @@ class OpenRouterClient:
             [
                 "Snippets:\n" + _format_snippets(snippets),
                 *_maybe_scheduling_block(scheduling_context),
-                "Question:\n" + question,
+                "<customer_question>\n" + question + "\n</customer_question>",
             ]
         )
         messages: list[dict[str, Any]] = [
@@ -288,7 +288,7 @@ class OpenRouterClient:
             [
                 "Snippets:\n" + _format_snippets(snippets),
                 *_maybe_scheduling_block(scheduling_context),
-                "Question:\n" + question,
+                "<customer_question>\n" + question + "\n</customer_question>",
                 "Candidate answer:\n" + answer,
             ]
         )

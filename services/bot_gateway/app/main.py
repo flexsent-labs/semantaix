@@ -53,6 +53,7 @@ from services.bot_gateway.app.prompt_commands import (
     dispatch_pending_prompt_edit,
     handle_prompt_command,
 )
+from services.bot_gateway.app.rate_limit_repository import InboundRateLimitRepository
 from services.bot_gateway.app.sales_command_dispatch import handle_sales_command
 from services.bot_gateway.app.services_nl_dialog import handle_services_nl_message
 from services.bot_gateway.app.telegram_file_download import (
@@ -87,6 +88,11 @@ offline_backlog_buffer = OfflineBacklogBuffer(settings.persistence_db_path)
 pending_forward_outbox = PendingForwardOutbox(settings.persistence_db_path)
 webhook_update_claim_repository = WebhookUpdateClaimRepository(
     settings.webhook_dedup_db_path
+)
+# Story 12.103 — per-customer rate limiter.
+rate_limit_repo = InboundRateLimitRepository(db_path=settings.inbound_rate_limit_db_path)
+_RATE_LIMIT_REPLY = (
+    "Слишком много сообщений. Пожалуйста, подождите немного и попробуйте снова."
 )
 offline_context_cues = load_context_cues()
 api_client = ApiClient(
@@ -2085,6 +2091,27 @@ async def _forward_inbound_with_retry(
     return forwarded
 
 
+def _apply_inbound_length_cap(
+    text: str,
+    max_chars: int,
+    *,
+    chat_id: int,
+    trace_id: str,
+) -> str:
+    if len(text) > max_chars:
+        logger.info(
+            "inbound_message_truncated",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": chat_id,
+                "original_len": len(text),
+                "truncated_len": max_chars,
+            },
+        )
+        return text[:max_chars]
+    return text
+
+
 async def _forward_live_and_clear_pending(
     *,
     text: str,
@@ -2727,6 +2754,33 @@ async def _process_telegram_update(
         )
         return {"status": "backlog_buffered", "trace_id": trace_id}
 
+    # Story 12.103: security checks — length cap + rate limit (customer-only).
+    inbound_text = _apply_inbound_length_cap(
+        normalized.text or "",
+        settings.inbound_max_message_chars,
+        chat_id=normalized.chat_id,
+        trace_id=trace_id,
+    )
+
+    allowed = await asyncio.to_thread(
+        rate_limit_repo.check_and_record,
+        chat_id=normalized.chat_id,
+        now=datetime.now(UTC),
+        max_messages=settings.inbound_rate_limit_messages,
+        window_seconds=settings.inbound_rate_limit_window_seconds,
+    )
+    if not allowed:
+        logger.warning(
+            "inbound_rate_limited",
+            extra={"trace_id": trace_id, "chat_id": normalized.chat_id},
+        )
+        await _safe_send_text(
+            chat_id=normalized.chat_id,
+            text=_RATE_LIMIT_REPLY,
+            purpose="rate_limit_reply",
+        )
+        return {"status": "rate_limited", "trace_id": trace_id}
+
     # Customer forward runs as a background task so the webhook returns 200
     # OK within a few milliseconds. The AnswerPipeline (LLM + RAG + verifier
     # + guardrails) frequently exceeds Telegram's ~5s webhook deadline; when
@@ -2742,12 +2796,12 @@ async def _process_telegram_update(
         update_id=normalized.update_id,
         source_message_id=normalized.source_message_id,
         customer_username=normalized.username,
-        text=normalized.text,
+        text=inbound_text,
         trace_id=trace_id,
     )
     background_tasks.add_task(
         _forward_live_and_clear_pending,
-        text=normalized.text,
+        text=inbound_text,
         chat_id=normalized.chat_id,
         update_id=normalized.update_id,
         customer_username=normalized.username,
