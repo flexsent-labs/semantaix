@@ -63,26 +63,29 @@ class InboundRateLimitRepository:
         # Re-init so a re-assigned db_path (per-test isolation) has the table.
         _init_schema(self.db_path)
         with _connect(self.db_path) as connection:
+            # INSERT OR IGNORE: atomic first-message insertion that handles
+            # concurrent callers without IntegrityError on the PRIMARY KEY.
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO inbound_request_counts "
+                "(chat_id, window_start_iso, message_count) VALUES (?, ?, 1)",
+                (chat_id, now_iso),
+            )
+            if cursor.rowcount:
+                # We created the row — first ever message from this chat_id.
+                return True
+
+            # Row already existed (normal path or concurrent insert beat us).
             row = connection.execute(
                 "SELECT window_start_iso, message_count FROM inbound_request_counts "
                 "WHERE chat_id = ?",
                 (chat_id,),
             ).fetchone()
 
-            if row is None:
-                # First ever message from this chat_id.
-                connection.execute(
-                    "INSERT INTO inbound_request_counts "
-                    "(chat_id, window_start_iso, message_count) VALUES (?, ?, 1)",
-                    (chat_id, now_iso),
-                )
-                return True
-
             window_start = datetime.fromisoformat(row["window_start_iso"])
             count = row["message_count"]
             elapsed = (now - window_start).total_seconds()
 
-            if elapsed > window_seconds:
+            if elapsed >= window_seconds:
                 # Window expired — reset.
                 connection.execute(
                     "INSERT OR REPLACE INTO inbound_request_counts "

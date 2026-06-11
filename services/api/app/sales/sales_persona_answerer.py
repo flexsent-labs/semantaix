@@ -1462,7 +1462,7 @@ class SalesPersonaAnswerer:
         # ``not is_sales_intent`` — the detector is precise, and the request is a
         # human handoff even when a booking is in flight. Fires in any state.
         if is_human_request(question):
-            return self._handle_human_request(ctx=ctx)
+            return self._handle_human_request(ctx=ctx, question=question)
 
         # Story 12.34 — an out-of-scope ask (a restaurant / hotel) must be
         # politely declined, not accepted as a booking. The polite-decline
@@ -1698,7 +1698,7 @@ class SalesPersonaAnswerer:
         # Story 12.45 (round-8 N3) - mirror the customer's language. Empty suffix
         # for Russian (the default), so RU prompts are unchanged.
         system = _build_greeting_prompt(
-            today=_format_today_ru(self._clock())
+            today=_format_today_ru(self._clock(), tz=ZoneInfo(ctx.timezone))
         ) + reply_language_directive(question)
         # Story 12.55/12.56 — on a mid-thread re-entry (returning after a handoff
         # / an intent switch) the bot shouldn't open with "Здравствуйте" - UNLESS
@@ -2256,12 +2256,12 @@ class SalesPersonaAnswerer:
                 "sales_turn_kind": "cancellation_request",
                 "escalate": True,
                 "hitl_reason": HITL_REASON_CANCELLATION,
-                "escalation_context": CANCELLATION_ESCALATION_CONTEXT,
+                "escalation_context": question,
                 "suppress_followup": True,
             },
         )
 
-    def _handle_human_request(self, *, ctx: AnswerContext) -> AnswerResult:
+    def _handle_human_request(self, *, ctx: AnswerContext, question: str) -> AnswerResult:
         """Route an explicit "talk to a human" request to a person (Story 12.95,
         round-27 R27-3).
 
@@ -2291,7 +2291,7 @@ class SalesPersonaAnswerer:
                 "sales_turn_kind": "human_request",
                 "escalate": True,
                 "hitl_reason": HITL_REASON_HUMAN_REQUEST,
-                "escalation_context": HUMAN_REQUEST_ESCALATION_CONTEXT,
+                "escalation_context": question,
                 "suppress_followup": True,
             },
         )
@@ -2319,7 +2319,7 @@ class SalesPersonaAnswerer:
             persona=persona,
             intent=existing_intent,
             schema=schema,
-            today=_format_today_ru(self._clock()),
+            today=_format_today_ru(self._clock(), tz=ZoneInfo(ctx.timezone)),
         ) + reply_language_directive(question)  # N3 - mirror the customer's language
         user = f"Сообщение клиента:\n{question}"
         try:
@@ -2662,16 +2662,17 @@ class SalesPersonaAnswerer:
         a correction naming both ("именно в 12:00, а не в 08:00") still picks
         12:00. More than one new time, or none, is ambiguous → ``None``.
         """
-        tz = now.tzinfo
         offered = self._pitching_offered_slot(last_proposal)
-        if tz is None or offered is None:
+        if offered is None or offered.tzinfo is None:
             return None
         proposal_hm = (offered.hour, offered.minute)
         candidates = [hm for hm in extract_all_clocks(question) if hm != proposal_hm]
         if len(candidates) != 1:
             return None
         hour, minute = candidates[0]
-        return datetime(offered.year, offered.month, offered.day, hour, minute, tzinfo=tz)
+        return datetime(
+            offered.year, offered.month, offered.day, hour, minute, tzinfo=offered.tzinfo
+        )
 
     async def _confirm_slot(
         self,

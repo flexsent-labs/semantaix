@@ -340,7 +340,7 @@ async def test_awaiting_time_busy_en_localizes_verdict_and_alternative() -> None
         freebusy=_FreeBusy(busy=busy),
     )
     # English turn → English verdict + English nearest-free tail (May 30, 09:00).
-    result = await answerer.try_answer(question="Tomorrow at 14:00 then.", ctx=_ctx())
+    result = await answerer.try_answer(question="Tomorrow at 14:00 then.", ctx=_en_ctx())
     text = result.text or ""
     assert SLOT_BUSY_LINE_EN in text
     assert "The nearest available time is" in text
@@ -361,7 +361,7 @@ async def test_awaiting_time_free_en_localizes_handoff() -> None:
         cal_settings=_FakeCalSettings(),
         freebusy=_FreeBusy(busy=()),
     )
-    result = await answerer.try_answer(question="Tomorrow at 14:00 then.", ctx=_ctx())
+    result = await answerer.try_answer(question="Tomorrow at 14:00 then.", ctx=_en_ctx())
     assert result.text == SLOT_FREE_HANDOFF_LINE_EN
 
 
