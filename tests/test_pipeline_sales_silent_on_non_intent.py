@@ -53,7 +53,7 @@ class _MustNotCallOpenRouter:
         self.calls: list[dict[str, Any]] = []
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:  # pragma: no cover - must not run
         self.calls.append({"system": system, "user": user, "model": model})
         raise AssertionError("LLM must not be called on a non-sales message")

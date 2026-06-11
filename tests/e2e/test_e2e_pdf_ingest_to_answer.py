@@ -33,7 +33,7 @@ from services.api.app.main import (
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
-from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
 
 pytestmark = [pytest.mark.e2e]
 
@@ -62,15 +62,27 @@ def _wire(tmp_path, monkeypatch):
     monkeypatch.setattr(
         openrouter_client,
         "answer_grounded",
-        AsyncMock(return_value=_GROUNDED_REPLY),
+        AsyncMock(return_value=(
+            _GROUNDED_REPLY,
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+                cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
         AsyncMock(
-            return_value=GroundingVerdict(
-                label="GROUNDED",
-                reason="brochure mentions буровые туры in Sochi",
+            return_value=(
+                GroundingVerdict(
+                    label="GROUNDED",
+                    reason="brochure mentions буровые туры in Sochi",
+                ),
+                LlmUsageCapture(
+                    model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                    cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+                ),
             )
         ),
     )

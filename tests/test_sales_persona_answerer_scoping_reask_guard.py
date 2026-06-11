@@ -63,7 +63,7 @@ class _RecordingOpenRouter:
         self._responses = list(responses)
         self.systems: list[str] = []
 
-    async def complete_json(self, *, system, user, model=None) -> dict[str, Any]:
+    async def complete_json(self, *, system, user, model=None, **_kw: Any) -> dict[str, Any]:
         self.systems.append(system)
         return self._responses.pop(0)
 

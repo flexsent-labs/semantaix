@@ -7,7 +7,7 @@ import pytest
 
 from services.api.app.answerers import AnswerContext
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
-from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
 from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.rag import RagChunk
 
@@ -55,9 +55,22 @@ async def test_confidential_chunk_redacts_metadata_but_grounds_normally(tmp_path
     ]
     rag = _FakeRag(chunks)
     llm = AsyncMock()
-    llm.answer_grounded = AsyncMock(return_value="Ответ по расценкам.")
+    _cap = LlmUsageCapture(
+        model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+        cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+    )
+    llm.answer_grounded = AsyncMock(return_value=(
+        "Ответ по расценкам.",
+        _cap,
+    ))
     llm.verify_grounding = AsyncMock(
-        return_value=GroundingVerdict(label="GROUNDED", reason="matches confidential snippet")
+        return_value=(
+            GroundingVerdict(label="GROUNDED", reason="matches confidential snippet"),
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+            ),
+        )
     )
 
     answerer = GroundedRagAnswerer(
@@ -96,9 +109,21 @@ async def test_non_confidential_chunk_passes_through_in_metadata(tmp_path):
     ]
     rag = _FakeRag(chunks)
     llm = AsyncMock()
-    llm.answer_grounded = AsyncMock(return_value="Открыто с 9 до 18.")
+    llm.answer_grounded = AsyncMock(return_value=(
+        "Открыто с 9 до 18.",
+        LlmUsageCapture(
+            model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+            cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+        ),
+    ))
     llm.verify_grounding = AsyncMock(
-        return_value=GroundingVerdict(label="GROUNDED", reason="matches public snippet")
+        return_value=(
+            GroundingVerdict(label="GROUNDED", reason="matches public snippet"),
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+            ),
+        )
     )
     answerer = GroundedRagAnswerer(
         rag_repository=rag,

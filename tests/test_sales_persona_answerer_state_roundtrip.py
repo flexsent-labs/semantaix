@@ -31,7 +31,7 @@ class _ScriptedOpenRouter:
         self.calls: list[dict[str, Any]] = []
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         self.calls.append({"system": system, "user": user, "model": model})
         return self.payloads.pop(0)

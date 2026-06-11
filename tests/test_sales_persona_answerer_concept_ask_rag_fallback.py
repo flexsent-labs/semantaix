@@ -69,7 +69,7 @@ class _FakeOpenRouter:
         self.queue.append(payload)
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         self.calls.append({"system": system, "user": user, "model": model})
         if not self.queue:
@@ -235,7 +235,7 @@ async def test_concept_rag_llm_transport_error_escalates() -> None:
 
     class _BrokenOpenRouter:
         async def complete_json(
-            self, *, system: str, user: str, model: str | None = None
+            self, *, system: str, user: str, model: str | None = None, **_kw: Any
         ) -> dict[str, Any]:
             raise RuntimeError("transport boom")
 

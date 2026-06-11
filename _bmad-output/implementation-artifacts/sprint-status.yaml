@@ -48,7 +48,7 @@
 #   no automated replies, silent rate-limit drops).
 
 generated: 2026-05-23
-last_updated: 2026-06-11
+last_updated: 2026-06-11T08:00:00
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -205,8 +205,8 @@ development_status:
 
   # --- Next-up epics (backlog; Epic 14 starts after Epic 12 closes) ---
   epic-14: in-progress
-  14-01-usage-db-schema-and-migration: ready-for-dev
-  14-02-llm-instrumentation-and-recorder: backlog
+  14-01-usage-db-schema-and-migration: done
+  14-02-llm-instrumentation-and-recorder: review
   14-03-message-volume-instrumentation: backlog
   14-04-hitl-event-instrumentation: backlog
   14-05-daily-rollup-and-retention: backlog

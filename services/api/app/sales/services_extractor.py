@@ -59,7 +59,14 @@ class _OperatorFilesView(Protocol):
 
 class _OpenRouterClient(Protocol):
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str | None = None,
+        project_id: int | None = None,
+        call_outcome: str = "moderation_triggered",
+        trace_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -161,7 +168,9 @@ class ServicesExtractor:
 
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user,
+                project_id=project_id, trace_id=None,
+                call_outcome="moderation_triggered",
             )
         except OpenRouterJsonSchemaViolation:
             logger.warning(

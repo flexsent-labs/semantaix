@@ -36,7 +36,7 @@ class _CapturingOpenRouter:
         self.user_prompts: list[str] = []
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         self.user_prompts.append(user)
         return self._response

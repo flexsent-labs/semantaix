@@ -52,7 +52,12 @@ class _OperatorFilesView(Protocol):
 
 class _OpenRouterClient(Protocol):
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str | None = None,
+        project_id: int | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -175,7 +180,7 @@ class ClientMaterialsAnalyzer:
 
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user, project_id=project_id
             )
         except OpenRouterJsonSchemaViolation:
             logger.warning(

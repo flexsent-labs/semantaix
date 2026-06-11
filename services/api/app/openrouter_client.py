@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from platform_common.settings import get_settings
 from services.api.app.rag import RagChunk
+
+if TYPE_CHECKING:
+    from services.api.app.usage.recorder import UsageRecorder
 
 
 class OpenRouterJsonSchemaViolation(Exception):
@@ -16,6 +22,18 @@ class OpenRouterJsonSchemaViolation(Exception):
     schema-violation type (e.g. ``LlmSchemaViolation`` in the sales
     answerer) so the pipeline can fall through cleanly.
     """
+
+
+@dataclass(frozen=True)
+class LlmUsageCapture:
+    """Token/cost snapshot from one OpenRouter response (Story 14.02)."""
+
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float | None
+    created_at: str  # UTC ISO-8601 with Z suffix
+
 
 _GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
     "Ты — {name}, сотрудник компании, описанной в приведённых ниже "
@@ -104,7 +122,11 @@ def _build_grounding_system_prompt(
 
 
 class OpenRouterClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        recorder: "UsageRecorder | None" = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         settings = get_settings()
         self.api_key = settings.openrouter_api_key
         self.base_url = settings.openrouter_base_url.rstrip("/")
@@ -112,6 +134,8 @@ class OpenRouterClient:
         # Story 12.30 — default temperature for generative calls; 0.0 unless
         # raised in config. Funnel/verifier override this per-call.
         self.temperature = settings.openrouter_temperature
+        self._recorder = recorder
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(timezone.utc))
 
     def _is_configured(self) -> bool:
         """True when a real API key is present (so a model check can run)."""
@@ -138,7 +162,10 @@ class OpenRouterClient:
         model: str,
         messages: list[dict[str, Any]],
         temperature: float | None = None,
-    ) -> str:
+        project_id: int | None = None,
+        call_outcome: str | None = None,
+        trace_id: str | None = None,
+    ) -> tuple[str, LlmUsageCapture]:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
         payload = {
@@ -152,15 +179,45 @@ class OpenRouterClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            if self._recorder is not None and project_id is not None:
+                now_str = self._clock().strftime("%Y-%m-%dT%H:%M:%SZ")
+                asyncio.ensure_future(
+                    self._recorder.record(
+                        tracker_type="llm",
+                        project_id=project_id,
+                        payload={
+                            "model_name": model,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "cost_usd": None,
+                            "call_outcome": "error",
+                            "trace_id": trace_id,
+                            "created_at": now_str,
+                        },
+                        trace_id=trace_id,
+                    )
+                )
+            raise
+        usage = data.get("usage") or {}
+        capture = LlmUsageCapture(
+            model_name=data.get("model", model),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            cost_usd=usage.get("cost"),
+            created_at=self._clock().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        text = data["choices"][0]["message"]["content"]
+        return text, capture
 
     async def answer_grounded(
         self,
@@ -173,7 +230,9 @@ class OpenRouterClient:
         model: str | None = None,
         system_prompt_template: str | None = None,
         scheduling_context: str | None = None,
-    ) -> str:
+        project_id: int | None = None,
+        trace_id: str | None = None,
+    ) -> tuple[str, LlmUsageCapture]:
         system = _build_grounding_system_prompt(
             first_name=persona_first_name,
             last_name=persona_last_name,
@@ -192,7 +251,10 @@ class OpenRouterClient:
             {"role": "user", "content": user_block},
         ]
         return await self._chat(
-            model=model or self.grounding_model, messages=messages
+            model=model or self.grounding_model,
+            messages=messages,
+            project_id=project_id,
+            trace_id=trace_id,
         )
 
     async def summarize_offerings(
@@ -201,6 +263,8 @@ class OpenRouterClient:
         knowledge_text: str,
         model: str | None = None,
         system_prompt: str | None = None,
+        project_id: int | None = None,
+        trace_id: str | None = None,
     ) -> str:
         """Extract a deduplicated offerings list from a block of knowledge text.
 
@@ -216,9 +280,31 @@ class OpenRouterClient:
             {"role": "system", "content": chosen_system},
             {"role": "user", "content": knowledge_text},
         ]
-        return await self._chat(
-            model=model or self.grounding_model, messages=messages
+        text, capture = await self._chat(
+            model=model or self.grounding_model,
+            messages=messages,
+            project_id=project_id,
+            call_outcome="moderation_triggered",
+            trace_id=trace_id,
         )
+        if self._recorder is not None and project_id is not None:
+            asyncio.ensure_future(
+                self._recorder.record(
+                    tracker_type="llm",
+                    project_id=project_id,
+                    payload={
+                        "model_name": capture.model_name,
+                        "prompt_tokens": capture.prompt_tokens,
+                        "completion_tokens": capture.completion_tokens,
+                        "cost_usd": capture.cost_usd,
+                        "call_outcome": "moderation_triggered",
+                        "trace_id": trace_id,
+                        "created_at": capture.created_at,
+                    },
+                    trace_id=trace_id,
+                )
+            )
+        return text
 
     async def complete_json(
         self,
@@ -226,6 +312,9 @@ class OpenRouterClient:
         system: str,
         user: str,
         model: str | None = None,
+        project_id: int | None = None,
+        call_outcome: str = "moderation_triggered",
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
         """Single structured JSON-out completion.
 
@@ -242,7 +331,7 @@ class OpenRouterClient:
         ]
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
-        payload: dict[str, Any] = {
+        http_payload: dict[str, Any] = {
             "model": model or self.grounding_model,
             "messages": messages,
             "response_format": {"type": "json_object"},
@@ -253,15 +342,61 @@ class OpenRouterClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=http_payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            if self._recorder is not None and project_id is not None:
+                now_str = self._clock().strftime("%Y-%m-%dT%H:%M:%SZ")
+                asyncio.ensure_future(
+                    self._recorder.record(
+                        tracker_type="llm",
+                        project_id=project_id,
+                        payload={
+                            "model_name": model or self.grounding_model,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "cost_usd": None,
+                            "call_outcome": "error",
+                            "trace_id": trace_id,
+                            "created_at": now_str,
+                        },
+                        trace_id=trace_id,
+                    )
+                )
+            raise
+        raw = data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        capture = LlmUsageCapture(
+            model_name=data.get("model", model or self.grounding_model),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            cost_usd=usage.get("cost"),
+            created_at=self._clock().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        if self._recorder is not None and project_id is not None:
+            asyncio.ensure_future(
+                self._recorder.record(
+                    tracker_type="llm",
+                    project_id=project_id,
+                    payload={
+                        "model_name": capture.model_name,
+                        "prompt_tokens": capture.prompt_tokens,
+                        "completion_tokens": capture.completion_tokens,
+                        "cost_usd": capture.cost_usd,
+                        "call_outcome": call_outcome,
+                        "trace_id": trace_id,
+                        "created_at": capture.created_at,
+                    },
+                    trace_id=trace_id,
+                )
             )
-            response.raise_for_status()
-            data = response.json()
-            raw = data["choices"][0]["message"]["content"]
         try:
             decoded = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -283,7 +418,9 @@ class OpenRouterClient:
         model: str | None = None,
         system_prompt: str | None = None,
         scheduling_context: str | None = None,
-    ) -> GroundingVerdict:
+        project_id: int | None = None,
+        trace_id: str | None = None,
+    ) -> tuple[GroundingVerdict, LlmUsageCapture]:
         user_block = "\n\n".join(
             [
                 "Snippets:\n" + _format_snippets(snippets),
@@ -299,12 +436,14 @@ class OpenRouterClient:
             {"role": "system", "content": chosen_system},
             {"role": "user", "content": user_block},
         ]
-        raw = await self._chat(
+        raw, capture = await self._chat(
             model=model or self.grounding_model,
             messages=messages,
             temperature=_DETERMINISTIC_TEMPERATURE,
+            project_id=project_id,
+            trace_id=trace_id,
         )
-        return _parse_verdict(raw)
+        return _parse_verdict(raw), capture
 
 
 def _parse_verdict(raw: str) -> GroundingVerdict:

@@ -63,10 +63,15 @@ def _fake_llm(
     verdict_label: str = "GROUNDED",
     verdict_reason: str = "matches snippet",
 ):
+    from services.api.app.openrouter_client import LlmUsageCapture
+    _cap = LlmUsageCapture(
+        model_name="gpt-4o", prompt_tokens=10, completion_tokens=5,
+        cost_usd=None, created_at="2026-06-11T00:00:00Z",
+    )
     llm = AsyncMock()
-    llm.answer_grounded = AsyncMock(return_value=answer)
+    llm.answer_grounded = AsyncMock(return_value=(answer, _cap))
     llm.verify_grounding = AsyncMock(
-        return_value=GroundingVerdict(label=verdict_label, reason=verdict_reason)
+        return_value=(GroundingVerdict(label=verdict_label, reason=verdict_reason), _cap)
     )
     return llm
 

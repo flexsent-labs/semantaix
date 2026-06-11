@@ -32,7 +32,7 @@ class _ScriptedOpenRouter:
         self.payloads = list(payloads)
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         return self.payloads.pop(0)
 

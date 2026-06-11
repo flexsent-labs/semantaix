@@ -35,7 +35,7 @@ from services.api.app.catalog_digest import (
     CatalogDigestRepository,
     CatalogDigestService,
 )
-from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
 
 pytestmark = [pytest.mark.e2e, pytest.mark.epic("13"), pytest.mark.story("13-06")]
 
@@ -117,16 +117,25 @@ def _build_client(tmp_path, monkeypatch, *, llm_answer: str = ""):
     # so the test can introspect what the answerer fed the model.
     captured: dict[str, object] = {}
 
+    _cap_answer = LlmUsageCapture(
+        model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+        cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+    )
+    _cap_verify = LlmUsageCapture(
+        model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+        cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+    )
+
     async def _fake_answer(**kwargs):
         captured["snippets"] = kwargs.get("snippets")
         if llm_answer:
-            return llm_answer
+            return llm_answer, _cap_answer
         # Default: echo the first snippet's chunk_text so we can grep it.
         snippets = kwargs.get("snippets") or []
-        return snippets[0].chunk_text if snippets else ""
+        return (snippets[0].chunk_text if snippets else ""), _cap_answer
 
     async def _fake_verify(**kwargs):
-        return GroundingVerdict(label="GROUNDED", reason="echo-test-ok")
+        return GroundingVerdict(label="GROUNDED", reason="echo-test-ok"), _cap_verify
 
     monkeypatch.setattr(
         api_main.openrouter_client,

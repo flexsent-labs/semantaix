@@ -23,7 +23,7 @@ from services.api.app.main import (
     weather_client,
 )
 from services.api.app.main import app as api_app
-from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
 from services.bot_gateway.app.main import (
     api_client as bot_api_client,
 )
@@ -121,13 +121,25 @@ def test_e2e_scheduling_question_enriches_grounded_answer(tmp_path, monkeypatch)
             )
         ),
     )
-    answer_mock = AsyncMock(return_value="Доставим ваш заказ завтра.")
+    answer_mock = AsyncMock(return_value=(
+        "Доставим ваш заказ завтра.",
+        LlmUsageCapture(
+            model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+            cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+        ),
+    ))
     monkeypatch.setattr(openrouter_client, "answer_grounded", answer_mock)
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
         AsyncMock(
-            return_value=GroundingVerdict(label="GROUNDED", reason="matches snippet")
+            return_value=(
+                GroundingVerdict(label="GROUNDED", reason="matches snippet"),
+                LlmUsageCapture(
+                    model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                    cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+                ),
+            )
         ),
     )
 
@@ -159,13 +171,25 @@ def test_e2e_grounded_rag_russian_answer(tmp_path, monkeypatch):
     monkeypatch.setattr(
         openrouter_client,
         "answer_grounded",
-        AsyncMock(return_value="Возврат денег занимает пять рабочих дней."),
+        AsyncMock(return_value=(
+            "Возврат денег занимает пять рабочих дней.",
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+                cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
         AsyncMock(
-            return_value=GroundingVerdict(label="GROUNDED", reason="matches snippet")
+            return_value=(
+                GroundingVerdict(label="GROUNDED", reason="matches snippet"),
+                LlmUsageCapture(
+                    model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                    cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+                ),
+            )
         ),
     )
 
@@ -277,12 +301,24 @@ def test_e2e_english_scheduling_question_grounded(tmp_path, monkeypatch):
         source_id="kb-delivery-en",
         text="Возврат денег занимает пять рабочих дней",
     )
-    answer_mock = AsyncMock(return_value="Мы доставим завтра.")
+    answer_mock = AsyncMock(return_value=(
+        "Мы доставим завтра.",
+        LlmUsageCapture(
+            model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+            cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+        ),
+    ))
     monkeypatch.setattr(openrouter_client, "answer_grounded", answer_mock)
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
-        AsyncMock(return_value=GroundingVerdict(label="GROUNDED", reason="ok")),
+        AsyncMock(return_value=(
+            GroundingVerdict(label="GROUNDED", reason="ok"),
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     client = TestClient(api_app)
     body = _post_inbound(
@@ -308,12 +344,24 @@ def test_e2e_slang_rag_via_lemma_overlap(tmp_path, monkeypatch):
     monkeypatch.setattr(
         openrouter_client,
         "answer_grounded",
-        AsyncMock(return_value="Деньги вернутся за пять рабочих дней."),
+        AsyncMock(return_value=(
+            "Деньги вернутся за пять рабочих дней.",
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+                cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
-        AsyncMock(return_value=GroundingVerdict(label="GROUNDED", reason="ok")),
+        AsyncMock(return_value=(
+            GroundingVerdict(label="GROUNDED", reason="ok"),
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     client = TestClient(api_app)
     # "бабло" -> "деньги" -> lemma overlap with "денег" chunk
@@ -337,12 +385,24 @@ def test_e2e_profanity_in_llm_output_declines(tmp_path, monkeypatch):
     monkeypatch.setattr(
         openrouter_client,
         "answer_grounded",
-        AsyncMock(return_value="Полный пиздец с возвратами в эти дни."),
+        AsyncMock(return_value=(
+            "Полный пиздец с возвратами в эти дни.",
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+                cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
-        AsyncMock(return_value=GroundingVerdict(label="GROUNDED", reason="ok")),
+        AsyncMock(return_value=(
+            GroundingVerdict(label="GROUNDED", reason="ok"),
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     client = TestClient(api_app)
     body = _post_inbound(

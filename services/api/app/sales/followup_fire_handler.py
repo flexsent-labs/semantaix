@@ -40,6 +40,9 @@ class _OpenRouter(Protocol):
         system: str,
         user: str,
         model: str | None = None,
+        project_id: int | None = None,
+        call_outcome: str = "customer_visible_answer",
+        trace_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -126,7 +129,8 @@ class FollowupFireHandler:
         intent = Intent.from_dict((state or {}).get("collected_intent") or {})
         resolved_name = _resolve_customer_name(state, customer_name)
         text, fallback_used = await self._render(
-            intent=intent, customer_name=resolved_name
+            intent=intent, customer_name=resolved_name,
+            project_id=int(row.project_id),
         )
 
         try:
@@ -191,7 +195,7 @@ class FollowupFireHandler:
         )
 
     async def _render(
-        self, *, intent: Intent, customer_name: str
+        self, *, intent: Intent, customer_name: str, project_id: int | None = None
     ) -> tuple[str, bool]:
         persona = self._persona_getter()
         system = _PROMPT_TEMPLATE.format(
@@ -202,7 +206,9 @@ class FollowupFireHandler:
         user = "Сформируй сообщение для возвращения клиента в разговор."
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user,
+                project_id=project_id, trace_id=None,
+                call_outcome="customer_visible_answer",
             )
         except Exception as exc:  # defensive — LLM transport
             logger.warning(

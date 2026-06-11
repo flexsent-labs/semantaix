@@ -24,7 +24,7 @@ from services.api.app.main import (
     openrouter_client,
     rag_repository,
 )
-from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
 
 pytestmark = [pytest.mark.e2e, pytest.mark.epic("11"), pytest.mark.story("11-07")]
 
@@ -116,12 +116,24 @@ def test_e2e_disabled_project_availability_question_grounds_via_rag(
     monkeypatch.setattr(
         openrouter_client,
         "answer_grounded",
-        AsyncMock(return_value="Маникюр доступен по субботам с 10 до 19."),
+        AsyncMock(return_value=(
+            "Маникюр доступен по субботам с 10 до 19.",
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+                cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
     monkeypatch.setattr(
         openrouter_client,
         "verify_grounding",
-        AsyncMock(return_value=GroundingVerdict(label="GROUNDED", reason="ok")),
+        AsyncMock(return_value=(
+            GroundingVerdict(label="GROUNDED", reason="ok"),
+            LlmUsageCapture(
+                model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+                cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+            ),
+        )),
     )
 
     body = client.post(

@@ -52,7 +52,7 @@ class _FakeOpenRouter:
         self.payload = payload
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         return self.payload
 
@@ -155,7 +155,7 @@ async def test_empty_llm_output_escalates() -> None:
 
 class _RaisingOpenRouter:
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         raise RuntimeError("transport down")
 
@@ -210,7 +210,7 @@ async def test_llm_transport_failure_escalates_with_drift_reason() -> None:
 async def test_non_dict_payload_escalates() -> None:
     class _NonDictOpenRouter:
         async def complete_json(
-            self, *, system: str, user: str, model: str | None = None
+            self, *, system: str, user: str, model: str | None = None, **_kw: Any
         ) -> Any:
             return "not a dict"  # type: ignore[return-value]
 

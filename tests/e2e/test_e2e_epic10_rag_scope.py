@@ -6,12 +6,22 @@ import pytest
 
 from services.api.app.answerers import AnswerContext
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
-from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
 from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.projects import ProjectRepository
 from services.api.app.rag import RagRepository
 
 pytestmark = [pytest.mark.e2e, pytest.mark.epic("10")]
+
+
+_STUB_CAPTURE = LlmUsageCapture(
+    model_name="gpt-4o", prompt_tokens=50, completion_tokens=25,
+    cost_usd=0.001, created_at="2026-06-11T00:00:00Z",
+)
+_STUB_VERIFY_CAPTURE = LlmUsageCapture(
+    model_name="gpt-4o", prompt_tokens=20, completion_tokens=10,
+    cost_usd=0.0005, created_at="2026-06-11T00:00:00Z",
+)
 
 
 class _StubLLM:
@@ -21,10 +31,10 @@ class _StubLLM:
 
     async def answer_grounded(self, **kwargs):
         self.answer_calls.append(kwargs)
-        return self.answer
+        return self.answer, _STUB_CAPTURE
 
     async def verify_grounding(self, **_kwargs):
-        return GroundingVerdict(label="GROUNDED", reason="ok")
+        return GroundingVerdict(label="GROUNDED", reason="ok"), _STUB_VERIFY_CAPTURE
 
 
 class _StubCatalog:
