@@ -137,6 +137,7 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.bootstrap import (
     init_schema as sales_bootstrap_init_schema,
 )
+from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.sales.client_materials_analyzer import (
     AnalysisOutcome,
     ClientMaterialsAnalyzer,
@@ -504,6 +505,10 @@ def _effective_scoping_schema(ctx: AnswerContext) -> ScopingSchema:
 # the file. The repositories below still run their own per-table
 # init_schema (idempotent) for tests that construct them in isolation.
 sales_bootstrap_init_schema(settings.sales_db_path)
+
+# Epic 14 story 14.01: bootstrap the usage telemetry DB (WAL + five tables +
+# indexes). Idempotent — safe to re-run on every container boot.
+bootstrap_usage_db(settings.usage_db_path)
 
 # Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
 # `sales_conversation_state` table is bootstrapped at startup. Story 12.09
