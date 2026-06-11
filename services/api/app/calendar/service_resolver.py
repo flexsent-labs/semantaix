@@ -380,6 +380,23 @@ _DOTTED_DATE_YEAR_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
 _SLASH_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 _DOTTED_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\b")
 
+# Story 12.20 — numeric ordinal day suffixes: «31-ое», «9-го», «3-его», «5-е».
+# Matches digit(s) + hyphen + a Russian ordinal adjectival ending.  Lower priority
+# than «<day> <month>» (which is more specific) and than ISO/dotted dates.
+_NUMERIC_ORDINAL_DATE_RE = re.compile(
+    r"\b(\d{1,2})-(?:ого|его|ое|ем|ому|е(?!\w)|го)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Story 12.20 — bare «в N» clock: «в 8», «в 15».  Fires only when the digit is
+# NOT immediately followed by «:», «.», another digit, or an ordinal suffix
+# (which would make it a date like «в 8-ое»).  Lower priority than all other
+# clock patterns so «в 8 часов» and «в 8:00» still win.
+_VN_BARE_HOUR_RE = re.compile(
+    r"\bв\s+(\d{1,2})(?!\d|[-:.]|(?:ого|его|ое|ем|ому|е(?!\w)|го))\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 def _ampm_to_hm(match: re.Match[str]) -> tuple[int, int] | None:
     """Convert an ``_AMPM_RE`` match to 24h ``(hour, minute)``, or ``None`` if
@@ -506,6 +523,14 @@ def _scan_clocks(text: str) -> list[tuple[int, int, int, int]]:
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             compact.append((m.start(), m.end(), hour, minute))
     groups.append(compact)
+
+    # Story 12.20 — bare «в N» hour (lowest priority so «в 8 часов»/«в 8:00» win).
+    vn: list[tuple[int, int, int, int]] = []
+    for m in _VN_BARE_HOUR_RE.finditer(text):
+        hour = int(m.group(1))
+        if 1 <= hour <= 23:
+            vn.append((m.start(), m.end(), hour, 0))
+    groups.append(vn)
 
     accepted: list[tuple[int, int, int, int]] = []
     for group in groups:  # priority order
@@ -649,6 +674,29 @@ def _extract_ordinal_date(text: str, today: date) -> date | None:
         if month > 12:
             month, year = 1, year + 1
     return None
+
+
+def _extract_numeric_ordinal_date(text: str, today: date) -> date | None:
+    """Resolve a numeric ordinal like «31-ое» / «9-го» to the next occurrence.
+
+    Story 12.20: same semantics as :func:`_extract_ordinal_date` but for the
+    digit+suffix form («31-ое», «9-го», «3-его») instead of word ordinals.
+    """
+    m = _NUMERIC_ORDINAL_DATE_RE.search(text)
+    if m is None:
+        return None
+    day = int(m.group(1))
+    if not 1 <= day <= 31:
+        return None
+    year, month = today.year, today.month
+    for _ in range(13):
+        candidate = _safe_date(year=year, month=month, day=day)
+        if candidate is not None and candidate >= today:
+            return candidate
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return None  # pragma: no cover - unreachable for day 1-31; line 690 blocks day>31
 
 
 def names_invalid_date(text: str, *, now: datetime, project_tz: ZoneInfo) -> bool:
@@ -930,11 +978,13 @@ def extract_requested_start(
         # No relative/weekday/numeric anchor — accept an explicit "<day> <month>"
         # date so an LLM-resolved absolute date still reaches the calendar check.
         # Russian month words first, then English (Story 12.50, R11-2), then an
-        # ordinal day word ("девятого" → next 9th; Story 12.72, round-18 R18-4).
+        # ordinal day word ("девятого" → next 9th; Story 12.72, round-18 R18-4),
+        # then a numeric ordinal ("31-ое", "9-го"; Story 12.20).
         target_date = (
             _extract_absolute_date(text.lower(), local_now.date())
             or _extract_en_absolute_date(text.lower(), local_now.date())
             or _extract_ordinal_date(text.lower(), local_now.date())
+            or _extract_numeric_ordinal_date(text.lower(), local_now.date())
         )
         if target_date is None:
             return None
@@ -981,4 +1031,5 @@ def extract_requested_date(
         _extract_absolute_date(text.lower(), local_now.date())
         or _extract_en_absolute_date(text.lower(), local_now.date())
         or _extract_ordinal_date(text.lower(), local_now.date())
+        or _extract_numeric_ordinal_date(text.lower(), local_now.date())
     )
