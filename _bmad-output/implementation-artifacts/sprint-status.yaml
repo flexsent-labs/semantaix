@@ -100,7 +100,7 @@ development_status:
   epic-13-retrospective: optional
 
   # --- Active feature epic ---
-  epic-12: in-progress
+  epic-12: done
   12-01-sales-db-schema-and-repositories: backlog
   12-02-service-commands-and-sales-state: backlog
   12-02b-natural-language-service-management: backlog
@@ -112,7 +112,7 @@ development_status:
   12-06-service-list-and-concept-explainer: backlog
   12-07-date-proposal-turn: backlog
   12-08-proactive-followup: backlog
-  12-09-pipeline-wiring-and-e2e-signoff: in-progress
+  12-09-pipeline-wiring-and-e2e-signoff: done
   12-10-ask-for-time-when-booking-has-no-time: done
   12-11-graceful-decline-and-loop-guard-in-scoping: done
   12-12-configurable-required-scoping-fields: done
