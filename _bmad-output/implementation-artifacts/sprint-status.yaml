@@ -38,9 +38,17 @@
 #   12-07 ∥ 12-08 after 12-03; 12-09 last (depends on all).
 # - Epic 13 dependency order (epics/stories/epic-13/README.md): 13-01 blocks all; 13-02 ∥ 13-06 after 13-01;
 #   13-03 ∥ 13-04 after 13-02; 13-05 after 13-04.
+# - Epic 14 (Usage/Cost Monitoring) starts after Epic 12 closes; 14-01 is the foundation (no deps).
+#   14-07/14-08 gated on Epic 10.5 (project-model); 14-07 must ship before 14-08.
+#   Planning story files in planning-artifacts/epics/stories/epic-14/ (IR: READY).
+# - Epic 15 (Telegram User Account Gateway) starts after Epic 14 closes.
+#   Planning story files in planning-artifacts/epics/stories/epic-15/ (IR: READY).
+#   15.01 is foundation; 15.02 → 15.03 → 15.04 sequential; 15.05 conditional (deferred).
+#   NFR-15-03/04/05/09 are hard security constraints (2FA never logged, session path never logged,
+#   no automated replies, silent rate-limit drops).
 
 generated: 2026-05-23
-last_updated: 2026-06-09
+last_updated: 2026-06-11
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -109,88 +117,113 @@ development_status:
   12-11-graceful-decline-and-loop-guard-in-scoping: done
   12-12-configurable-required-scoping-fields: done
   12-13-deferred-interim-ack: done
-  12-19-recognize-slot-confirmation-and-stop-pitching-reask-loop: review
+  12-19-recognize-slot-confirmation-and-stop-pitching-reask-loop: done
   12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: ready-for-dev
-  12-21-proposing-counter-offer-before-acceptance: review
-  12-22-defer-hitl-until-alternative-accepted: review
-  12-23-reset-stale-closing-on-new-booking: review
-  12-24-idempotent-inbound-delivery: review
-  12-25-early-busy-check-during-scoping: review
-  12-26-absolute-date-parsing-in-busy-check: review
-  12-27-cancellation-intent-route-to-human: review
-  12-28-first-turn-price-intercept: review
-  12-29-off-hours-wording-vs-busy: review
-  12-30-deterministic-llm-sampling: review
-  12-31-operator-command-webhook-dedup: review
-  12-32-never-silently-accept-unverifiable-slot: review
-  12-33-weekday-date-resolution: review
-  12-34-decline-out-of-scope: review
-  12-36-inbound-pipeline-timeout: review
-  12-37-sales-owns-inscope-turns: review
-  12-38-numeric-date-parsing: review
-  12-39-scope-guard-defers-inscope: review
-  12-40-inbound-event-loop-hardening: review
-  12-41-valid-llm-model-and-guard: review
-  12-42-alert-admin-on-model-problem: review
-  12-43-numeric-busycheck-rawtext-fallback: review
-  12-44-price-matches-asked-service: review
-  12-45-reply-in-customer-language: review
-  12-46-pricing-aside-not-sticky: review
-  12-47-bilingual-deterministic-lines: review
-  12-48-pitching-counteroffer-numeric-date: review
-  12-49-price-multiword-service-match: review
-  12-50-english-date-time-parsing: review
-  12-51-pitching-counteroffer-time-carryover: review
-  12-52-localize-remaining-funnel-lines: review
-  12-53-price-subject-mismatch-escalation: review
-  12-54-mixed-intent-out-of-scope-decline: review
-  12-55-no-regreeting-midthread: review
-  12-56-deterministic-no-regreeting: review
-  12-57-hyphen-not-emdash: review
-  12-58-availability-inquiry-no-hitl: review
-  12-59-capacity-question-copy: review
-  12-60-vague-time-window: review
-  12-61-vague-window-completion-path: review
-  12-62-clarify-only-missing-time: review
-  12-63-capacity-derive-from-catalog: review
-  12-64-reject-invalid-calendar-date: review
-  12-65-gratitude-ack-not-handoff: review
-  12-66-eligibility-question-rag-or-defer: review
-  12-67-multi-date-per-day-verdict: review
-  12-68-word-form-clock-times: review
-  12-69-self-correction-last-wins: review
-  12-70-relative-time-offsets: review
-  12-71-far-future-date-not-falsely-busy: review
-  12-72-ordinal-date-words: review
-  12-73-reject-past-date: review
-  12-74-gibberish-clarify-and-language: review
-  12-75-relative-now: review
-  12-76-compact-no-colon-time: review
-  12-77-two-bookings-per-slot-verdict: review
-  12-78-vague-bound-time-clarify: review
-  12-79-half-form-time: review
-  12-80-faq-working-hours: review
-  12-81-faq-duration-defer: review
-  12-82-combined-price-and-availability: review
-  12-83-before-form-time: review
-  12-84-faq-payment-location-bring: review
-  12-85-mixed-service-clarify: review
-  12-86-multi-turn-time-change-recheck: review
-  12-87-multi-option-time-verdict: review
-  12-88-faq-working-days: review
-  12-89-contradictory-count-clarify: review
-  12-90-faq-hours-correct-shape: review
-  12-91-time-without-date-asks: review
-  12-92-pure-greeting-not-handoff: review
-  12-93-out-of-scope-vehicle-decline: review
-  12-94-discount-faq-defer: review
-  12-95-human-request-distinct-copy: review
-  12-96-deterministic-missing-date-ask: review
-  12-97-faq-hours-equal-engine-guard: review
-  12-98-out-of-scope-pure-service-decline: review
-  12-99-relative-time-offsets-resolve-not-ask-date: review
-  12-100-vague-window-named-period-no-date-ask: review
-  12-101-capacity-per-buggy-question-defers-not-echoes: review
-  12-102-english-faq-and-intercept-detectors: review
-  12-103-inbound-security-hardening: review
+  12-21-proposing-counter-offer-before-acceptance: done
+  12-22-defer-hitl-until-alternative-accepted: done
+  12-23-reset-stale-closing-on-new-booking: done
+  12-24-idempotent-inbound-delivery: done
+  12-25-early-busy-check-during-scoping: done
+  12-26-absolute-date-parsing-in-busy-check: done
+  12-27-cancellation-intent-route-to-human: done
+  12-28-first-turn-price-intercept: done
+  12-29-off-hours-wording-vs-busy: done
+  12-30-deterministic-llm-sampling: done
+  12-31-operator-command-webhook-dedup: done
+  12-32-never-silently-accept-unverifiable-slot: done
+  12-33-weekday-date-resolution: done
+  12-34-decline-out-of-scope: done
+  12-36-inbound-pipeline-timeout: done
+  12-37-sales-owns-inscope-turns: done
+  12-38-numeric-date-parsing: done
+  12-39-scope-guard-defers-inscope: done
+  12-40-inbound-event-loop-hardening: done
+  12-41-valid-llm-model-and-guard: done
+  12-42-alert-admin-on-model-problem: done
+  12-43-numeric-busycheck-rawtext-fallback: done
+  12-44-price-matches-asked-service: done
+  12-45-reply-in-customer-language: done
+  12-46-pricing-aside-not-sticky: done
+  12-47-bilingual-deterministic-lines: done
+  12-48-pitching-counteroffer-numeric-date: done
+  12-49-price-multiword-service-match: done
+  12-50-english-date-time-parsing: done
+  12-51-pitching-counteroffer-time-carryover: done
+  12-52-localize-remaining-funnel-lines: done
+  12-53-price-subject-mismatch-escalation: done
+  12-54-mixed-intent-out-of-scope-decline: done
+  12-55-no-regreeting-midthread: done
+  12-56-deterministic-no-regreeting: done
+  12-57-hyphen-not-emdash: done
+  12-58-availability-inquiry-no-hitl: done
+  12-59-capacity-question-copy: done
+  12-60-vague-time-window: done
+  12-61-vague-window-completion-path: done
+  12-62-clarify-only-missing-time: done
+  12-63-capacity-derive-from-catalog: done
+  12-64-reject-invalid-calendar-date: done
+  12-65-gratitude-ack-not-handoff: done
+  12-66-eligibility-question-rag-or-defer: done
+  12-67-multi-date-per-day-verdict: done
+  12-68-word-form-clock-times: done
+  12-69-self-correction-last-wins: done
+  12-70-relative-time-offsets: done
+  12-71-far-future-date-not-falsely-busy: done
+  12-72-ordinal-date-words: done
+  12-73-reject-past-date: done
+  12-74-gibberish-clarify-and-language: done
+  12-75-relative-now: done
+  12-76-compact-no-colon-time: done
+  12-77-two-bookings-per-slot-verdict: done
+  12-78-vague-bound-time-clarify: done
+  12-79-half-form-time: done
+  12-80-faq-working-hours: done
+  12-81-faq-duration-defer: done
+  12-82-combined-price-and-availability: done
+  12-83-before-form-time: done
+  12-84-faq-payment-location-bring: done
+  12-85-mixed-service-clarify: done
+  12-86-multi-turn-time-change-recheck: done
+  12-87-multi-option-time-verdict: done
+  12-88-faq-working-days: done
+  12-89-contradictory-count-clarify: done
+  12-90-faq-hours-correct-shape: done
+  12-91-time-without-date-asks: done
+  12-92-pure-greeting-not-handoff: done
+  12-93-out-of-scope-vehicle-decline: done
+  12-94-discount-faq-defer: done
+  12-95-human-request-distinct-copy: done
+  12-96-deterministic-missing-date-ask: done
+  12-97-faq-hours-equal-engine-guard: done
+  12-98-out-of-scope-pure-service-decline: done
+  12-99-relative-time-offsets-resolve-not-ask-date: done
+  12-100-vague-window-named-period-no-date-ask: done
+  12-101-capacity-per-buggy-question-defers-not-echoes: done
+  12-102-english-faq-and-intercept-detectors: done
+  12-103-inbound-security-hardening: done
   epic-12-retrospective: optional
+
+  # --- Next-up epics (backlog; Epic 14 starts after Epic 12 closes) ---
+  epic-14: backlog
+  14-01-usage-db-schema-and-migration: backlog
+  14-02-llm-instrumentation-and-recorder: backlog
+  14-03-message-volume-instrumentation: backlog
+  14-04-hitl-event-instrumentation: backlog
+  14-05-daily-rollup-and-retention: backlog
+  14-06-web-ui-usage-dashboard: backlog
+  14-07-usage-api-and-money-rbac: backlog
+  14-08-usage-bot-command: backlog
+  14-09-alerting-and-incident-state-machine: backlog
+  14-10-epic-14-signoff: backlog
+  epic-14-retrospective: optional
+
+  # --- Epic 15 (Telegram User Account Gateway; backlog after Epic 14) ---
+  # Planning story files exist in planning-artifacts/epics/stories/epic-15/.
+  # Story 15.05 is conditional — implement only if user_gateway joins shared groups.
+  epic-15: backlog
+  15-01-service-skeleton-docker: backlog
+  15-02-qr-auth-flow: backlog
+  15-03-message-routing: backlog
+  15-04-spam-filters: backlog
+  15-05-cross-channel-dedup-conditional: backlog
+  epic-15-retrospective: optional
