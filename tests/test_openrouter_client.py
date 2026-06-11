@@ -114,7 +114,7 @@ async def test_answer_grounded_uses_grounding_model_and_sends_context(monkeypatc
     client.base_url = "https://openrouter.ai/api/v1"
     client.grounding_model = "google/gemini-2.0-flash-lite-001"
 
-    result = await client.answer_grounded(
+    result, _ = await client.answer_grounded(
         question="Когда мой возврат?",
         snippets=[_snippet()],
         today_iso="2026-05-11",
@@ -257,7 +257,7 @@ async def test_verify_grounding_parses_grounded(monkeypatch):
     _http_mock(monkeypatch, content="GROUNDED: matches the snippet exactly.")
     client = OpenRouterClient()
     client.api_key = "token"
-    verdict = await client.verify_grounding(
+    verdict, _ = await client.verify_grounding(
         question="q", answer="a", snippets=[_snippet()]
     )
     assert verdict.label == "GROUNDED"
@@ -269,7 +269,7 @@ async def test_verify_grounding_parses_not_grounded(monkeypatch):
     _http_mock(monkeypatch, content="NOT_GROUNDED: snippet does not cover that.")
     client = OpenRouterClient()
     client.api_key = "token"
-    verdict = await client.verify_grounding(
+    verdict, _ = await client.verify_grounding(
         question="q", answer="a", snippets=[_snippet()]
     )
     assert verdict.label == "NOT_GROUNDED"

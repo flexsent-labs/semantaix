@@ -212,6 +212,12 @@ from services.api.app.trace_corrections import (
     TraceCorrectionRepository,
 )
 from services.api.app.usage.migrations import bootstrap_usage_db
+from services.api.app.usage.recorder import UsageRecorder
+from services.api.app.usage.repositories import (
+    UsageHitlEventRepository,
+    UsageLlmCallRepository,
+    UsageMessageRepository,
+)
 from services.api.app.web_auth import WebAuthRepository
 
 app = create_service_app("api")
@@ -510,6 +516,19 @@ sales_bootstrap_init_schema(settings.sales_db_path)
 # indexes). Idempotent — safe to re-run on every container boot.
 bootstrap_usage_db(settings.usage_db_path)
 
+# Epic 14 story 14.02: usage recorder — start() is called in the startup hook
+# below so the asyncio event loop is already running when the task is created.
+_usage_llm_call_repo = UsageLlmCallRepository(db_path=settings.usage_db_path)
+_usage_message_repo = UsageMessageRepository(db_path=settings.usage_db_path)
+_usage_hitl_repo = UsageHitlEventRepository(db_path=settings.usage_db_path)
+usage_recorder = UsageRecorder(
+    llm_repo=_usage_llm_call_repo,
+    message_repo=_usage_message_repo,
+    hitl_repo=_usage_hitl_repo,
+    queue_maxsize=settings.usage_queue_maxsize,
+)
+openrouter_client._recorder = usage_recorder
+
 # Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
 # `sales_conversation_state` table is bootstrapped at startup. Story 12.09
 # wires the answerer into `answer_pipeline` below, immediately BEFORE the
@@ -678,6 +697,7 @@ answer_pipeline = AnswerPipeline(
             catalog_digest_service=catalog_digest_service,
             weather_client=weather_client,
             project_services_reader=project_services_repository,
+            recorder=usage_recorder,
         ),
         # Scope guard is always last: catches anything the above answerers could
         # not handle and replies with a short random decline phrase instead of
@@ -3552,6 +3572,16 @@ async def _safe_telegram_identity_call(*, method, **kwargs) -> dict:
             extra={"method": method.__name__, "error": str(exc)},
         )
         return {"ok": False, "error": str(exc)}
+
+
+@app.on_event("startup")
+async def start_usage_recorder_on_startup() -> None:
+    usage_recorder.start()
+
+
+@app.on_event("shutdown")
+async def stop_usage_recorder_on_shutdown() -> None:
+    await usage_recorder.aclose()
 
 
 @app.on_event("startup")

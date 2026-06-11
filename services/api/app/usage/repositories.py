@@ -9,7 +9,17 @@ Sync ``sqlite3`` per project convention; callers dispatch via
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+
+CALL_OUTCOMES: frozenset[str] = frozenset({
+    "customer_visible_answer",
+    "verifier_rejected",
+    "escalated_to_hitl",
+    "guardrails_blocked",
+    "moderation_triggered",
+    "error",
+})
 
 # ---------------------------------------------------------------------------
 # Frozen row types
@@ -87,8 +97,20 @@ class UsageLlmCallRepository:
         self._db_path = db_path
 
     def record(self, row: UsageLlmCallRow) -> None:
-        """Implemented in Story 14.02."""
-        raise NotImplementedError
+        if row.call_outcome not in CALL_OUTCOMES:
+            raise ValueError(f"Invalid call_outcome: {row.call_outcome!r}")
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT INTO usage_llm_calls"
+                " (project_id, model_name, prompt_tokens, completion_tokens,"
+                "  cost_usd, call_outcome, trace_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row.project_id, row.model_name, row.prompt_tokens,
+                    row.completion_tokens, row.cost_usd, row.call_outcome,
+                    row.trace_id, row.created_at,
+                ),
+            )
 
     def list_for_day(self, *, project_id: int, day_utc: str) -> list[UsageLlmCallRow]:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Protocol
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Protocol
 
 from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.answerers.catalog_merge import merge_structured_with_digest
@@ -13,7 +15,7 @@ from services.api.app.answerers.service_catalog_intent import (
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.calendar.project_services_repository import ProjectService
 from services.api.app.guardrails import evaluate_suggestion
-from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.openrouter_client import LlmUsageCapture, OpenRouterClient
 from services.api.app.project_prompts import (
     ProjectPromptRepository,
     resolve_prompt,
@@ -21,6 +23,9 @@ from services.api.app.project_prompts import (
 )
 from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
+
+if TYPE_CHECKING:
+    from services.api.app.usage.recorder import UsageRecorder
 
 _SENTINEL = "ESCALATE_TO_HUMAN"
 _ANSWER_SNIPPET_MAX = 200
@@ -63,6 +68,8 @@ class GroundedRagAnswerer:
         catalog_digest_service: _CatalogDigestProvider,
         weather_client: WeatherClient | None = None,
         project_services_reader: _ProjectServicesReader | None = None,
+        recorder: "UsageRecorder | None" = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._rag = rag_repository
         self._llm = openrouter_client
@@ -71,6 +78,8 @@ class GroundedRagAnswerer:
         self._catalog_digest = catalog_digest_service
         self._weather_client = weather_client
         self._project_services_reader = project_services_reader
+        self._recorder = recorder
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(timezone.utc))
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -182,7 +191,7 @@ class GroundedRagAnswerer:
             },
         )
         try:
-            answer = await self._llm.answer_grounded(
+            answer, grounded_capture = await self._llm.answer_grounded(
                 question=question,
                 snippets=chunks,
                 today_iso=today_iso,
@@ -190,8 +199,11 @@ class GroundedRagAnswerer:
                 persona_last_name=last_name,
                 system_prompt_template=grounding_template,
                 scheduling_context=scheduling_context,
+                project_id=ctx.project_id,
+                trace_id=ctx.trace_id,
             )
         except Exception as exc:
+            # Error row is fired from inside _chat; answerer does not double-write.
             return self._skip(
                 reason="llm_generator_error",
                 ctx=ctx,
@@ -211,6 +223,7 @@ class GroundedRagAnswerer:
             },
         )
         if is_sentinel:
+            self._record_llm_row(grounded_capture, ctx, "escalated_to_hitl")
             return self._skip(
                 reason="escalate_sentinel",
                 ctx=ctx,
@@ -219,14 +232,17 @@ class GroundedRagAnswerer:
             )
 
         try:
-            verdict = await self._llm.verify_grounding(
+            verdict, verifier_capture = await self._llm.verify_grounding(
                 question=question,
                 answer=answer,
                 snippets=chunks,
                 system_prompt=verifier_prompt,
                 scheduling_context=scheduling_context,
+                project_id=ctx.project_id,
+                trace_id=ctx.trace_id,
             )
         except Exception as exc:
+            self._record_llm_row(grounded_capture, ctx, "error")
             return self._skip(
                 reason="verifier_error",
                 ctx=ctx,
@@ -243,6 +259,8 @@ class GroundedRagAnswerer:
             },
         )
         if verdict.label != "GROUNDED":
+            self._record_llm_row(grounded_capture, ctx, "verifier_rejected")
+            self._record_llm_row(verifier_capture, ctx, "verifier_rejected")
             return self._skip(
                 reason="verifier_not_grounded",
                 ctx=ctx,
@@ -267,6 +285,8 @@ class GroundedRagAnswerer:
             },
         )
         if not decision.valid:
+            self._record_llm_row(grounded_capture, ctx, "guardrails_blocked")
+            self._record_llm_row(verifier_capture, ctx, "guardrails_blocked")
             return self._skip(
                 reason="guardrail_invalid",
                 ctx=ctx,
@@ -287,6 +307,8 @@ class GroundedRagAnswerer:
             },
         )
         if contains_profanity:
+            self._record_llm_row(grounded_capture, ctx, "guardrails_blocked")
+            self._record_llm_row(verifier_capture, ctx, "guardrails_blocked")
             return self._skip(
                 reason="profanity_detected",
                 ctx=ctx,
@@ -294,6 +316,8 @@ class GroundedRagAnswerer:
                 chunks=chunks,
             )
 
+        self._record_llm_row(grounded_capture, ctx, "customer_visible_answer")
+        self._record_llm_row(verifier_capture, ctx, "customer_visible_answer")
         text = answer.strip()
         logger.info(
             "grounded_rag_delivered",
@@ -313,6 +337,28 @@ class GroundedRagAnswerer:
                 "verifier": verdict.reason,
                 "guardrail_score": decision.score,
             },
+        )
+
+    def _record_llm_row(
+        self, capture: LlmUsageCapture, ctx: AnswerContext, call_outcome: str
+    ) -> None:
+        if self._recorder is None or ctx.project_id is None:
+            return
+        asyncio.create_task(
+            self._recorder.record(
+                tracker_type="llm",
+                project_id=ctx.project_id,
+                payload={
+                    "model_name": capture.model_name,
+                    "prompt_tokens": capture.prompt_tokens,
+                    "completion_tokens": capture.completion_tokens,
+                    "cost_usd": capture.cost_usd,
+                    "call_outcome": call_outcome,
+                    "trace_id": ctx.trace_id,
+                    "created_at": capture.created_at,
+                },
+                trace_id=ctx.trace_id,
+            )
         )
 
     def _skip(

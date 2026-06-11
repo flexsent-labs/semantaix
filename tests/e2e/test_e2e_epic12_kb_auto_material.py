@@ -198,7 +198,9 @@ def wired_stack(monkeypatch: pytest.MonkeyPatch, shared_paths: dict[str, Path]):
     llm_responses: list[dict[str, Any]] = []
     llm_calls: list[dict[str, Any]] = []
 
-    async def fake_complete_json(*, system: str, user: str, model: str | None = None):
+    async def fake_complete_json(
+        *, system: str, user: str, model: str | None = None, project_id: int | None = None
+    ):
         llm_calls.append({"system": system, "user": user, "model": model})
         if not llm_responses:
             raise AssertionError("LLM called without a queued response")

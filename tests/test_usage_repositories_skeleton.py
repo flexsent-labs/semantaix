@@ -119,12 +119,23 @@ def test_incident_repo_constructs(tmp_path):
 # Every method raises NotImplementedError
 # ---------------------------------------------------------------------------
 
-def test_llm_call_repo_record_not_implemented(tmp_path):
+def test_llm_call_repo_record_is_implemented(tmp_path):
+    """record() is implemented in Story 14.02 — no longer raises NotImplementedError."""
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageLlmCallRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.record(None)  # type: ignore[arg-type]
+    row = UsageLlmCallRow(
+        id=0,
+        project_id=1,
+        model_name="gpt-4o",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd=0.001,
+        call_outcome="customer_visible_answer",
+        trace_id="t-1",
+        created_at="2026-06-11T00:00:00Z",
+    )
+    repo.record(row)  # must not raise
 
 
 def test_llm_call_repo_list_for_day_not_implemented(tmp_path):

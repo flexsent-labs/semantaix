@@ -175,6 +175,7 @@ class AppSettings(BaseSettings):
     calendar_http_timeout_seconds: float = 10.0
     services_nl_op_session_ttl_seconds: int = 600
     usage_db_path: str = ".data/semantaix_usage.db"
+    usage_queue_maxsize: int = 1024
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
