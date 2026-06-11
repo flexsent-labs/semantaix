@@ -204,8 +204,8 @@ development_status:
   epic-12-retrospective: optional
 
   # --- Next-up epics (backlog; Epic 14 starts after Epic 12 closes) ---
-  epic-14: backlog
-  14-01-usage-db-schema-and-migration: backlog
+  epic-14: in-progress
+  14-01-usage-db-schema-and-migration: ready-for-dev
   14-02-llm-instrumentation-and-recorder: backlog
   14-03-message-volume-instrumentation: backlog
   14-04-hitl-event-instrumentation: backlog
