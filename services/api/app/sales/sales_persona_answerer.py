@@ -2576,6 +2576,21 @@ class SalesPersonaAnswerer:
             existing_intent=intent, question=question, now=now
         )
         if merged.dates != intent.dates:
+            # Story 12.20: customer naming the offered slot verbatim («31-ое в 8»
+            # = May 31 08:00 = the slot we just proposed) is acceptance, not a
+            # counter-offer.  Parse the question directly; if it resolves to the
+            # exact offered instant, confirm rather than re-check.
+            offered = self._pitching_offered_slot(last_proposal)
+            if offered is not None:
+                restated = extract_requested_start(
+                    text=question,
+                    now=now,
+                    project_tz=ZoneInfo(ctx.timezone),
+                )
+                if restated is not None and restated == offered:
+                    return await self._confirm_slot(
+                        ctx=ctx, intent=intent, slot_dt=offered
+                    )
             # Story 12.100 (round-28 D3) — pass question so _complete_booking
             # can invoke _maybe_answer_vague_window for named periods like
             # «завтра во второй половине дня» (previously question=None bypassed

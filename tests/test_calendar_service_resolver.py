@@ -1144,3 +1144,89 @@ def test_names_past_date_helper() -> None:
     assert not names_past_date("сегодня в 14:00", now=_NOW, project_tz=MOSCOW)
     assert not names_past_date("9 июня в 14:00", now=_NOW, project_tz=MOSCOW)
     assert not names_past_date("без даты", now=_NOW, project_tz=MOSCOW)
+
+
+# --- Story 12.20: numeric ordinal dates + bare «в N» hours -------------------
+# _NOW is Friday 5 June 2026 (12:00 Moscow = 09:00 UTC).
+# Ordinal day suffixes: «31-ое», «9-го», «3-его» etc.
+# Bare clock: «в 8» = 08:00 (no «часов»/part-of-day required).
+
+
+def test_numeric_ordinal_oe_form_bare_hour() -> None:
+    # «давайте на 31-ое в 8» — the motivating case from Story 12.19 dev notes.
+    # June has no 31st → next 31st = July 31.
+    r = extract_requested_start(text="давайте на 31-ое в 8", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 7, 31, 8, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_ordinal_go_form_explicit_clock() -> None:
+    # «9-го» (genitive) + explicit clock — both new ordinal AND existing clock.
+    r = extract_requested_start(text="9-го в 12:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 9, 12, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_ordinal_ego_form() -> None:
+    # «3-его» (genitive form with «e» glide) → next 3rd = July 3 (June 3 passed).
+    r = extract_requested_start(text="3-его в 10:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 7, 3, 10, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_ordinal_today_day_number() -> None:
+    # «5-ое» == today (June 5) — still eligible (>= today), clock is future.
+    r = extract_requested_start(text="5-ое в 15:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 5, 15, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_ordinal_rolls_to_next_month() -> None:
+    # «3-его» — June 3 already passed → July 3.
+    r = extract_requested_start(text="3-его в 9:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 7, 3, 9, 0, tzinfo=MOSCOW)
+
+
+def test_numeric_ordinal_extract_requested_date_only() -> None:
+    # extract_requested_date (no clock required) also resolves numeric ordinals.
+    d = extract_requested_date(text="31-ое", now=_NOW, project_tz=MOSCOW)
+    assert d == date(2026, 7, 31)
+
+
+def test_bare_vn_hour_resolves() -> None:
+    # «завтра в 8» — bare digit after «в» resolves to 08:00.
+    r = extract_requested_start(text="завтра в 8", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 8, 0, tzinfo=MOSCOW)
+
+
+def test_bare_vn_afternoon_hour_resolves() -> None:
+    # «завтра в 15» — 15:00 (unambiguous, >12).
+    r = extract_requested_start(text="завтра в 15", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 15, 0, tzinfo=MOSCOW)
+
+
+def test_bare_vn_not_fired_when_explicit_colon_follows() -> None:
+    # «в 8:00» is handled by _HH_MM — the «в 8» bare pattern must NOT double-count.
+    r = extract_requested_start(text="завтра в 8:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 6, 8, 0, tzinfo=MOSCOW)
+
+
+def test_bare_vn_not_fired_for_ordinal_suffix() -> None:
+    # «в 8-ое» is a numeric ordinal date, NOT a bare-hour clock.
+    r = extract_requested_start(text="в 8-ое в 12:00", now=_NOW, project_tz=MOSCOW)
+    assert r == datetime(2026, 6, 8, 12, 0, tzinfo=MOSCOW)
+
+
+def test_bare_vn_not_fired_for_chas_form() -> None:
+    # «в 8 часов» — CHAS form wins; «в 8» bare pattern does NOT create a duplicate.
+    clocks = extract_all_clocks("в 8 часов")
+    assert clocks == [(8, 0)]  # exactly one entry, not two
+
+
+def test_numeric_ordinal_day_over_31_returns_none() -> None:
+    # «32-ого» matches the regex but day=32 > 31 → guarded return None.
+    r = extract_requested_date(text="32-ого", now=_NOW, project_tz=MOSCOW)
+    assert r is None
+
+
+def test_numeric_ordinal_rolls_across_year_boundary() -> None:
+    # today=Dec 20; day=5 is already past in December → next occurrence Jan 5 next year.
+    dec = datetime(2026, 12, 20, 12, 0, tzinfo=MOSCOW)
+    r = extract_requested_date(text="5-ого", now=dec, project_tz=MOSCOW)
+    assert r == date(2027, 1, 5)
