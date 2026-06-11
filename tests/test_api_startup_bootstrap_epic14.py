@@ -10,7 +10,6 @@ import sqlite3
 
 from services.api.app.usage.migrations import bootstrap_usage_db
 
-
 _EXPECTED_TABLES = {
     "usage_llm_calls",
     "usage_messages",
@@ -75,7 +74,6 @@ def test_main_imports_bootstrap_usage_db():
 def test_main_calls_bootstrap_on_import(tmp_path, monkeypatch):
     """The module-level call in main.py creates the usage DB when settings point
     to a writable path — verified by checking the DB file exists post-import."""
-    import importlib
 
     from services.api.app import main as api_main
 

@@ -18,7 +18,6 @@ import pytest
 
 from services.api.app.usage.migrations import bootstrap_usage_db
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -276,8 +275,10 @@ def test_call_outcome_has_no_check_constraint(tmp_path):
         # Any arbitrary string is accepted at the SQL level
         conn.execute(
             "INSERT INTO usage_llm_calls"
-            " (project_id, model_name, prompt_tokens, completion_tokens, call_outcome, created_at)"
-            " VALUES (1, 'gpt-4o', 100, 50, 'future_outcome_not_yet_defined', '2026-06-11T00:00:00Z')"
+            " (project_id, model_name, prompt_tokens, completion_tokens,"
+            "  call_outcome, created_at)"
+            " VALUES (1, 'gpt-4o', 100, 50, 'future_outcome_not_yet_defined',"
+            "  '2026-06-11T00:00:00Z')"
         )
 
 

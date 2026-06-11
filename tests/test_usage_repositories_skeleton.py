@@ -24,7 +24,6 @@ from services.api.app.usage.repositories import (
     UsageMessageRow,
 )
 
-
 # ---------------------------------------------------------------------------
 # Frozen dataclass immutability
 # ---------------------------------------------------------------------------
@@ -229,4 +228,8 @@ def test_incident_repo_list_for_window_not_implemented(tmp_path):
     bootstrap_usage_db(db)
     repo = UsageIncidentRepository(db_path=db)
     with pytest.raises(NotImplementedError):
-        repo.list_for_window(project_id=1, from_ts="2026-06-01T00:00:00Z", to_ts="2026-06-11T00:00:00Z")
+        repo.list_for_window(
+            project_id=1,
+            from_ts="2026-06-01T00:00:00Z",
+            to_ts="2026-06-11T00:00:00Z",
+        )

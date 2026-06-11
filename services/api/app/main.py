@@ -137,7 +137,6 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.bootstrap import (
     init_schema as sales_bootstrap_init_schema,
 )
-from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.sales.client_materials_analyzer import (
     AnalysisOutcome,
     ClientMaterialsAnalyzer,
@@ -212,6 +211,7 @@ from services.api.app.trace_corrections import (
     TraceCorrectionError,
     TraceCorrectionRepository,
 )
+from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.web_auth import WebAuthRepository
 
 app = create_service_app("api")
