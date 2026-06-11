@@ -71,16 +71,12 @@ def test_main_imports_bootstrap_usage_db():
     assert hasattr(api_main, "bootstrap_usage_db")
 
 
-def test_main_calls_bootstrap_on_import(tmp_path, monkeypatch):
-    """The module-level call in main.py creates the usage DB when settings point
-    to a writable path — verified by checking the DB file exists post-import."""
+def test_main_wires_bootstrap_usage_db_call():
+    """main.py contains the module-level call that wires usage DB bootstrap to
+    settings.usage_db_path (AC: 10). Deleting the production call fails this test."""
+    import inspect
 
     from services.api.app import main as api_main
 
-    db_path = str(tmp_path / "startup_usage.db")
-    monkeypatch.setattr(api_main.settings, "usage_db_path", db_path)
-    # Call the bootstrap as main does (already imported; call manually here)
-    bootstrap_usage_db(api_main.settings.usage_db_path)
-
-    import os
-    assert os.path.exists(db_path)
+    source = inspect.getsource(api_main)
+    assert "bootstrap_usage_db(settings.usage_db_path)" in source
