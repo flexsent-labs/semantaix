@@ -44,7 +44,7 @@ class _RaisingOpenRouter:
         self.calls = 0
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         self.calls += 1
         raise self._exc
@@ -122,7 +122,7 @@ class _ScriptedOpenRouter:
         self._payload = payload
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> Any:
         return self._payload
 

@@ -54,7 +54,7 @@ class _FakeServicesRepo:
 
 class _NeverCalledOpenRouter:
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         raise AssertionError(
             "openrouter must not be called on calendar-disabled path"

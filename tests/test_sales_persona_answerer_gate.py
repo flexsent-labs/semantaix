@@ -53,7 +53,7 @@ class _FakeOpenRouter:
         self.next_payload: dict[str, Any] | None = None
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         self.calls.append({"system": system, "user": user, "model": model})
         if self.next_payload is None:

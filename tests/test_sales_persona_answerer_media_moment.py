@@ -124,7 +124,7 @@ class _StubOpenRouter:
         self.queue.append(payload)
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         self.calls.append({"system": system, "user": user})
         return self.queue.pop(0)

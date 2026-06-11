@@ -416,7 +416,7 @@ async def test_material_dispatch_full_flow(stack: dict[str, Any]) -> None:
             self._payloads = payloads
 
         async def complete_json(
-            self, *, system: str, user: str, model: str | None = None
+            self, *, system: str, user: str, model: str | None = None, **_kw: Any
         ) -> dict[str, Any]:
             return self._payloads.pop(0)
 

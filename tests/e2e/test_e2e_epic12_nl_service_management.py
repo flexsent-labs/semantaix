@@ -205,7 +205,9 @@ def wired_stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         },
     }
 
-    async def fake_complete_json(*, system: str, user: str, model: str | None = None) -> dict:
+    async def fake_complete_json(
+        *, system: str, user: str, model: str | None = None, **_kw: Any
+    ) -> dict:
         if user in llm_responses_by_text:
             return llm_responses_by_text[user]
         # Anything unexpected falls through (action: null) so we don't risk

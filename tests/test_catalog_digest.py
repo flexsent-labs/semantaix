@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from services.api.app.catalog_digest import (
@@ -28,7 +30,7 @@ class _FakeSummarizer:
         self.calls: list[tuple[str, str | None]] = []
 
     async def summarize_offerings(
-        self, *, knowledge_text: str, system_prompt: str | None = None
+        self, *, knowledge_text: str, system_prompt: str | None = None, **_kw: Any
     ) -> str:
         self.calls.append((knowledge_text, system_prompt))
         return self._replies.pop(0)

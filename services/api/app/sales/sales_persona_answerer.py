@@ -1083,6 +1083,9 @@ class _OpenRouter(Protocol):
         system: str,
         user: str,
         model: str | None = None,
+        project_id: int | None = None,
+        call_outcome: str = "customer_visible_answer",
+        trace_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -1712,7 +1715,9 @@ class SalesPersonaAnswerer:
 
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user,
+                project_id=ctx.project_id, trace_id=ctx.trace_id,
+                call_outcome="customer_visible_answer",
             )
             extracted, next_question = _validate_payload(payload)
         except LlmSchemaViolation as exc:
@@ -2324,7 +2329,9 @@ class SalesPersonaAnswerer:
         user = f"Сообщение клиента:\n{question}"
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user,
+                project_id=ctx.project_id, trace_id=ctx.trace_id,
+                call_outcome="customer_visible_answer",
             )
             extracted, next_question = _validate_payload(payload)
         except LlmSchemaViolation as exc:
@@ -4325,7 +4332,9 @@ class SalesPersonaAnswerer:
             user = f"Клиент спросил: «что такое {term}?»"
             try:
                 payload = await self._openrouter.complete_json(
-                    system=system, user=user
+                    system=system, user=user,
+                    project_id=ctx.project_id, trace_id=ctx.trace_id,
+                    call_outcome="customer_visible_answer",
                 )
             except Exception as exc:  # defensive — LLM transport failure
                 logger.warning(
@@ -4519,7 +4528,9 @@ class SalesPersonaAnswerer:
         user = f"Сообщение клиента:\n{outcome.snippet}"
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user,
+                project_id=ctx.project_id, trace_id=ctx.trace_id,
+                call_outcome="customer_visible_answer",
             )
         except Exception as exc:  # defensive — LLM transport failure
             logger.warning(
@@ -4805,7 +4816,9 @@ class SalesPersonaAnswerer:
         )
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user
+                system=system, user=user,
+                project_id=ctx.project_id, trace_id=ctx.trace_id,
+                call_outcome="customer_visible_answer",
             )
         except Exception as exc:  # defensive — LLM transport failure
             logger.warning(

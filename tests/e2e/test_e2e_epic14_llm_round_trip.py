@@ -1,12 +1,14 @@
 """Epic 14 / Story 14.02 — LLM usage recording end-to-end smoke test.
 
-Verifies that a grounded RAG answer triggers `usage_recorder.record` with
-tracker_type="llm" and the expected call_outcome="customer_visible_answer",
-using a mock recorder to avoid touching a real DB.
+Verifies that a grounded RAG answer writes a real row to the usage SQLite DB.
+The real UsageRecorder is started by the FastAPI startup hook (inside
+TestClient's event loop) and drained by the shutdown hook when the TestClient
+context exits, so the DB row is committed before we query it.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,13 @@ from services.api.app.main import (
 )
 from services.api.app.main import app as api_app
 from services.api.app.openrouter_client import GroundingVerdict, LlmUsageCapture
+from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.usage.recorder import UsageRecorder
+from services.api.app.usage.repositories import (
+    UsageHitlEventRepository,
+    UsageLlmCallRepository,
+    UsageMessageRepository,
+)
 
 pytestmark = [pytest.mark.e2e, pytest.mark.epic("14"), pytest.mark.story("14-02")]
 
@@ -62,17 +70,24 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
         AsyncMock(return_value=(GroundingVerdict(label="GROUNDED", reason="ok"), _CAP)),
     )
 
-    # Replace the recorder with a mock so we can inspect record() calls.
-    mock_recorder = MagicMock(spec=UsageRecorder)
-    mock_recorder.record = AsyncMock()
-    mock_recorder.start = MagicMock()
-    mock_recorder.aclose = AsyncMock()
-    monkeypatch.setattr(api_main, "usage_recorder", mock_recorder)
-    monkeypatch.setattr(openrouter_client, "_recorder", mock_recorder)
-    # Patch the GroundedRagAnswerer instance inside the pipeline.
+    # Real recorder backed by a temp SQLite DB.  The FastAPI startup hook calls
+    # usage_recorder.start() which binds it to TestClient's event loop; the
+    # shutdown hook calls aclose() which drains the queue before the loop tears
+    # down — so the DB row is committed before we query it after the TestClient
+    # context exits.
+    usage_db = str(tmp_path / "usage.sqlite3")
+    bootstrap_usage_db(usage_db)
+    real_recorder = UsageRecorder(
+        llm_repo=UsageLlmCallRepository(db_path=usage_db),
+        message_repo=MagicMock(spec=UsageMessageRepository),
+        hitl_repo=MagicMock(spec=UsageHitlEventRepository),
+    )
+    # Patch BEFORE entering TestClient so the startup hook picks up real_recorder.
+    monkeypatch.setattr(api_main, "usage_recorder", real_recorder)
+    monkeypatch.setattr(openrouter_client, "_recorder", real_recorder)
     for answerer in api_main.answer_pipeline.answerers:
         if isinstance(answerer, GroundedRagAnswerer):
-            monkeypatch.setattr(answerer, "_recorder", mock_recorder)
+            monkeypatch.setattr(answerer, "_recorder", real_recorder)
             break
 
     rag_repository.ingest(
@@ -83,12 +98,15 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
         key="rag_grounding_score_threshold", value="0.2", updated_by="@admin"
     )
 
-    yield {"recorder": mock_recorder}
+    yield {"usage_db": usage_db}
 
 
 @pytest.mark.asyncio
-async def test_grounded_answer_records_llm_usage(env):
-    recorder = env["recorder"]
+async def test_grounded_answer_persists_llm_usage_row(env):
+    usage_db = env["usage_db"]
+
+    # The TestClient context triggers startup (start()) and shutdown (aclose()),
+    # so by the time we exit the `with` block, all queued records are in SQLite.
     with TestClient(api_app) as client:
         resp = client.post(
             "/conversations/inbound",
@@ -98,13 +116,13 @@ async def test_grounded_answer_records_llm_usage(env):
                 "trace_id": "t-e2e-14-02",
             },
         )
+
     assert resp.status_code == 200
     assert resp.json()["response_mode"] == "grounded_rag"
-    # At least one record() call must have tracker_type="llm"
-    llm_calls = [
-        c for c in recorder.record.call_args_list
-        if c.kwargs.get("tracker_type") == "llm"
-    ]
-    assert len(llm_calls) >= 1
-    outcomes = [c.kwargs["payload"]["call_outcome"] for c in llm_calls]
+
+    rows = sqlite3.connect(usage_db).execute(
+        "SELECT call_outcome, trace_id, model_name FROM usage_llm_calls"
+    ).fetchall()
+    assert len(rows) >= 1
+    outcomes = {r[0] for r in rows}
     assert "customer_visible_answer" in outcomes

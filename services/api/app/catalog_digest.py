@@ -60,6 +60,8 @@ class _OfferingsSummarizer(Protocol):
         *,
         knowledge_text: str,
         system_prompt: str | None = None,
+        project_id: int | None = None,
+        trace_id: str | None = None,
     ) -> str: ...
 
 
@@ -216,7 +218,8 @@ class CatalogDigestService:
         partials: list[str] = []
         for batch in batches:
             reply = await self._llm.summarize_offerings(
-                knowledge_text=batch, system_prompt=system_prompt
+                knowledge_text=batch, system_prompt=system_prompt,
+                project_id=project_id, trace_id=None,
             )
             cleaned = _clean(reply)
             if cleaned:
@@ -227,6 +230,7 @@ class CatalogDigestService:
             return partials[0]
         # Reduce: merge and dedupe the per-batch offering lists into one.
         reduced = await self._llm.summarize_offerings(
-            knowledge_text="\n".join(partials), system_prompt=system_prompt
+            knowledge_text="\n".join(partials), system_prompt=system_prompt,
+            project_id=project_id, trace_id=None,
         )
         return _clean(reduced)

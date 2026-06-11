@@ -49,7 +49,7 @@ class _FakeServicesRepo:
 
 class _NeverCalledOpenRouter:
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None
+        self, *, system: str, user: str, model: str | None = None, **_kw: Any
     ) -> Any:
         raise AssertionError("LLM must not be called when RAG is unavailable")
 

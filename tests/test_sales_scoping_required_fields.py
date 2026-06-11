@@ -160,7 +160,7 @@ class _QueueOpenRouter:
     def __init__(self, *responses: dict[str, Any]) -> None:
         self._responses = list(responses)
 
-    async def complete_json(self, *, system, user, model=None) -> dict[str, Any]:
+    async def complete_json(self, *, system, user, model=None, **_kw: Any) -> dict[str, Any]:
         return self._responses.pop(0)
 
 

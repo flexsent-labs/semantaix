@@ -124,7 +124,7 @@ class _QueueOpenRouter:
         self._responses = list(responses)
         self.calls = 0
 
-    async def complete_json(self, *, system, user, model=None) -> dict[str, Any]:
+    async def complete_json(self, *, system, user, model=None, **_kw: Any) -> dict[str, Any]:
         self.calls += 1
         return self._responses.pop(0)
 
