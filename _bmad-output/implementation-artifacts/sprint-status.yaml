@@ -118,7 +118,7 @@ development_status:
   12-12-configurable-required-scoping-fields: done
   12-13-deferred-interim-ack: done
   12-19-recognize-slot-confirmation-and-stop-pitching-reask-loop: done
-  12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: ready-for-dev
+  12-20-broaden-russian-date-time-parsing-ordinals-and-bare-hours: review
   12-21-proposing-counter-offer-before-acceptance: done
   12-22-defer-hitl-until-alternative-accepted: done
   12-23-reset-stale-closing-on-new-booking: done
