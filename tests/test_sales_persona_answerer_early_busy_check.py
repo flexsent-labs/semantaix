@@ -2534,7 +2534,7 @@ async def test_pitching_time_change_after_free_handoff_rechecks() -> None:
     text = result.text or ""
     assert SLOT_BUSY_LINE in text  # re-checked 9 June 12:00 → занято
     assert "Ближайшее свободное время" in text  # offered an alternative
-    assert freebusy.calls >= 1  # the calendar was actually re-queried
+    assert freebusy.calls == 1  # the calendar was actually re-queried
 
 
 @pytest.mark.asyncio
@@ -3077,7 +3077,7 @@ async def test_human_request_distinct_escalation_copy() -> None:
 def test_human_request_localized_en() -> None:
     answerer, _s, _, _ = _build(state=None, cal_settings=_FakeCalSettings())
     ctx = replace(_ctx(), language="en")
-    result = answerer._handle_human_request(ctx=ctx)
+    result = answerer._handle_human_request(ctx=ctx, question="I want to talk to a person")
     assert result.text == HUMAN_REQUEST_LINE_EN
 
 
@@ -3173,7 +3173,7 @@ async def test_relative_offset_через_два_часа_not_date_ask() -> None
     assert result.text != ASK_FOR_TIME_LINE, (
         "«через два часа» resolves to a full instant; must NOT ask for time"
     )
-    assert freebusy.calls >= 1, "calendar must have been queried for the verdict"
+    assert freebusy.calls == 1, "calendar must have been queried exactly once for the verdict"
 
 
 # --- Story 12.100 (round-28 D3): vague named period proposes slot, not ask ---
@@ -3208,7 +3208,7 @@ async def test_pitching_vague_window_named_period_proposes_slot() -> None:
     assert text.startswith("Да, есть свободное время"), (
         "bot must propose a concrete afternoon slot"
     )
-    assert freebusy.calls >= 1, "calendar must be queried for the vague window"
+    assert freebusy.calls == 1, "calendar must be queried exactly once for the vague window"
 
 
 @pytest.mark.asyncio

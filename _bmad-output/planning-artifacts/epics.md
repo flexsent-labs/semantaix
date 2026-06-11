@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted: [1, 2, 3, 4, 15-1, 15-2, 15-3, 15-4]
 inputDocuments:
   - _bmad-output/planning-artifacts/PRD.md
   - _bmad-output/planning-artifacts/architecture.md
@@ -228,6 +228,7 @@ Feature-sequential — only one feature epic in implementation at a time, per `e
 | 12 | Sales Conversation Persona | In progress (planning merged via PR [#82](https://github.com/flexsent-labs/semantaix/pull/82) + cap PR [#83](https://github.com/flexsent-labs/semantaix/pull/83); stories backlog) | [epic-12-sales-conversation-persona.md](epics/epic-12-sales-conversation-persona.md) |
 | 13 | Unified Project Services Catalog | Shipped (PR [#80](https://github.com/flexsent-labs/semantaix/pull/80)) | [epic-13-unified-project-services-catalog.md](epics/epic-13-unified-project-services-catalog.md) |
 | **14** | **Usage / Token / Cost Monitoring + Cost-Spike Alerting** | **Planning (Step 2 of `bmad-create-epics-and-stories` complete; Step 3 next)** | [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md) |
+| **15** | **Telegram User Account Gateway (`user_gateway`)** | **Planning (requirements confirmed)** | [epic-15-telegram-user-gateway.md](epics/epic-15-telegram-user-gateway.md) |
 
 Detailed Epic 14 design — goal, in-scope, out-of-scope, dependencies, exit criteria, and the 10-story split — is authored in [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md). This index file remains canonical for the Requirements Inventory (FR-1 — FR-36 / NFR-1 — NFR-11) and Epic List.
 
@@ -487,3 +488,91 @@ So that I can ship it to production with confidence.
 **Then** `ruff check .` passes, `pytest --cov` shows 100% line coverage on Epic 14 modules, `pytest -m e2e` is green, and the golden-traffic smoke test exercises all three trackers + dashboard + `/usage` + incident lifecycle.
 
 Full ACs: [story-14-10-epic-14-signoff.md](epics/stories/epic-14/story-14-10-epic-14-signoff.md).
+
+---
+
+## Epic 15: Telegram User Account Gateway (`user_gateway`)
+
+### Epic 15 — Requirements Inventory
+
+#### Functional Requirements
+
+FR-15-01: A new `user_gateway` FastAPI service on port 8005 connects to Telegram via MTProto using Telethon, listening only to private DMs (`e.is_private == True`).
+FR-15-02: `POST /auth/qr_start` — calls `client.qr_login()`, renders QR PNG via `qrcode[pil]`, returns base64 image + 30s expiry, starts background scan-wait task.
+FR-15-03: `GET /auth/status` — returns `{"authenticated": bool}` for `bot_gateway` to poll.
+FR-15-04: `POST /auth/verify_2fa` — accepts `{"password": "..."}` for accounts with 2FA; password never logged or persisted.
+FR-15-05: On QR timeout: call `qr_login.recreate()`, `bot_gateway` sends fresh QR to operator ("Expired — here's a new one").
+FR-15-06: On successful auth: session saved to `.data/user_gateway.session` on shared `app_data` volume.
+FR-15-07: `bot_gateway` `/user_login` command orchestrates the full auth flow: calls `/auth/qr_start`, sends QR photo to operator, polls `/auth/status`, handles timeout resend, prompts for and relays 2FA password if needed.
+FR-15-08: Telethon `NewMessage` handler forwards customer messages to `api` `POST /conversations/inbound` via existing `ApiClient` + `internal_service_token` auth.
+FR-15-09: Message router filters operator account messages to prevent double-routing with `bot_gateway`.
+FR-15-10: `asyncio.Queue(maxsize=100)` decouples MTProto event receipt from HTTP forwarding to `api`.
+FR-15-11: Reconnect watchdog: `while True` around `client.run_until_disconnected()` with exponential backoff (1s → 2s → … → 60s max).
+FR-15-12: Added to `docker-compose.yml`: `app_data` volume, health check port 8005, `restart: unless-stopped`, `depends_on: api: service_healthy`.
+FR-15-13: `/health/live` via `create_service_app("user_gateway", lifespan=lifespan)`.
+FR-15-14: Filter (silent drop) messages where `sender.scam == True` or `sender.fake == True`.
+FR-15-15: Filter (silent drop) messages from `sender.bot == True`.
+FR-15-16: Filter (silent drop) forwarded messages with anonymous origin (`message.fwd_from` set with `fwd_from.from_name`).
+FR-15-17: Per-sender rate limiting via `InboundRateLimitRepository` (reused from `bot_gateway`); rate-exceeded messages silently dropped (no reply). Shared `inbound_rate_limit_db_path` so rate limit spans both channels.
+FR-15-18: Filter (silent drop) messages with >3 URLs.
+FR-15-19: Apply `settings.inbound_max_message_chars` truncation (reuse existing setting, default 1000) before forwarding.
+FR-15-20: Filter (silent drop) messages containing configurable spam keywords; keyword list stored in a flat text file mirroring `data/russian_hedges.txt` pattern.
+
+#### Non-Functional Requirements
+
+NFR-15-01: 100% test coverage on all `services/user_gateway` code (existing `.coveragerc` enforces this automatically).
+NFR-15-02: `client.flood_sleep_threshold = 60` set on Telethon client.
+NFR-15-03: 2FA password never persisted to any store; never logged.
+NFR-15-04: Session file path never logged; follow `_redact_token` pattern from `bot_gateway`.
+NFR-15-05: Receive-only — `user_gateway` never sends any automated reply; all spam/rate-limit drops are silent.
+NFR-15-06: One new `.env` key only: `TG_USER_SESSION_PATH=.data/user_gateway.session` (`TELEGRAM_API_ID` and `TELEGRAM_API_HASH` already present).
+NFR-15-07: All new code: `from __future__ import annotations`, keyword-only public methods, `Protocol` interfaces, constructor-injected deps.
+NFR-15-08: Spam filter drop decisions logged at DEBUG with sender ID and reason; message content never logged.
+NFR-15-09: Silent drop on rate limit — no reply sent (diverges from `bot_gateway` which sends the Russian reply; `user_gateway` must not reveal automated nature).
+
+#### Additional Requirements (Architecture)
+
+- New dependencies: `telethon`, `qrcode[pil]` in `services/user_gateway/` requirements
+- Test toolkit: `MemorySession` for Telethon client in tests, `respx` for HTTP mocking, `SimpleNamespace` fake event factory
+- Story 15.05 (dedup) conditional — only if `user_gateway` and `bot_gateway` are both members of shared groups
+- Source: `_bmad-output/planning-artifacts/research/technical-telegram-user-account-client-research-2026-06-09.md`
+
+### Story 15.01: Service Skeleton + Docker Integration
+
+**As a** platform engineer, **I want** a deployable `user_gateway` FastAPI service on port 8005 with health endpoints and proper Docker configuration, **so that** the service infrastructure is in place before any Telegram client logic is added.
+
+Creates `services/user_gateway/` with `Dockerfile`, `requirements.txt` (`telethon>=1.36`, `qrcode[pil]>=7.4`, `httpx`), and `app/main.py` using `create_service_app("user_gateway", lifespan=lifespan)`. Adds `user_gateway` block to `docker-compose.yml` (port 8005, `app_data` volume, health check, `restart: unless-stopped`, `depends_on: api`). Adds `user_gateway_db_path` and `tg_user_session_path` to `platform_common/settings.py`. Updates `CLAUDE.md` architecture table. No Telethon client logic in this story.
+
+Full ACs: [story-15-01-service-skeleton-docker.md](epics/stories/epic-15/story-15-01-service-skeleton-docker.md).
+
+### Story 15.02: QR Authentication Flow
+
+**As the** platform operator, **I want** to authenticate the Telegram user account by typing `/user_login` in the bot and scanning the QR sent back to me, **so that** `user_gateway` holds a valid persistent Telegram session before routing begins.
+
+Implements `POST /auth/qr_start` (QR PNG base64, 30s expiry, background scan-wait task), `GET /auth/status` (phase + authenticated bool), `POST /auth/verify_2fa` (password accepted, never logged, 409 on stale/missing state). Includes `AuthSessionRepository` (SQLite singleton row: `idle|qr_pending|2fa_pending|authenticated`) + `_AuthState` in-memory dataclass for non-serializable Telethon objects. Startup lifespan hook clears stale phases and logs warning. On service restart mid-2FA, phase clears to `idle` and operator is prompted to `/user_login` again (graceful recovery, not resumption). Adds `bot_gateway` `/user_login` command orchestrating the full flow (QR as document, status polling, 2FA relay). QR sent as document to prevent Telegram compression.
+
+Full ACs: [story-15-02-qr-auth-flow.md](epics/stories/epic-15/story-15-02-qr-auth-flow.md).
+
+### Story 15.03: Message Routing + Resilience
+
+**As the** platform operator, **I want** customer DMs on the user account forwarded to the api pipeline with queue buffering and automatic reconnection, **so that** conversations received via user account DMs reach the answer pipeline reliably.
+
+Implements `MessageRouter` with `NewMessage` handler (private DMs only, operator filter), `asyncio.Queue(maxsize=100)` decoupling MTProto receipt from HTTP forwarding, queue-drain worker coroutine, `ApiClientUserGateway` (thin httpx client to `api /conversations/inbound`), and reconnect watchdog (`while True` + exponential backoff 1s→60s). Queue overflow silently drops with WARNING log. Spam filter hook stubbed (filled in 15.04). All tests use `MemorySession` Telethon mock + `respx` for api HTTP.
+
+Full ACs: [story-15-03-message-routing.md](epics/stories/epic-15/story-15-03-message-routing.md).
+
+### Story 15.04: Spam Filters
+
+**As the** platform operator, **I want** all spam patterns silently dropped before the api pipeline, **so that** the user account ignores scam/fake/bot accounts, floods, forwarded spam, and keyword-matched messages without revealing its automated nature.
+
+Implements `SpamFilter` with ordered silent-drop filters: `sender.scam/fake`, `sender.bot`, anonymous-origin forwards (`fwd_from.from_name` set), rate limit via `InboundRateLimitRepository` (moved to `platform_common/` in this story, shared DB with `bot_gateway`), >3 URL count, configurable keyword list (`services/user_gateway/data/spam_keywords.txt`). Wires stub from 15.03. Adds length truncation to `inbound_max_message_chars` before forwarding. All drops logged at DEBUG with `sender_id` + `reason_code`; message content never logged. No automated reply ever sent (NFR-15-05/09).
+
+Full ACs: [story-15-04-spam-filters.md](epics/stories/epic-15/story-15-04-spam-filters.md).
+
+### Story 15.05: Cross-Channel Dedup (Conditional)
+
+**Conditional**: implement only if `user_gateway` and `bot_gateway` are confirmed members of the same Telegram groups/channels, enabling double-routing of a single message to both bot and user account.
+
+Since all routing is restricted to private DMs (`e.is_private == True`), a customer cannot simultaneously DM both the bot account and the user account with the same message. This story is deferred until there is confirmed production evidence of double-routing from group membership. Covers: `WebhookUpdateClaimRepository`-style dedup keyed by Telegram `message_id`, shared across both services via the existing `inbound_rate_limit_db_path` store or a new dedicated dedup DB.
+
+Full ACs: deferred — no story file created yet.

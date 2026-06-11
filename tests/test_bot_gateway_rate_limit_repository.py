@@ -71,6 +71,24 @@ def test_window_expiry_resets_count(tmp_path):
     )
 
 
+def test_window_expiry_at_exact_boundary_resets_count(tmp_path):
+    """A message arriving exactly at the window edge starts a new window (>= not >)."""
+    repo = InboundRateLimitRepository(db_path=str(tmp_path / "rl.sqlite3"))
+    old_now = _now()
+    for _ in range(10):
+        repo.check_and_record(
+            chat_id=100, now=old_now, max_messages=10, window_seconds=300
+        )
+    # Advance to exactly the window boundary (elapsed == window_seconds)
+    boundary_now = old_now + timedelta(seconds=300)
+    assert (
+        repo.check_and_record(
+            chat_id=100, now=boundary_now, max_messages=10, window_seconds=300
+        )
+        is True
+    )
+
+
 def test_chat_ids_isolated(tmp_path):
     repo = InboundRateLimitRepository(db_path=str(tmp_path / "rl.sqlite3"))
     now = _now()

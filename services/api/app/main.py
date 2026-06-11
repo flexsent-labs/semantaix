@@ -2111,10 +2111,9 @@ async def _escalate_calendar_availability(
             "coalesced": True,
         }
 
+    _project_id = await asyncio.to_thread(_resolve_inbound_project_id, request.chat_id)
     ack_message = await asyncio.to_thread(
-        lambda: _effective_inbound_ack_message(
-            project_id=_resolve_inbound_project_id(request.chat_id)
-        )
+        _effective_inbound_ack_message, project_id=_project_id
     )
     if request.chat_id is not None:
         await _safe_send_message(
@@ -2442,7 +2441,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         pipeline_result = await asyncio.wait_for(
             pipeline_task, timeout=pipeline_budget
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         timed_out = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
         error_reason = "pipeline_timeout" if timed_out else (str(exc) or repr(exc))
