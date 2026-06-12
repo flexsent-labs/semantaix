@@ -37,7 +37,14 @@ class _CapturingOpenRouter:
         self.calls: list[dict[str, Any]] = []
 
     async def complete_json(
-        self, *, system: str, user: str, model: str | None = None, project_id: int | None = None
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str | None = None,
+        project_id: int | None = None,
+        call_outcome: str = "customer_visible_answer",
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append({"system": system, "user": user, "model": model})
         return self._response
