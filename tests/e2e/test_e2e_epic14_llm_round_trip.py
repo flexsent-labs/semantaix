@@ -1,9 +1,11 @@
-"""Epic 14 / Story 14.02 — LLM usage recording end-to-end smoke test.
+"""Epic 14 — LLM usage + message volume recording end-to-end smoke tests.
 
-Verifies that a grounded RAG answer writes a real row to the usage SQLite DB.
+Story 14.02: grounded RAG answer writes a usage_llm_calls row.
+Story 14.03: grounded RAG answer also writes a usage_messages row (direction=out).
+
 The real UsageRecorder is started by the FastAPI startup hook (inside
 TestClient's event loop) and drained by the shutdown hook when the TestClient
-context exits, so the DB row is committed before we query it.
+context exits, so all DB rows are committed before we query them.
 """
 
 from __future__ import annotations
@@ -36,7 +38,12 @@ from services.api.app.usage.repositories import (
     UsageMessageRepository,
 )
 
-pytestmark = [pytest.mark.e2e, pytest.mark.epic("14"), pytest.mark.story("14-02")]
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.epic("14"),
+    pytest.mark.story("14-02"),
+    pytest.mark.story("14-03"),
+]
 
 _CHAT_ID = 14_200
 _GROUNDED_REPLY = "Доставка занимает 2 рабочих дня по всей России."
@@ -73,13 +80,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     # Real recorder backed by a temp SQLite DB.  The FastAPI startup hook calls
     # usage_recorder.start() which binds it to TestClient's event loop; the
     # shutdown hook calls aclose() which drains the queue before the loop tears
-    # down — so the DB row is committed before we query it after the TestClient
-    # context exits.
+    # down — so all DB rows are committed before we query them.
     usage_db = str(tmp_path / "usage.sqlite3")
     bootstrap_usage_db(usage_db)
     real_recorder = UsageRecorder(
         llm_repo=UsageLlmCallRepository(db_path=usage_db),
-        message_repo=MagicMock(spec=UsageMessageRepository),
+        message_repo=UsageMessageRepository(db_path=usage_db),
         hitl_repo=MagicMock(spec=UsageHitlEventRepository),
     )
     # Patch BEFORE entering TestClient so the startup hook picks up real_recorder.
@@ -89,6 +95,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
         if isinstance(answerer, GroundedRagAnswerer):
             monkeypatch.setattr(answerer, "_recorder", real_recorder)
             break
+
+    # Ensure project_id resolves to a non-None value so the outbound
+    # usage_messages row is recorded (skipped when project_id is None).
+    monkeypatch.setattr(
+        api_main, "_resolve_inbound_project_id", lambda chat_id: 14
+    )
 
     rag_repository.ingest(
         source_id="delivery-faq",
@@ -120,9 +132,18 @@ async def test_grounded_answer_persists_llm_usage_row(env):
     assert resp.status_code == 200
     assert resp.json()["response_mode"] == "grounded_rag"
 
-    rows = sqlite3.connect(usage_db).execute(
+    conn = sqlite3.connect(usage_db)
+
+    llm_rows = conn.execute(
         "SELECT call_outcome, trace_id, model_name FROM usage_llm_calls"
     ).fetchall()
-    assert len(rows) >= 1
-    outcomes = {r[0] for r in rows}
-    assert "customer_visible_answer" in outcomes
+    assert len(llm_rows) >= 1
+    assert "customer_visible_answer" in {r[0] for r in llm_rows}
+
+    msg_rows = conn.execute(
+        "SELECT direction, participant_role FROM usage_messages"
+    ).fetchall()
+    assert len(msg_rows) >= 1, "Expected at least one usage_messages row"
+    assert ("out", "customer") in set(msg_rows), (
+        f"Expected outbound customer row; got {msg_rows}"
+    )

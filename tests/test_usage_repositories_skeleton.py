@@ -146,12 +146,20 @@ def test_llm_call_repo_list_for_day_not_implemented(tmp_path):
         repo.list_for_day(project_id=1, day_utc="2026-06-11")
 
 
-def test_message_repo_record_not_implemented(tmp_path):
+def test_message_repo_record_is_implemented(tmp_path):
+    """record() is implemented in Story 14.03 — no longer raises NotImplementedError."""
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageMessageRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.record(None)  # type: ignore[arg-type]
+    row = UsageMessageRow(
+        id=0,
+        project_id=1,
+        direction="in",
+        participant_role="customer",
+        trace_id=None,
+        created_at="2026-06-12T00:00:00Z",
+    )
+    repo.record(row)  # must not raise
 
 
 def test_message_repo_count_for_day_not_implemented(tmp_path):
