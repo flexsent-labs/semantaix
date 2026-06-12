@@ -1962,6 +1962,31 @@ def _enqueue_outbound_customer_message(
     asyncio.create_task(_record())
 
 
+def _enqueue_hitl_event(
+    *, project_id: int | None, event_type: str, ticket_id: int, trace_id: str | None
+) -> None:
+    """Fire-and-forget: enqueue one usage_hitl_events row for a ticket lifecycle transition."""
+    if project_id is None:
+        return
+
+    async def _record() -> None:
+        try:
+            await usage_recorder.record(
+                tracker_type="hitl",
+                project_id=project_id,
+                payload={
+                    "event_type": event_type,
+                    "ticket_id": ticket_id,
+                    "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                trace_id=trace_id,
+            )
+        except Exception:
+            pass
+
+    asyncio.create_task(_record())
+
+
 async def _notify_hitl_operator_summary(*, ticket_id: int, summary: str) -> bool:
     """Short-form operator DM, used for status changes like route/assign."""
     chat_id_raw = _effective_hitl_operator_chat_id()
@@ -2098,6 +2123,7 @@ async def _escalate_calendar_availability(
     trace_id: str,
     latency_ms: int,
     metadata: dict[str, object],
+    project_id: int | None = None,
 ) -> dict[str, object]:
     """HITL escalation for a calendar availability question, routed to the
     project's calendar operator with context."""
@@ -2179,10 +2205,16 @@ async def _escalate_calendar_availability(
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
     )
+    _enqueue_hitl_event(
+        project_id=project_id, event_type="created", ticket_id=ticket.id, trace_id=trace_id
+    )
     await asyncio.to_thread(
         hitl_ticket_repository.assign,
         ticket_id=ticket.id,
         operator_username=operator_username,
+    )
+    _enqueue_hitl_event(
+        project_id=project_id, event_type="assigned", ticket_id=ticket.id, trace_id=trace_id
     )
     logger.info(
         "calendar_availability_escalation",
@@ -2315,11 +2347,17 @@ async def _dispatch_sales_escalation(
         reason=hitl_reason,
         target_chat_id=request.chat_id,
     )
+    _enqueue_hitl_event(
+        project_id=project_id, event_type="created", ticket_id=ticket.id, trace_id=trace_id
+    )
     assignee = await asyncio.to_thread(_pick_assignee_for_chat, request.chat_id)
     await asyncio.to_thread(
         hitl_ticket_repository.assign,
         ticket_id=ticket.id,
         operator_username=assignee,
+    )
+    _enqueue_hitl_event(
+        project_id=project_id, event_type="assigned", ticket_id=ticket.id, trace_id=trace_id
     )
     logger.info(
         "sales_escalation_ticket_created",
@@ -2524,11 +2562,23 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             reason="pipeline_error",
             target_chat_id=request.chat_id,
         )
+        _enqueue_hitl_event(
+            project_id=ctx.project_id if ctx is not None else _default_project_id(),
+            event_type="created",
+            ticket_id=ticket.id,
+            trace_id=trace_id,
+        )
         assignee = await asyncio.to_thread(_pick_assignee_for_chat, request.chat_id)
         await asyncio.to_thread(
             hitl_ticket_repository.assign,
             ticket_id=ticket.id,
             operator_username=assignee,
+        )
+        _enqueue_hitl_event(
+            project_id=ctx.project_id if ctx is not None else _default_project_id(),
+            event_type="assigned",
+            ticket_id=ticket.id,
+            trace_id=trace_id,
         )
         await _notify_hitl_operator_with_question(
             ticket_id=ticket.id,
@@ -2570,6 +2620,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             trace_id=trace_id,
             latency_ms=latency_ms,
             metadata=pipeline_result.metadata,
+            project_id=ctx.project_id,
         )
 
     if (
@@ -2711,11 +2762,17 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
     )
+    _enqueue_hitl_event(
+        project_id=ctx.project_id, event_type="created", ticket_id=ticket.id, trace_id=trace_id
+    )
     assignee = await asyncio.to_thread(_pick_assignee_for_chat, request.chat_id)
     await asyncio.to_thread(
         hitl_ticket_repository.assign,
         ticket_id=ticket.id,
         operator_username=assignee,
+    )
+    _enqueue_hitl_event(
+        project_id=ctx.project_id, event_type="assigned", ticket_id=ticket.id, trace_id=trace_id
     )
     logger.info(
         "hitl_ticket_created",
@@ -3488,6 +3545,12 @@ async def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[s
         raise HTTPException(status_code=503, detail="hitl_operator_missing")
 
     ticket = hitl_ticket_repository.assign(ticket_id=ticket_id, operator_username=operator)
+    _enqueue_hitl_event(
+        project_id=_default_project_id(),
+        event_type="assigned",
+        ticket_id=ticket.id,
+        trace_id=None,
+    )
     await _notify_hitl_operator_summary(
         ticket_id=ticket.id, summary=f"assigned to {operator}"
     )
@@ -3499,8 +3562,14 @@ async def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[s
 
 
 @app.post("/hitl/tickets/{ticket_id}/resolve")
-def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
+async def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
     ticket = hitl_ticket_repository.resolve(ticket_id=ticket_id)
+    _enqueue_hitl_event(
+        project_id=_default_project_id(),
+        event_type="resolved",
+        ticket_id=ticket.id,
+        trace_id=None,
+    )
     return {
         "id": ticket.id,
         "status": ticket.status,
@@ -3756,7 +3825,19 @@ async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -
         )
         raise HTTPException(status_code=502, detail="hitl_delivery_failed") from exc
 
+    _enqueue_hitl_event(
+        project_id=_default_project_id(),
+        event_type="replied",
+        ticket_id=ticket_id,
+        trace_id=None,
+    )
     resolved = hitl_ticket_repository.resolve(ticket_id=ticket_id)
+    _enqueue_hitl_event(
+        project_id=_default_project_id(),
+        event_type="resolved",
+        ticket_id=ticket_id,
+        trace_id=None,
+    )
     return {
         "ticket_id": ticket_id,
         "delivered": True,

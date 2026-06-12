@@ -208,7 +208,7 @@ development_status:
   14-01-usage-db-schema-and-migration: done
   14-02-llm-instrumentation-and-recorder: done
   14-03-message-volume-instrumentation: done
-  14-04-hitl-event-instrumentation: backlog
+  14-04-hitl-event-instrumentation: done
   14-05-daily-rollup-and-retention: backlog
   14-06-web-ui-usage-dashboard: backlog
   14-07-usage-api-and-money-rbac: backlog

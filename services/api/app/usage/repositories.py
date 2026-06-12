@@ -21,6 +21,10 @@ CALL_OUTCOMES: frozenset[str] = frozenset({
     "error",
 })
 
+HITL_EVENT_TYPES: frozenset[str] = frozenset({
+    "created", "assigned", "replied", "resolved"
+})
+
 DIRECTIONS: frozenset[str] = frozenset({"in", "out"})
 PARTICIPANT_ROLES: frozenset[str] = frozenset({"customer", "operator"})
 
@@ -150,8 +154,18 @@ class UsageHitlEventRepository:
         self._db_path = db_path
 
     def record(self, row: UsageHitlEventRow) -> None:
-        """Implemented in Story 14.04."""
-        raise NotImplementedError
+        if row.event_type not in HITL_EVENT_TYPES:
+            raise ValueError(f"Invalid event_type: {row.event_type!r}")
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT INTO usage_hitl_events"
+                " (project_id, event_type, ticket_id, trace_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    row.project_id, row.event_type, row.ticket_id,
+                    row.trace_id, row.created_at,
+                ),
+            )
 
     def count_for_day(self, *, project_id: int, day_utc: str) -> int:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""
