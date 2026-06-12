@@ -31,8 +31,13 @@ class _CapturingOpenRouter:
         user: str,
         model: str | None = None,
         project_id: int | None = None,
+        call_outcome: str = "customer_visible_answer",
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append({"system": system, "user": user, "model": model, "project_id": project_id})  # noqa: E501
+        self.calls.append(
+            {"system": system, "user": user, "model": model, "project_id": project_id,
+             "call_outcome": call_outcome}
+        )
         return self._response
 
 
@@ -87,6 +92,7 @@ async def test_complete_json_receives_project_id():
     await analyzer.analyze_and_register(operator_file_short_id="ABCDEFGH", project_id=42, now=_NOW)
     assert len(openrouter.calls) == 1
     assert openrouter.calls[0]["project_id"] == 42
+    assert openrouter.calls[0]["call_outcome"] == "moderation_triggered"
 
 
 @pytest.mark.asyncio

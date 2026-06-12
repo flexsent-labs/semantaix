@@ -2494,7 +2494,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         pipeline_result = await asyncio.wait_for(
             pipeline_task, timeout=pipeline_budget
         )
-    except (Exception, asyncio.CancelledError) as exc:
+    except Exception as exc:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         timed_out = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
         error_reason = "pipeline_timeout" if timed_out else (str(exc) or repr(exc))

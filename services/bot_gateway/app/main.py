@@ -2793,6 +2793,8 @@ async def _process_telegram_update(
         response.update(operator_result)
         return response
 
+    asyncio.create_task(_enqueue_inbound_customer_message(trace_id=trace_id))
+
     if is_stale(
         message_date=normalized.date,
         now=datetime.now(UTC),
@@ -2863,7 +2865,6 @@ async def _process_telegram_update(
     # gap would strand the message. We record it in the pending-forward outbox
     # first and clear it only once the forward is confirmed; the startup sweep
     # replays anything still pending.
-    asyncio.create_task(_enqueue_inbound_customer_message(trace_id=trace_id))
     pending_forward_outbox.mark_pending(
         chat_id=normalized.chat_id,
         update_id=normalized.update_id,

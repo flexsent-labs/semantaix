@@ -404,6 +404,23 @@ class OpenRouterClient:
                 f"non-JSON response: {raw[:200]}"
             ) from exc
         if not isinstance(decoded, dict):
+            if self._recorder is not None and project_id is not None:
+                asyncio.create_task(
+                    self._recorder.record(
+                        tracker_type="llm",
+                        project_id=project_id,
+                        payload={
+                            "model_name": capture.model_name,
+                            "prompt_tokens": capture.prompt_tokens,
+                            "completion_tokens": capture.completion_tokens,
+                            "cost_usd": capture.cost_usd,
+                            "call_outcome": "error",
+                            "trace_id": trace_id,
+                            "created_at": capture.created_at,
+                        },
+                        trace_id=trace_id,
+                    )
+                )
             raise OpenRouterJsonSchemaViolation(
                 f"JSON response is not an object: {type(decoded).__name__}"
             )

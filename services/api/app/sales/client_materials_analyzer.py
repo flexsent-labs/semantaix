@@ -58,6 +58,8 @@ class _OpenRouterClient(Protocol):
         user: str,
         model: str | None = None,
         project_id: int | None = None,
+        call_outcome: str = "customer_visible_answer",
+        trace_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -180,7 +182,8 @@ class ClientMaterialsAnalyzer:
 
         try:
             payload = await self._openrouter.complete_json(
-                system=system, user=user, project_id=project_id
+                system=system, user=user, project_id=project_id,
+                call_outcome="moderation_triggered",
             )
         except OpenRouterJsonSchemaViolation:
             logger.warning(
