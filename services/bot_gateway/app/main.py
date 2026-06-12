@@ -21,6 +21,13 @@ from services.api.app.sales.scoping_schema_repository import (
 )
 from services.api.app.sales.services_repository import ServicesRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
+from services.api.app.usage.migrations import bootstrap_usage_db
+from services.api.app.usage.recorder import UsageRecorder
+from services.api.app.usage.repositories import (
+    UsageHitlEventRepository,
+    UsageLlmCallRepository,
+    UsageMessageRepository,
+)
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
 from services.bot_gateway.app.admin_nl_dialog import handle_admin_nl_dialog
 from services.bot_gateway.app.api_client import ApiClient, ApiError
@@ -112,6 +119,17 @@ telegram_file_sender = TelegramFileSender(
 # AsyncClient with a 30s timeout, so a long-running LLM call cannot block
 # concurrent webhook handlers.
 operator_service_nl_openrouter = OpenRouterClient()
+# Story 14.03 — message-volume instrumentation. Shares the same SQLite file as
+# the api service (WAL mode; concurrent readers are safe). Only ``tracker_type
+# ='messages'`` is fired here; llm/hitl repos are wired for completeness so the
+# recorder can be reused if those trackers are added later.
+bootstrap_usage_db(settings.usage_db_path)
+usage_recorder = UsageRecorder(
+    llm_repo=UsageLlmCallRepository(db_path=settings.usage_db_path),
+    message_repo=UsageMessageRepository(db_path=settings.usage_db_path),
+    hitl_repo=UsageHitlEventRepository(db_path=settings.usage_db_path),
+    queue_maxsize=settings.usage_queue_maxsize,
+)
 
 _BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
@@ -1996,6 +2014,7 @@ async def _handle_operator_reply(normalized: NormalizedTelegramMessage) -> dict[
             "status": "ignored",
             "reason": "operator_reply_unmatched",
         }
+    asyncio.create_task(_enqueue_inbound_operator_message())
     try:
         await api_client.deliver_operator_reply(
             ticket_id=ticket_id,
@@ -2044,6 +2063,49 @@ async def _forward_inbound_safe(
             extra={"trace_id": trace_id, "error": str(exc)},
         )
         return False
+
+
+async def _enqueue_inbound_customer_message(*, trace_id: str) -> None:
+    """Fire-and-forget: record one usage_messages row for an inbound customer message."""
+    try:
+        project_id = _project_repository.ensure_default_project().id
+    except Exception:
+        return
+    try:
+        await usage_recorder.record(
+            tracker_type="messages",
+            project_id=project_id,
+            payload={
+                "direction": "in",
+                "participant_role": "customer",
+                "trace_id": trace_id,
+                "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            trace_id=trace_id,
+        )
+    except Exception:
+        pass
+
+
+async def _enqueue_inbound_operator_message() -> None:
+    """Fire-and-forget: record one usage_messages row for an inbound operator reply."""
+    try:
+        project_id = _project_repository.ensure_default_project().id
+    except Exception:
+        return
+    try:
+        await usage_recorder.record(
+            tracker_type="messages",
+            project_id=project_id,
+            payload={
+                "direction": "in",
+                "participant_role": "operator",
+                "trace_id": None,
+                "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        )
+    except Exception:
+        pass
 
 
 def _pending_forward_retry_delays() -> list[float]:
@@ -2218,6 +2280,16 @@ async def _flush_offline_backlog_after_debounce(*, chat_id: int) -> None:
 
 
 _offline_recovery_tasks: set[asyncio.Task] = set()
+
+
+@app.on_event("startup")
+async def _start_usage_recorder_on_startup() -> None:
+    usage_recorder.start()
+
+
+@app.on_event("shutdown")
+async def _stop_usage_recorder_on_shutdown() -> None:
+    await usage_recorder.aclose()
 
 
 @app.on_event("startup")
@@ -2720,6 +2792,8 @@ async def _process_telegram_update(
         response = {"trace_id": trace_id}
         response.update(operator_result)
         return response
+
+    asyncio.create_task(_enqueue_inbound_customer_message(trace_id=trace_id))
 
     if is_stale(
         message_date=normalized.date,

@@ -21,6 +21,9 @@ CALL_OUTCOMES: frozenset[str] = frozenset({
     "error",
 })
 
+DIRECTIONS: frozenset[str] = frozenset({"in", "out"})
+PARTICIPANT_ROLES: frozenset[str] = frozenset({"customer", "operator"})
+
 # ---------------------------------------------------------------------------
 # Frozen row types
 # ---------------------------------------------------------------------------
@@ -122,8 +125,20 @@ class UsageMessageRepository:
         self._db_path = db_path
 
     def record(self, row: UsageMessageRow) -> None:
-        """Implemented in Story 14.03."""
-        raise NotImplementedError
+        if row.direction not in DIRECTIONS:
+            raise ValueError(f"Invalid direction: {row.direction!r}")
+        if row.participant_role not in PARTICIPANT_ROLES:
+            raise ValueError(f"Invalid participant_role: {row.participant_role!r}")
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT INTO usage_messages"
+                " (project_id, direction, participant_role, trace_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    row.project_id, row.direction, row.participant_role,
+                    row.trace_id, row.created_at,
+                ),
+            )
 
     def count_for_day(self, *, project_id: int, day_utc: str) -> int:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""

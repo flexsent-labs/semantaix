@@ -1936,6 +1936,32 @@ async def _safe_send_message(
         return False
 
 
+def _enqueue_outbound_customer_message(
+    *, project_id: int | None, trace_id: str | None
+) -> None:
+    """Fire-and-forget: enqueue one usage_messages row for an outbound customer answer."""
+    if project_id is None:
+        return
+
+    async def _record() -> None:
+        try:
+            await usage_recorder.record(
+                tracker_type="messages",
+                project_id=project_id,
+                payload={
+                    "direction": "out",
+                    "participant_role": "customer",
+                    "trace_id": trace_id,
+                    "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                trace_id=trace_id,
+            )
+        except Exception:
+            pass
+
+    asyncio.create_task(_record())
+
+
 async def _notify_hitl_operator_summary(*, ticket_id: int, summary: str) -> bool:
     """Short-form operator DM, used for status changes like route/assign."""
     chat_id_raw = _effective_hitl_operator_chat_id()
@@ -2204,6 +2230,7 @@ async def _dispatch_sales_escalation(
     trace_id: str,
     latency_ms: int,
     pipeline_result,
+    project_id: int | None = None,
 ) -> dict[str, object]:
     """Deliver the sales fixed-line + open a HITL ticket (story 12.09 wiring).
 
@@ -2232,6 +2259,7 @@ async def _dispatch_sales_escalation(
             failure_summary="Inbound sales answer delivery failed",
             failure_kind="inbound_delivery_failed",
         )
+        _enqueue_outbound_customer_message(project_id=project_id, trace_id=trace_id)
 
     active_ticket = (
         await asyncio.to_thread(
@@ -2466,7 +2494,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         pipeline_result = await asyncio.wait_for(
             pipeline_task, timeout=pipeline_budget
         )
-    except (Exception, asyncio.CancelledError) as exc:
+    except Exception as exc:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         timed_out = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
         error_reason = "pipeline_timeout" if timed_out else (str(exc) or repr(exc))
@@ -2557,6 +2585,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             trace_id=trace_id,
             latency_ms=latency_ms,
             pipeline_result=pipeline_result,
+            project_id=ctx.project_id,
         )
 
     if pipeline_result.handled:
@@ -2569,6 +2598,9 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 text=pipeline_result.text or "",
                 failure_summary="Inbound answer delivery failed",
                 failure_kind="inbound_delivery_failed",
+            )
+            _enqueue_outbound_customer_message(
+                project_id=ctx.project_id, trace_id=trace_id
             )
         limitations: list[str] = [] if retrieval else ["no_retrieval"]
         persisted_trace_id = await asyncio.to_thread(

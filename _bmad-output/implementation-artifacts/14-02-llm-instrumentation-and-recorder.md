@@ -1,6 +1,6 @@
 # Story 14.02: OpenRouter LLM-call instrumentation + `UsageRecorder` seam + `call_outcome` enum
 
-Status: review
+Status: done
 
 ## Story
 

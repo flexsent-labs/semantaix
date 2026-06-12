@@ -284,3 +284,68 @@ async def test_summarize_offerings_fires_usage_row():
     kw = recorder.record.call_args[1]
     assert kw["tracker_type"] == "llm"
     assert kw["project_id"] == 5
+    assert kw["payload"]["call_outcome"] == "customer_visible_answer"
+
+
+@pytest.mark.asyncio
+async def test_complete_json_parse_failure_fires_error_row():
+    """complete_json fires an error row when json.loads raises (non-JSON 200 response)."""
+    recorder = MagicMock(spec=UsageRecorder)
+    recorder.record = AsyncMock()
+    client = _make_client(recorder=recorder)
+
+    bad_data = {
+        "choices": [{"message": {"content": "not json {{{"}}],
+        "model": "gpt-4o",
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "cost": 0.0},
+    }
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value=bad_data)
+
+    from services.api.app.openrouter_client import OpenRouterJsonSchemaViolation
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_cls.return_value.__aenter__.return_value.post = AsyncMock(return_value=resp)
+        with pytest.raises(OpenRouterJsonSchemaViolation):
+            await client.complete_json(
+                system="sys", user="usr", project_id=4, trace_id="t-parse-err",
+            )
+
+    import asyncio
+    await asyncio.sleep(0)
+
+    recorder.record.assert_called_once()
+    kw = recorder.record.call_args[1]
+    assert kw["payload"]["call_outcome"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_complete_json_non_dict_json_fires_error_row():
+    """complete_json fires an error row when the response is valid JSON but not a dict."""
+    recorder = MagicMock(spec=UsageRecorder)
+    recorder.record = AsyncMock()
+    client = _make_client(recorder=recorder)
+
+    array_data = {
+        "choices": [{"message": {"content": "[1, 2, 3]"}}],
+        "model": "gpt-4o",
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "cost": 0.0},
+    }
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value=array_data)
+
+    from services.api.app.openrouter_client import OpenRouterJsonSchemaViolation
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_cls.return_value.__aenter__.return_value.post = AsyncMock(return_value=resp)
+        with pytest.raises(OpenRouterJsonSchemaViolation):
+            await client.complete_json(
+                system="sys", user="usr", project_id=5, trace_id="t-non-dict",
+            )
+
+    import asyncio
+    await asyncio.sleep(0)
+
+    recorder.record.assert_called_once()
+    kw = recorder.record.call_args[1]
+    assert kw["payload"]["call_outcome"] == "error"
