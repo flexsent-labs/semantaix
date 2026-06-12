@@ -39,3 +39,15 @@ def test_enqueue_outbound_customer_message_enqueues_when_project_id_provided(
     mock_asyncio.create_task.assert_called_once()
     call_args = mock_asyncio.create_task.call_args
     assert call_args is not None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_outbound_customer_message_swallows_recorder_error(mock_recorder):
+    """Recorder errors inside the fire-and-forget task do not propagate."""
+    import asyncio
+
+    mock_recorder.record.side_effect = RuntimeError("recorder closed")
+    with patch.object(api_main, "usage_recorder", mock_recorder):
+        api_main._enqueue_outbound_customer_message(project_id=5, trace_id="t-err")
+        # Yield to let the fire-and-forget task execute; must not raise
+        await asyncio.sleep(0)

@@ -191,7 +191,7 @@ class OpenRouterClient:
         except (httpx.HTTPStatusError, httpx.RequestError):
             if self._recorder is not None and project_id is not None:
                 now_str = self._clock().strftime("%Y-%m-%dT%H:%M:%SZ")
-                asyncio.ensure_future(
+                asyncio.create_task(
                     self._recorder.record(
                         tracker_type="llm",
                         project_id=project_id,
@@ -284,11 +284,11 @@ class OpenRouterClient:
             model=model or self.grounding_model,
             messages=messages,
             project_id=project_id,
-            call_outcome="moderation_triggered",
+            call_outcome="customer_visible_answer",
             trace_id=trace_id,
         )
         if self._recorder is not None and project_id is not None:
-            asyncio.ensure_future(
+            asyncio.create_task(
                 self._recorder.record(
                     tracker_type="llm",
                     project_id=project_id,
@@ -297,7 +297,7 @@ class OpenRouterClient:
                         "prompt_tokens": capture.prompt_tokens,
                         "completion_tokens": capture.completion_tokens,
                         "cost_usd": capture.cost_usd,
-                        "call_outcome": "moderation_triggered",
+                        "call_outcome": "customer_visible_answer",
                         "trace_id": trace_id,
                         "created_at": capture.created_at,
                     },
@@ -313,7 +313,7 @@ class OpenRouterClient:
         user: str,
         model: str | None = None,
         project_id: int | None = None,
-        call_outcome: str = "moderation_triggered",
+        call_outcome: str = "customer_visible_answer",
         trace_id: str | None = None,
     ) -> dict[str, Any]:
         """Single structured JSON-out completion.
@@ -354,7 +354,7 @@ class OpenRouterClient:
         except (httpx.HTTPStatusError, httpx.RequestError):
             if self._recorder is not None and project_id is not None:
                 now_str = self._clock().strftime("%Y-%m-%dT%H:%M:%SZ")
-                asyncio.ensure_future(
+                asyncio.create_task(
                     self._recorder.record(
                         tracker_type="llm",
                         project_id=project_id,
@@ -380,8 +380,35 @@ class OpenRouterClient:
             cost_usd=usage.get("cost"),
             created_at=self._clock().strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            if self._recorder is not None and project_id is not None:
+                asyncio.create_task(
+                    self._recorder.record(
+                        tracker_type="llm",
+                        project_id=project_id,
+                        payload={
+                            "model_name": capture.model_name,
+                            "prompt_tokens": capture.prompt_tokens,
+                            "completion_tokens": capture.completion_tokens,
+                            "cost_usd": capture.cost_usd,
+                            "call_outcome": "error",
+                            "trace_id": trace_id,
+                            "created_at": capture.created_at,
+                        },
+                        trace_id=trace_id,
+                    )
+                )
+            raise OpenRouterJsonSchemaViolation(
+                f"non-JSON response: {raw[:200]}"
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise OpenRouterJsonSchemaViolation(
+                f"JSON response is not an object: {type(decoded).__name__}"
+            )
         if self._recorder is not None and project_id is not None:
-            asyncio.ensure_future(
+            asyncio.create_task(
                 self._recorder.record(
                     tracker_type="llm",
                     project_id=project_id,
@@ -396,16 +423,6 @@ class OpenRouterClient:
                     },
                     trace_id=trace_id,
                 )
-            )
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise OpenRouterJsonSchemaViolation(
-                f"non-JSON response: {raw[:200]}"
-            ) from exc
-        if not isinstance(decoded, dict):
-            raise OpenRouterJsonSchemaViolation(
-                f"JSON response is not an object: {type(decoded).__name__}"
             )
         return decoded
 

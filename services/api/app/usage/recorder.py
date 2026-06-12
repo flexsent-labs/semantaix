@@ -59,7 +59,14 @@ class UsageRecorder:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Launch the background consumer.  Must be called inside a running event loop."""
+        """Launch the background consumer.  Must be called inside a running event loop.
+
+        A fresh asyncio.Queue is created here (not in __init__) so that the
+        queue is bound to the running event loop — each TestClient/container
+        restart gets a queue on its own loop.  Items enqueued before start()
+        (the window between module import and FastAPI startup) are intentionally
+        discarded; no request-path record() calls occur in that window.
+        """
         self._queue = asyncio.Queue(maxsize=self._queue_maxsize)
         self._closed = False
         self._consumer_task = asyncio.create_task(self._consumer_loop())
@@ -141,6 +148,7 @@ class UsageRecorder:
         project_id = item["project_id"]
         payload = item["payload"]
 
+        trace_id = item.get("trace_id") or payload.get("trace_id")
         if tracker_type == "llm":
             row = UsageLlmCallRow(
                 id=0,  # ignored on INSERT (auto-increment)
@@ -150,7 +158,7 @@ class UsageRecorder:
                 completion_tokens=payload.get("completion_tokens", 0),
                 cost_usd=payload.get("cost_usd"),
                 call_outcome=payload.get("call_outcome", "error"),
-                trace_id=payload.get("trace_id"),
+                trace_id=trace_id,
                 created_at=payload.get("created_at", ""),
             )
             await asyncio.to_thread(self._llm_repo.record, row)
@@ -160,7 +168,7 @@ class UsageRecorder:
                 project_id=project_id,
                 direction=payload.get("direction", "in"),
                 participant_role=payload.get("participant_role", "customer"),
-                trace_id=payload.get("trace_id"),
+                trace_id=trace_id,
                 created_at=payload.get("created_at", ""),
             )
             await asyncio.to_thread(self._message_repo.record, row)
@@ -170,7 +178,7 @@ class UsageRecorder:
                 project_id=project_id,
                 event_type=payload.get("event_type", "created"),
                 ticket_id=payload.get("ticket_id", 0),
-                trace_id=payload.get("trace_id"),
+                trace_id=trace_id,
                 created_at=payload.get("created_at", ""),
             )
             await asyncio.to_thread(self._hitl_repo.record, row)

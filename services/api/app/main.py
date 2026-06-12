@@ -1942,19 +1942,24 @@ def _enqueue_outbound_customer_message(
     """Fire-and-forget: enqueue one usage_messages row for an outbound customer answer."""
     if project_id is None:
         return
-    asyncio.create_task(
-        usage_recorder.record(
-            tracker_type="messages",
-            project_id=project_id,
-            payload={
-                "direction": "out",
-                "participant_role": "customer",
-                "trace_id": trace_id,
-                "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-            trace_id=trace_id,
-        )
-    )
+
+    async def _record() -> None:
+        try:
+            await usage_recorder.record(
+                tracker_type="messages",
+                project_id=project_id,
+                payload={
+                    "direction": "out",
+                    "participant_role": "customer",
+                    "trace_id": trace_id,
+                    "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                trace_id=trace_id,
+            )
+        except Exception:
+            pass
+
+    asyncio.create_task(_record())
 
 
 async def _notify_hitl_operator_summary(*, ticket_id: int, summary: str) -> bool:
