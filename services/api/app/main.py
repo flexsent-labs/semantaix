@@ -211,10 +211,13 @@ from services.api.app.trace_corrections import (
     TraceCorrectionError,
     TraceCorrectionRepository,
 )
+from services.api.app.usage.api_router import wire_usage_api_routes
 from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.usage.recorder import UsageRecorder
 from services.api.app.usage.repositories import (
+    UsageDailySummaryRepository,
     UsageHitlEventRepository,
+    UsageIncidentRepository,
     UsageLlmCallRepository,
     UsageMessageRepository,
 )
@@ -417,6 +420,16 @@ wire_admin_rag_inspect_routes(
     default_project_id=lambda: _default_project_id(),
     grounding_threshold=lambda: _effective_grounding_threshold(),
 )
+wire_usage_api_routes(
+    app,
+    auth_service=admin_auth_service,
+    summary_repo=_usage_summary_repo,
+    llm_repo=_usage_llm_call_repo,
+    message_repo=_usage_message_repo,
+    hitl_repo=_usage_hitl_repo,
+    incident_repo=_usage_incident_repo,
+    operator_repo=operator_repository,
+)
 
 
 def _bootstrap_default_entities() -> None:
@@ -521,6 +534,8 @@ bootstrap_usage_db(settings.usage_db_path)
 _usage_llm_call_repo = UsageLlmCallRepository(db_path=settings.usage_db_path)
 _usage_message_repo = UsageMessageRepository(db_path=settings.usage_db_path)
 _usage_hitl_repo = UsageHitlEventRepository(db_path=settings.usage_db_path)
+_usage_summary_repo = UsageDailySummaryRepository(db_path=settings.usage_db_path)
+_usage_incident_repo = UsageIncidentRepository(db_path=settings.usage_db_path)
 usage_recorder = UsageRecorder(
     llm_repo=_usage_llm_call_repo,
     message_repo=_usage_message_repo,
