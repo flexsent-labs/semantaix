@@ -138,12 +138,13 @@ def test_llm_call_repo_record_is_implemented(tmp_path):
     repo.record(row)  # must not raise
 
 
-def test_llm_call_repo_list_for_day_not_implemented(tmp_path):
+def test_llm_call_repo_list_for_day_is_implemented(tmp_path):
+    """list_for_day() is implemented in Story 14.06 — no longer raises NotImplementedError."""
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageLlmCallRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.list_for_day(project_id=1, day_utc="2026-06-11")
+    result = repo.list_for_day(project_id=1, day_utc="2026-06-11")
+    assert result == []  # empty DB returns empty list
 
 
 def test_message_repo_record_is_implemented(tmp_path):
