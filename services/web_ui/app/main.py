@@ -11,9 +11,12 @@ from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.backups import BackupRepository
 from services.api.app.hitl import HitlTicketRepository
 from services.web_ui.app.admin import router as admin_router
+from services.web_ui.app.auth import _api_get, _resolve_principal
+from services.web_ui.app.usage_dashboard import router as usage_router
 
 app = create_service_app("web_ui")
 app.include_router(admin_router)
+app.include_router(usage_router)
 _settings = get_settings()
 backup_repository = BackupRepository(
     db_path=_settings.backup_db_path,
@@ -81,6 +84,7 @@ def admin_shell() -> str:
         <p>Bootstrap admin shell is running.</p>
         <ul>
           <li><a href='/admin/login'>Admin panel (login required)</a></li>
+          <li><a href='/admin/usage'>Usage dashboard</a></li>
           <li><a href='/files'>Files (inspect extracted text)</a></li>
           <li><a href='/knowledge-upload'>Upload to knowledge base</a></li>
           <li><a href='/answer-traces'>Answer traces</a></li>
@@ -336,28 +340,6 @@ def answer_trace_detail(trace_id: str) -> str:
     """
 
 
-async def _api_get(
-    request: Request, path: str, *, params: dict | None = None
-) -> tuple[int, dict]:
-    cookie = request.cookies.get(_settings.web_session_cookie_name)
-    headers: dict[str, str] = {}
-    if cookie:
-        headers["Cookie"] = f"{_settings.web_session_cookie_name}={cookie}"
-    url = f"{_settings.api_internal_base_url.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(url, params=params or {}, headers=headers)
-    try:
-        body = response.json()
-    except ValueError:
-        body = {"detail": response.text or "api_returned_non_json"}
-    return response.status_code, body
-
-
-async def _resolve_principal(request: Request) -> dict | None:
-    status, body = await _api_get(request, "/admin/auth/me")
-    if status == 200:
-        return body
-    return None
 
 
 @app.get("/login", response_class=HTMLResponse)

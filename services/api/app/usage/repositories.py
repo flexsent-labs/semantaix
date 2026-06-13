@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 CALL_OUTCOMES: frozenset[str] = frozenset({
     "customer_visible_answer",
@@ -119,9 +120,23 @@ class UsageLlmCallRepository:
                 ),
             )
 
-    def list_for_day(self, *, project_id: int, day_utc: str) -> list[UsageLlmCallRow]:
-        """Implemented in Story 14.05 (roll-up reads raw rows)."""
-        raise NotImplementedError
+    def list_for_day(
+        self, *, project_id: int, day_utc: str, page: int = 1, page_size: int = 100
+    ) -> list[UsageLlmCallRow]:
+        start_ts = f"{day_utc}T00:00:00Z"
+        end_ts = f"{(date.fromisoformat(day_utc) + timedelta(days=1)).isoformat()}T00:00:00Z"
+        offset = (page - 1) * page_size
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, project_id, model_name, prompt_tokens, completion_tokens,"
+                " cost_usd, call_outcome, trace_id, created_at"
+                " FROM usage_llm_calls"
+                " WHERE project_id = ? AND created_at >= ? AND created_at < ?"
+                " ORDER BY created_at LIMIT ? OFFSET ?",
+                (project_id, start_ts, end_ts, page_size, offset),
+            ).fetchall()
+        return [UsageLlmCallRow(**dict(r)) for r in rows]
 
     def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
         deleted = 0
@@ -163,6 +178,23 @@ class UsageMessageRepository:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""
         raise NotImplementedError
 
+    def list_for_day(
+        self, *, project_id: int, day_utc: str, page: int = 1, page_size: int = 100
+    ) -> list[UsageMessageRow]:
+        start_ts = f"{day_utc}T00:00:00Z"
+        end_ts = f"{(date.fromisoformat(day_utc) + timedelta(days=1)).isoformat()}T00:00:00Z"
+        offset = (page - 1) * page_size
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, project_id, direction, participant_role, trace_id, created_at"
+                " FROM usage_messages"
+                " WHERE project_id = ? AND created_at >= ? AND created_at < ?"
+                " ORDER BY created_at LIMIT ? OFFSET ?",
+                (project_id, start_ts, end_ts, page_size, offset),
+            ).fetchall()
+        return [UsageMessageRow(**dict(r)) for r in rows]
+
     def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
         deleted = 0
         while True:
@@ -200,6 +232,23 @@ class UsageHitlEventRepository:
     def count_for_day(self, *, project_id: int, day_utc: str) -> int:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""
         raise NotImplementedError
+
+    def list_for_day(
+        self, *, project_id: int, day_utc: str, page: int = 1, page_size: int = 100
+    ) -> list[UsageHitlEventRow]:
+        start_ts = f"{day_utc}T00:00:00Z"
+        end_ts = f"{(date.fromisoformat(day_utc) + timedelta(days=1)).isoformat()}T00:00:00Z"
+        offset = (page - 1) * page_size
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, project_id, event_type, ticket_id, trace_id, created_at"
+                " FROM usage_hitl_events"
+                " WHERE project_id = ? AND created_at >= ? AND created_at < ?"
+                " ORDER BY created_at LIMIT ? OFFSET ?",
+                (project_id, start_ts, end_ts, page_size, offset),
+            ).fetchall()
+        return [UsageHitlEventRow(**dict(r)) for r in rows]
 
     def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
         deleted = 0

@@ -209,8 +209,8 @@ development_status:
   14-02-llm-instrumentation-and-recorder: done
   14-03-message-volume-instrumentation: done
   14-04-hitl-event-instrumentation: done
-  14-05-daily-rollup-and-retention: in-progress
-  14-06-web-ui-usage-dashboard: backlog
+  14-05-daily-rollup-and-retention: done
+  14-06-web-ui-usage-dashboard: done
   14-07-usage-api-and-money-rbac: backlog
   14-08-usage-bot-command: backlog
   14-09-alerting-and-incident-state-machine: backlog
