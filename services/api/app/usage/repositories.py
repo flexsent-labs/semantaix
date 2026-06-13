@@ -123,6 +123,21 @@ class UsageLlmCallRepository:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""
         raise NotImplementedError
 
+    def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
+        deleted = 0
+        while True:
+            with sqlite3.connect(self._db_path) as conn:
+                cur = conn.execute(
+                    "DELETE FROM usage_llm_calls WHERE id IN"
+                    " (SELECT id FROM usage_llm_calls WHERE created_at < ? LIMIT ?)",
+                    (cutoff_iso, batch_size),
+                )
+                n = cur.rowcount
+            deleted += n
+            if n < batch_size:
+                break
+        return deleted
+
 
 class UsageMessageRepository:
     def __init__(self, *, db_path: str) -> None:
@@ -148,6 +163,21 @@ class UsageMessageRepository:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""
         raise NotImplementedError
 
+    def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
+        deleted = 0
+        while True:
+            with sqlite3.connect(self._db_path) as conn:
+                cur = conn.execute(
+                    "DELETE FROM usage_messages WHERE id IN"
+                    " (SELECT id FROM usage_messages WHERE created_at < ? LIMIT ?)",
+                    (cutoff_iso, batch_size),
+                )
+                n = cur.rowcount
+            deleted += n
+            if n < batch_size:
+                break
+        return deleted
+
 
 class UsageHitlEventRepository:
     def __init__(self, *, db_path: str) -> None:
@@ -171,24 +201,111 @@ class UsageHitlEventRepository:
         """Implemented in Story 14.05 (roll-up reads raw rows)."""
         raise NotImplementedError
 
+    def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
+        deleted = 0
+        while True:
+            with sqlite3.connect(self._db_path) as conn:
+                cur = conn.execute(
+                    "DELETE FROM usage_hitl_events WHERE id IN"
+                    " (SELECT id FROM usage_hitl_events WHERE created_at < ? LIMIT ?)",
+                    (cutoff_iso, batch_size),
+                )
+                n = cur.rowcount
+            deleted += n
+            if n < batch_size:
+                break
+        return deleted
+
 
 class UsageDailySummaryRepository:
     def __init__(self, *, db_path: str) -> None:
         self._db_path = db_path
 
     def upsert(self, row: UsageDailySummaryRow) -> None:
-        """Implemented in Story 14.05 (daily roll-up worker)."""
-        raise NotImplementedError
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO usage_daily_summary
+                    (project_id, day_utc, tracker_type, model_name,
+                     prompt_tokens_total, completion_tokens_total, cost_usd_total,
+                     wasted_cost_usd, call_count, in_count, out_count,
+                     hitl_created_count, hitl_assigned_count,
+                     hitl_replied_count, hitl_resolved_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, day_utc, tracker_type, model_name)
+                DO UPDATE SET
+                    prompt_tokens_total     = excluded.prompt_tokens_total,
+                    completion_tokens_total = excluded.completion_tokens_total,
+                    cost_usd_total          = excluded.cost_usd_total,
+                    wasted_cost_usd         = excluded.wasted_cost_usd,
+                    call_count              = excluded.call_count,
+                    in_count                = excluded.in_count,
+                    out_count               = excluded.out_count,
+                    hitl_created_count      = excluded.hitl_created_count,
+                    hitl_assigned_count     = excluded.hitl_assigned_count,
+                    hitl_replied_count      = excluded.hitl_replied_count,
+                    hitl_resolved_count     = excluded.hitl_resolved_count
+                """,
+                (
+                    row.project_id, row.day_utc, row.tracker_type, row.model_name,
+                    row.prompt_tokens_total, row.completion_tokens_total,
+                    row.cost_usd_total, row.wasted_cost_usd, row.call_count,
+                    row.in_count, row.out_count,
+                    row.hitl_created_count, row.hitl_assigned_count,
+                    row.hitl_replied_count, row.hitl_resolved_count,
+                ),
+            )
 
     def query(
         self,
         *,
         project_id: int,
-        from_day: str,
-        to_day: str,
+        from_day_utc: str,
+        to_day_utc: str,
+        trackers: list[str] | None = None,
     ) -> list[UsageDailySummaryRow]:
-        """Implemented in Story 14.07 (usage API)."""
-        raise NotImplementedError
+        params: list[object] = [project_id, from_day_utc, to_day_utc]
+        tracker_clause = ""
+        if trackers:
+            placeholders = ",".join("?" * len(trackers))
+            tracker_clause = f" AND tracker_type IN ({placeholders})"
+            params.extend(trackers)
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT project_id, day_utc, tracker_type, model_name,
+                       prompt_tokens_total, completion_tokens_total, cost_usd_total,
+                       wasted_cost_usd, call_count, in_count, out_count,
+                       hitl_created_count, hitl_assigned_count,
+                       hitl_replied_count, hitl_resolved_count
+                FROM usage_daily_summary
+                WHERE project_id = ? AND day_utc BETWEEN ? AND ?
+                {tracker_clause}
+                ORDER BY day_utc, tracker_type, model_name
+                """,
+                params,
+            ).fetchall()
+        return [
+            UsageDailySummaryRow(
+                project_id=r["project_id"],
+                day_utc=r["day_utc"],
+                tracker_type=r["tracker_type"],
+                model_name=r["model_name"],
+                prompt_tokens_total=r["prompt_tokens_total"],
+                completion_tokens_total=r["completion_tokens_total"],
+                cost_usd_total=r["cost_usd_total"],
+                wasted_cost_usd=r["wasted_cost_usd"],
+                call_count=r["call_count"],
+                in_count=r["in_count"],
+                out_count=r["out_count"],
+                hitl_created_count=r["hitl_created_count"],
+                hitl_assigned_count=r["hitl_assigned_count"],
+                hitl_replied_count=r["hitl_replied_count"],
+                hitl_resolved_count=r["hitl_resolved_count"],
+            )
+            for r in rows
+        ]
 
     def query_wasted(
         self,

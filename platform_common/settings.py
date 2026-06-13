@@ -176,6 +176,9 @@ class AppSettings(BaseSettings):
     services_nl_op_session_ttl_seconds: int = 600
     usage_db_path: str = ".data/semantaix_usage.db"
     usage_queue_maxsize: int = 1024
+    usage_daily_rollup_hour_utc: int = 0
+    usage_raw_retention_days: int = 30
+    usage_rollup_batch_size: int = 10_000
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

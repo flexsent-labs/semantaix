@@ -194,20 +194,30 @@ def test_hitl_event_repo_count_for_day_not_implemented(tmp_path):
         repo.count_for_day(project_id=1, day_utc="2026-06-11")
 
 
-def test_daily_summary_repo_upsert_not_implemented(tmp_path):
+def test_daily_summary_repo_upsert_is_implemented(tmp_path):
+    """upsert() is implemented in Story 14.05 — no longer raises NotImplementedError."""
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageDailySummaryRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.upsert(None)  # type: ignore[arg-type]
+    row = UsageDailySummaryRow(
+        project_id=1, day_utc="2026-06-12", tracker_type="llm",
+        model_name="test-model", prompt_tokens_total=10,
+        completion_tokens_total=5, cost_usd_total=0.001,
+        wasted_cost_usd=None, call_count=1,
+        in_count=None, out_count=None,
+        hitl_created_count=None, hitl_assigned_count=None,
+        hitl_replied_count=None, hitl_resolved_count=None,
+    )
+    repo.upsert(row)  # must not raise
 
 
-def test_daily_summary_repo_query_not_implemented(tmp_path):
+def test_daily_summary_repo_query_is_implemented(tmp_path):
+    """query() is implemented in Story 14.05 — no longer raises NotImplementedError."""
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageDailySummaryRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.query(project_id=1, from_day="2026-06-01", to_day="2026-06-11")
+    result = repo.query(project_id=1, from_day_utc="2026-06-01", to_day_utc="2026-06-11")
+    assert result == []  # empty DB returns empty list
 
 
 def test_daily_summary_repo_query_wasted_not_implemented(tmp_path):
