@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Query, Request
 
+from platform_common.settings import get_settings
 from services.api.app.admin_auth import AdminAuthService
 from services.api.app.operators import OperatorRepository
 from services.api.app.usage.repositories import (
@@ -32,7 +33,7 @@ from services.api.app.usage.repositories import (
     UsageMessageRepository,
 )
 
-_MAX_RETENTION_DAYS = 30
+_MAX_RETENTION_DAYS = get_settings().usage_raw_retention_days
 _MAX_PAGE_SIZE = 500
 
 

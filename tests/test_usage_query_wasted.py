@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.usage.repositories import (
     UsageDailySummaryRepository,

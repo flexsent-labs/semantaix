@@ -30,7 +30,7 @@ from services.web_ui.app.auth import _resolve_principal
 
 router = APIRouter()
 _settings = get_settings()
-_MAX_WINDOW_DAYS = 30
+_MAX_WINDOW_DAYS = _settings.usage_raw_retention_days
 
 
 def _window_to_dates(window: str, today: date) -> tuple[date, date]:
@@ -521,6 +521,7 @@ async def usage_dashboard(
     # Summary-only reads for the main page
     bootstrap_usage_db(_settings.usage_db_path)
     summary_repo = UsageDailySummaryRepository(db_path=_settings.usage_db_path)
+    is_admin = principal.get("role") == "admin"
     rows: list[UsageDailySummaryRow] = []
     if project_id is not None:
         if from_date is not None and to_date is not None:
@@ -532,6 +533,7 @@ async def usage_dashboard(
             project_id=project_id,
             from_day_utc=f_date.isoformat(),
             to_day_utc=t_date.isoformat(),
+            include_money=is_admin,
         )
     else:
         f_date, t_date = None, None
@@ -588,13 +590,24 @@ async def usage_raw(
     else:
         return JSONResponse({"error": "unknown tracker_type"}, status_code=400)
 
-    raw_rows = await asyncio.to_thread(
-        repo.list_for_day,
-        project_id=project_id,
-        day_utc=day_utc,
-        page=page,
-        page_size=page_size,
-    )
+    is_admin = principal.get("role") == "admin"
+    if tracker_type == "llm":
+        raw_rows = await asyncio.to_thread(
+            repo.list_for_day,
+            project_id=project_id,
+            day_utc=day_utc,
+            page=page,
+            page_size=page_size,
+            include_money=is_admin,
+        )
+    else:
+        raw_rows = await asyncio.to_thread(
+            repo.list_for_day,
+            project_id=project_id,
+            day_utc=day_utc,
+            page=page,
+            page_size=page_size,
+        )
 
     from dataclasses import asdict
     serialized = [asdict(r) for r in raw_rows]

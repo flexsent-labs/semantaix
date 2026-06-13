@@ -114,11 +114,6 @@ telegram_file_sender = TelegramFileSender(
     bot_token=settings.telegram_bot_token,
     base_url=settings.telegram_bot_api_base_url,
 )
-# Story 12.02b — OpenRouter client used by the operator services NL classifier.
-# Single shared instance: each ``complete_json`` call opens its own httpx
-# AsyncClient with a 30s timeout, so a long-running LLM call cannot block
-# concurrent webhook handlers.
-operator_service_nl_openrouter = OpenRouterClient()
 # Story 14.03 — message-volume instrumentation. Shares the same SQLite file as
 # the api service (WAL mode; concurrent readers are safe). Only ``tracker_type
 # ='messages'`` is fired here; llm/hitl repos are wired for completeness so the
@@ -130,6 +125,12 @@ usage_recorder = UsageRecorder(
     hitl_repo=UsageHitlEventRepository(db_path=settings.usage_db_path),
     queue_maxsize=settings.usage_queue_maxsize,
 )
+# Story 12.02b — OpenRouter client used by the operator services NL classifier.
+# Declared after usage_recorder so the recorder is wired at construction time.
+# Single shared instance: each ``complete_json`` call opens its own httpx
+# AsyncClient with a 30s timeout, so a long-running LLM call cannot block
+# concurrent webhook handlers.
+operator_service_nl_openrouter = OpenRouterClient(recorder=usage_recorder)
 
 _BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
@@ -2793,8 +2794,6 @@ async def _process_telegram_update(
         response.update(operator_result)
         return response
 
-    asyncio.create_task(_enqueue_inbound_customer_message(trace_id=trace_id))
-
     if is_stale(
         message_date=normalized.date,
         now=datetime.now(UTC),
@@ -2854,6 +2853,8 @@ async def _process_telegram_update(
             purpose="rate_limit_reply",
         )
         return {"status": "rate_limited", "trace_id": trace_id}
+
+    asyncio.create_task(_enqueue_inbound_customer_message(trace_id=trace_id))
 
     # Customer forward runs as a background task so the webhook returns 200
     # OK within a few milliseconds. The AnswerPipeline (LLM + RAG + verifier
