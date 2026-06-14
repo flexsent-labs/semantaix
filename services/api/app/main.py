@@ -439,6 +439,11 @@ def _bootstrap_default_entities() -> None:
         project_id=default_project.id,
         chat_id=primary_chat_id,
     )
+    # Story 10.5-01 — migrate away from the primary-operator runtime-config
+    # indirection. The operators table is now authoritative; these two keys
+    # are no longer written or read anywhere after Epic 10.5 ships.
+    hitl_ticket_repository.delete_runtime_config("hitl_primary_operator_username")
+    hitl_ticket_repository.delete_runtime_config("hitl_primary_operator_chat_id")
 
 
 _bootstrap_default_entities()
