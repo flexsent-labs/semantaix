@@ -77,6 +77,14 @@ development_status:
   epic-10: done
   epic-10-retrospective: optional
 
+  # --- Epic 10.5 (Operator-Project Model Refinement; prerequisite for Epic 14.07 merge) ---
+  epic-10-5: in-progress
+  10-5-01-settings-migration: review
+  10-5-02-bot-gateway-flat-resolver: backlog
+  10-5-03-api-surface-cleanup: backlog
+  10-5-04-epic-signoff: backlog
+  epic-10-5-retrospective: optional
+
   # --- Shipped (recent) ---
   epic-11: done
   11-01-calendar-schema-and-settings: done
