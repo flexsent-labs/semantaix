@@ -185,6 +185,54 @@ def test_drill_down_messages_tracker(tmp_path):
     assert data["rows"][0]["direction"] == "in"
 
 
+def test_drill_down_llm_admin_includes_cost(tmp_path):
+    db = _db(tmp_path)
+    today = date.today()
+    day = (today - timedelta(days=2)).isoformat()
+    _insert_llm(db, day=day)
+
+    import services.web_ui.app.usage_dashboard as mod
+
+    with (
+        patch("services.web_ui.app.usage_dashboard._resolve_principal",
+              new=AsyncMock(return_value={"username": "admin", "role": "admin"})),
+        patch.object(mod, "_settings") as ms,
+    ):
+        ms.usage_db_path = db
+        ms.usage_raw_retention_days = 30
+        resp = _client().get(
+            f"/admin/usage/raw?project_id=1&day_utc={day}&tracker_type=llm"
+        )
+
+    assert resp.status_code == 200
+    row = resp.json()["rows"][0]
+    assert row["cost_usd"] is not None
+
+
+def test_drill_down_llm_operator_excludes_cost(tmp_path):
+    db = _db(tmp_path)
+    today = date.today()
+    day = (today - timedelta(days=2)).isoformat()
+    _insert_llm(db, day=day)
+
+    import services.web_ui.app.usage_dashboard as mod
+
+    with (
+        patch("services.web_ui.app.usage_dashboard._resolve_principal",
+              new=AsyncMock(return_value={"username": "op", "role": "operator"})),
+        patch.object(mod, "_settings") as ms,
+    ):
+        ms.usage_db_path = db
+        ms.usage_raw_retention_days = 30
+        resp = _client().get(
+            f"/admin/usage/raw?project_id=1&day_utc={day}&tracker_type=llm"
+        )
+
+    assert resp.status_code == 200
+    row = resp.json()["rows"][0]
+    assert row["cost_usd"] is None
+
+
 def test_drill_down_hitl_tracker(tmp_path):
     db = _db(tmp_path)
     today = date.today()

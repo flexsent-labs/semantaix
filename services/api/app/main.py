@@ -211,10 +211,13 @@ from services.api.app.trace_corrections import (
     TraceCorrectionError,
     TraceCorrectionRepository,
 )
+from services.api.app.usage.api_router import wire_usage_api_routes
 from services.api.app.usage.migrations import bootstrap_usage_db
 from services.api.app.usage.recorder import UsageRecorder
 from services.api.app.usage.repositories import (
+    UsageDailySummaryRepository,
     UsageHitlEventRepository,
+    UsageIncidentRepository,
     UsageLlmCallRepository,
     UsageMessageRepository,
 )
@@ -417,8 +420,6 @@ wire_admin_rag_inspect_routes(
     default_project_id=lambda: _default_project_id(),
     grounding_threshold=lambda: _effective_grounding_threshold(),
 )
-
-
 def _bootstrap_default_entities() -> None:
     """Idempotently ensure a `default` project and a primary operator row exist.
 
@@ -521,6 +522,8 @@ bootstrap_usage_db(settings.usage_db_path)
 _usage_llm_call_repo = UsageLlmCallRepository(db_path=settings.usage_db_path)
 _usage_message_repo = UsageMessageRepository(db_path=settings.usage_db_path)
 _usage_hitl_repo = UsageHitlEventRepository(db_path=settings.usage_db_path)
+_usage_summary_repo = UsageDailySummaryRepository(db_path=settings.usage_db_path)
+_usage_incident_repo = UsageIncidentRepository(db_path=settings.usage_db_path)
 usage_recorder = UsageRecorder(
     llm_repo=_usage_llm_call_repo,
     message_repo=_usage_message_repo,
@@ -528,6 +531,16 @@ usage_recorder = UsageRecorder(
     queue_maxsize=settings.usage_queue_maxsize,
 )
 openrouter_client._recorder = usage_recorder
+wire_usage_api_routes(
+    app,
+    auth_service=admin_auth_service,
+    summary_repo=_usage_summary_repo,
+    llm_repo=_usage_llm_call_repo,
+    message_repo=_usage_message_repo,
+    hitl_repo=_usage_hitl_repo,
+    incident_repo=_usage_incident_repo,
+    operator_repo=operator_repository,
+)
 
 # Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
 # `sales_conversation_state` table is bootstrapped at startup. Story 12.09
@@ -2291,7 +2304,8 @@ async def _dispatch_sales_escalation(
             failure_summary="Inbound sales answer delivery failed",
             failure_kind="inbound_delivery_failed",
         )
-        _enqueue_outbound_customer_message(project_id=project_id, trace_id=trace_id)
+        if delivered:
+            _enqueue_outbound_customer_message(project_id=project_id, trace_id=trace_id)
 
     active_ticket = (
         await asyncio.to_thread(
@@ -2650,9 +2664,10 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 failure_summary="Inbound answer delivery failed",
                 failure_kind="inbound_delivery_failed",
             )
-            _enqueue_outbound_customer_message(
-                project_id=ctx.project_id, trace_id=trace_id
-            )
+            if delivered:
+                _enqueue_outbound_customer_message(
+                    project_id=ctx.project_id, trace_id=trace_id
+                )
         limitations: list[str] = [] if retrieval else ["no_retrieval"]
         persisted_trace_id = await asyncio.to_thread(
             _persist_answer_trace,

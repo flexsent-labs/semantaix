@@ -221,12 +221,14 @@ def test_daily_summary_repo_query_is_implemented(tmp_path):
     assert result == []  # empty DB returns empty list
 
 
-def test_daily_summary_repo_query_wasted_not_implemented(tmp_path):
+def test_daily_summary_repo_query_wasted_is_implemented(tmp_path):
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageDailySummaryRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.query_wasted(project_id=1, from_day="2026-06-01", to_day="2026-06-11")
+    result = repo.query_wasted(
+        project_id=1, from_day_utc="2026-06-01", to_day_utc="2026-06-11"
+    )
+    assert result == []
 
 
 def test_incident_repo_start_not_implemented(tmp_path):
@@ -261,13 +263,13 @@ def test_incident_repo_active_for_project_not_implemented(tmp_path):
         repo.active_for_project(project_id=1)
 
 
-def test_incident_repo_list_for_window_not_implemented(tmp_path):
+def test_incident_repo_list_for_window_is_implemented(tmp_path):
     db = str(tmp_path / "usage.db")
     bootstrap_usage_db(db)
     repo = UsageIncidentRepository(db_path=db)
-    with pytest.raises(NotImplementedError):
-        repo.list_for_window(
-            project_id=1,
-            from_ts="2026-06-01T00:00:00Z",
-            to_ts="2026-06-11T00:00:00Z",
-        )
+    result = repo.list_for_window(
+        project_id=1,
+        from_ts="2026-06-01T00:00:00Z",
+        to_ts="2026-06-11T00:00:00Z",
+    )
+    assert result == []

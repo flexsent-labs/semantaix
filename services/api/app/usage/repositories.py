@@ -121,22 +121,42 @@ class UsageLlmCallRepository:
             )
 
     def list_for_day(
-        self, *, project_id: int, day_utc: str, page: int = 1, page_size: int = 100
+        self,
+        *,
+        project_id: int,
+        day_utc: str,
+        page: int = 1,
+        page_size: int = 100,
+        include_money: bool = True,
     ) -> list[UsageLlmCallRow]:
         start_ts = f"{day_utc}T00:00:00Z"
         end_ts = f"{(date.fromisoformat(day_utc) + timedelta(days=1)).isoformat()}T00:00:00Z"
         offset = (page - 1) * page_size
+        money_col = ", cost_usd" if include_money else ""
         with sqlite3.connect(self._db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT id, project_id, model_name, prompt_tokens, completion_tokens,"
-                " cost_usd, call_outcome, trace_id, created_at"
+                "SELECT id, project_id, model_name, prompt_tokens, completion_tokens"
+                f"{money_col}, call_outcome, trace_id, created_at"
                 " FROM usage_llm_calls"
                 " WHERE project_id = ? AND created_at >= ? AND created_at < ?"
                 " ORDER BY created_at LIMIT ? OFFSET ?",
                 (project_id, start_ts, end_ts, page_size, offset),
             ).fetchall()
-        return [UsageLlmCallRow(**dict(r)) for r in rows]
+        return [
+            UsageLlmCallRow(
+                id=r["id"],
+                project_id=r["project_id"],
+                model_name=r["model_name"],
+                prompt_tokens=r["prompt_tokens"],
+                completion_tokens=r["completion_tokens"],
+                cost_usd=r["cost_usd"] if include_money else None,
+                call_outcome=r["call_outcome"],
+                trace_id=r["trace_id"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
 
     def purge_before(self, cutoff_iso: str, batch_size: int = 10_000) -> int:
         deleted = 0
@@ -312,6 +332,7 @@ class UsageDailySummaryRepository:
         from_day_utc: str,
         to_day_utc: str,
         trackers: list[str] | None = None,
+        include_money: bool = True,
     ) -> list[UsageDailySummaryRow]:
         params: list[object] = [project_id, from_day_utc, to_day_utc]
         tracker_clause = ""
@@ -319,13 +340,15 @@ class UsageDailySummaryRepository:
             placeholders = ",".join("?" * len(trackers))
             tracker_clause = f" AND tracker_type IN ({placeholders})"
             params.extend(trackers)
+        money_cols = "cost_usd_total, wasted_cost_usd," if include_money else ""
         with sqlite3.connect(self._db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 f"""
                 SELECT project_id, day_utc, tracker_type, model_name,
-                       prompt_tokens_total, completion_tokens_total, cost_usd_total,
-                       wasted_cost_usd, call_count, in_count, out_count,
+                       prompt_tokens_total, completion_tokens_total,
+                       {money_cols}
+                       call_count, in_count, out_count,
                        hitl_created_count, hitl_assigned_count,
                        hitl_replied_count, hitl_resolved_count
                 FROM usage_daily_summary
@@ -334,6 +357,51 @@ class UsageDailySummaryRepository:
                 ORDER BY day_utc, tracker_type, model_name
                 """,
                 params,
+            ).fetchall()
+        return [
+            UsageDailySummaryRow(
+                project_id=r["project_id"],
+                day_utc=r["day_utc"],
+                tracker_type=r["tracker_type"],
+                model_name=r["model_name"],
+                prompt_tokens_total=r["prompt_tokens_total"],
+                completion_tokens_total=r["completion_tokens_total"],
+                cost_usd_total=r["cost_usd_total"] if include_money else None,
+                wasted_cost_usd=r["wasted_cost_usd"] if include_money else None,
+                call_count=r["call_count"],
+                in_count=r["in_count"],
+                out_count=r["out_count"],
+                hitl_created_count=r["hitl_created_count"],
+                hitl_assigned_count=r["hitl_assigned_count"],
+                hitl_replied_count=r["hitl_replied_count"],
+                hitl_resolved_count=r["hitl_resolved_count"],
+            )
+            for r in rows
+        ]
+
+    def query_wasted(
+        self,
+        *,
+        project_id: int,
+        from_day_utc: str,
+        to_day_utc: str,
+    ) -> list[UsageDailySummaryRow]:
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT project_id, day_utc, tracker_type, model_name,
+                       prompt_tokens_total, completion_tokens_total,
+                       cost_usd_total, wasted_cost_usd,
+                       call_count, in_count, out_count,
+                       hitl_created_count, hitl_assigned_count,
+                       hitl_replied_count, hitl_resolved_count
+                FROM usage_daily_summary
+                WHERE project_id = ? AND tracker_type = 'llm'
+                  AND day_utc BETWEEN ? AND ?
+                ORDER BY day_utc, model_name
+                """,
+                (project_id, from_day_utc, to_day_utc),
             ).fetchall()
         return [
             UsageDailySummaryRow(
@@ -355,16 +423,6 @@ class UsageDailySummaryRepository:
             )
             for r in rows
         ]
-
-    def query_wasted(
-        self,
-        *,
-        project_id: int,
-        from_day: str,
-        to_day: str,
-    ) -> list[UsageDailySummaryRow]:
-        """Implemented in Story 14.07 (wasted-spend tile, admin-only)."""
-        raise NotImplementedError
 
 
 class UsageIncidentRepository:
@@ -394,5 +452,16 @@ class UsageIncidentRepository:
         from_ts: str,
         to_ts: str,
     ) -> list[UsageIncidentRow]:
-        """Implemented in Story 14.07 (usage incidents API endpoint)."""
-        raise NotImplementedError
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, project_id, started_at, ended_at,
+                       breached_trackers, peak_pct, total_excess_cost_usd
+                FROM usage_incidents
+                WHERE project_id = ? AND started_at >= ? AND started_at <= ?
+                ORDER BY started_at
+                """,
+                (project_id, from_ts, to_ts),
+            ).fetchall()
+        return [UsageIncidentRow(**dict(r)) for r in rows]
