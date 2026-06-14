@@ -376,7 +376,6 @@ async def _resolve_operator_or_ignore(
     *,
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
-    primary_operator_username: str,
     admin_username: str,
     trace_id: str,
 ) -> ResolvedOperator | None:
@@ -385,7 +384,6 @@ async def _resolve_operator_or_ignore(
     resolved = await resolve_operator_for_sender(
         username=normalized.username,
         api_client=api_client,
-        primary_operator_username=primary_operator_username,
     )
     is_admin = (
         normalized.username is not None
@@ -911,7 +909,6 @@ async def handle_operator_service_nl_message(
     api_client: ApiClient,
     send_dm: SendDmFn,
     openrouter: _OpenRouterClient,
-    primary_operator_username: str,
     admin_username: str,
     internal_token: str,
 ) -> dict[str, str] | None:
@@ -939,7 +936,6 @@ async def handle_operator_service_nl_message(
     resolved = await _resolve_operator_or_ignore(
         normalized=normalized,
         api_client=api_client,
-        primary_operator_username=primary_operator_username,
         admin_username=admin_username,
         trace_id=trace_id,
     )

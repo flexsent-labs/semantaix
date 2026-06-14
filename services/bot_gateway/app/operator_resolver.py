@@ -1,9 +1,9 @@
-"""Multi-operator resolver for bot_gateway (Epic 10 story 10.07).
+"""Flat operator resolver for bot_gateway (Epic 10.5 story 10.5-02).
 
-Replaces the implicit "only the primary operator counts" gate with a
-lookup against the api's `operators` registry. Falls back to the
-configured primary operator on api failure so an api outage does not
-disable the operator commands for the primary admin.
+Replaces the primary-operator fallback with a fail-closed lookup against the
+api's ``operators`` registry.  An unreachable api is treated as no-match so
+operator commands are silently skipped; the bot never acts on an unverified
+sender identity.
 """
 
 from __future__ import annotations
@@ -24,24 +24,20 @@ class ResolvedOperator:
     chat_id: int | None
     project_id: int | None
     is_active: bool
-    source: str  # "registry" or "primary_fallback"
+    source: str  # always "registry" after Epic 10.5
 
 
 async def resolve_operator_for_sender(
     *,
     username: str | None,
     api_client: ApiClient,
-    primary_operator_username: str,
-    primary_operator_chat_id: int | None = None,
 ) -> ResolvedOperator | None:
     """Resolve a Telegram username to a registered operator, if any.
 
     Returns:
         - ResolvedOperator(source="registry") for a registered active operator.
-        - ResolvedOperator(source="primary_fallback") when api is unreachable
-          but the username matches the configured primary operator.
-        - None otherwise (non-operator sender, inactive operator, or
-          unknown operator with no primary fallback).
+        - None when the sender is not a registered operator, is inactive, or
+          when the api is unreachable (fail-closed — no fallback).
     """
     if not username:
         return None
@@ -49,20 +45,16 @@ async def resolve_operator_for_sender(
         record = await api_client.find_operator_by_username(username=username)
     except httpx.HTTPStatusError as exc:
         logger.warning(
-            "operator_lookup_http_error",
+            "operator_resolution_unavailable",
             extra={"username": username, "status": exc.response.status_code},
         )
-        record = None
-        api_unreachable = True
+        return None
     except (httpx.RequestError, httpx.TransportError, OSError) as exc:
         logger.warning(
-            "operator_lookup_network_error",
+            "operator_resolution_unavailable",
             extra={"username": username, "error": str(exc)},
         )
-        record = None
-        api_unreachable = True
-    else:
-        api_unreachable = False
+        return None
 
     if record is not None and bool(record.get("is_active", True)):
         return ResolvedOperator(
@@ -75,16 +67,5 @@ async def resolve_operator_for_sender(
             project_id=int(record["project_id"]),
             is_active=True,
             source="registry",
-        )
-    if record is not None and not bool(record.get("is_active", True)):
-        # Explicitly deactivated — refuse even if the api responded.
-        return None
-    if api_unreachable and username == primary_operator_username:
-        return ResolvedOperator(
-            username=username,
-            chat_id=primary_operator_chat_id,
-            project_id=None,
-            is_active=True,
-            source="primary_fallback",
         )
     return None

@@ -1,13 +1,14 @@
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from platform_common.settings import get_settings
+from services.bot_gateway.app.main import api_client, hitl_ticket_repository
 from services.bot_gateway.app.main import app as bot_app
-from services.bot_gateway.app.main import hitl_ticket_repository
 from tests.e2e.db_seed import load_telegram_fixture as load_fixture
 
 
@@ -161,8 +162,9 @@ def test_duplicate_webhook_does_not_create_duplicate_message_row(persistence_db)
 @pytest.mark.e2e
 @pytest.mark.epic("04")
 @pytest.mark.story("04-runtime-config")
-def test_admin_can_configure_hitl_contact_via_command(tmp_path):
+def test_admin_can_configure_hitl_contact_via_command(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    monkeypatch.setattr(api_client, "attach_operator", AsyncMock(return_value={}))
     client = TestClient(bot_app)
     payload = {
         "update_id": 3001,
@@ -179,15 +181,33 @@ def test_admin_can_configure_hitl_contact_via_command(tmp_path):
     assert data["status"] == "configured"
     assert data["hitl_primary_operator_username"] == "@flexsentlabs"
     assert data["telegram_alert_chat_id"] == "650934815"
-    assert data["hitl_primary_operator_chat_id"] == "650934815"
     assert (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
-        == "@flexsentlabs"
-    )
-    assert (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_chat_id")
+        hitl_ticket_repository.get_runtime_config("telegram_alert_chat_id")
         == "650934815"
     )
+
+
+def test_admin_hitl_config_returns_error_when_attach_operator_raises(tmp_path, monkeypatch):
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    monkeypatch.setattr(
+        api_client,
+        "attach_operator",
+        AsyncMock(side_effect=RuntimeError("api unreachable")),
+    )
+    client = TestClient(bot_app)
+    payload = {
+        "update_id": 3099,
+        "message": {
+            "message_id": 799,
+            "from": {"id": 1, "username": "ajdevy"},
+            "chat": {"id": 1, "type": "private"},
+            "text": "/hitl_config @flexsentlabs 650934815",
+        },
+    }
+    response = client.post("/telegram/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    assert response.json()["reason"] == "hitl_config_operator_upsert_failed"
 
 
 def test_non_admin_cannot_configure_hitl_contact_via_command(tmp_path):

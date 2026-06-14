@@ -100,7 +100,6 @@ async def test_service_add_authorized_operator_success(
         normalized=_msg("/service_add Медовеевка Лайт | Лайт уровень, с видами"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -136,7 +135,6 @@ async def test_service_add_admin_succeeds_with_admin_project_id() -> None:
         normalized=_msg("/service_add тур", username="@admin"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -160,7 +158,6 @@ async def test_service_add_unauthorized_sender_silently_ignored(
         normalized=_msg("/service_add x", username="@stranger"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -187,7 +184,6 @@ async def test_service_add_duplicate_returns_one_line_message() -> None:
         normalized=_msg("/service_add каньонинг"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -203,7 +199,6 @@ async def test_service_add_invalid_args_returns_usage() -> None:
         normalized=_msg("/service_add"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -228,7 +223,6 @@ async def test_service_add_api_unreachable_dms_error(
         normalized=_msg("/service_add x"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -250,7 +244,6 @@ async def test_service_list_renders_one_row_per_service() -> None:
         normalized=_msg("/service_list"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -288,7 +281,6 @@ async def test_service_list_renders_multiple_rows() -> None:
         normalized=_msg("/service_list"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -304,7 +296,6 @@ async def test_service_list_empty_returns_hint() -> None:
         normalized=_msg("/service_list"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -324,7 +315,6 @@ async def test_service_remove_success() -> None:
         normalized=_msg("/service_remove 12"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -345,7 +335,6 @@ async def test_service_remove_not_found_returns_not_found_line() -> None:
         normalized=_msg("/service_remove 12"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -360,7 +349,6 @@ async def test_service_remove_invalid_arg_returns_usage() -> None:
         normalized=_msg("/service_remove abc"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -379,7 +367,6 @@ async def test_sales_state_empty_returns_hint() -> None:
         normalized=_msg("/sales_state"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -412,7 +399,6 @@ async def test_sales_state_renders_compact_summary() -> None:
         normalized=_msg("/sales_state"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -451,7 +437,6 @@ async def test_sales_state_with_customer_arg_filters_chat() -> None:
         normalized=_msg("/sales_state @customer"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -476,7 +461,6 @@ async def test_sales_state_unknown_customer_returns_one_line_error() -> None:
         normalized=_msg("/sales_state @nobody"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -496,8 +480,7 @@ async def test_non_sales_command_returns_none() -> None:
             normalized=_msg("привет"),
             api_client=api,
             send_dm=sent,
-            primary_operator_username="@op",
-            admin_username="@admin",
+                admin_username="@admin",
             internal_token="bot-tok",
         )
         is None
@@ -522,7 +505,6 @@ async def test_service_add_generic_api_error_logs_and_dms() -> None:
         normalized=_msg("/service_add x"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -543,7 +525,6 @@ async def test_service_list_api_unreachable_logs_and_dms(
         normalized=_msg("/service_list"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -563,7 +544,6 @@ async def test_service_remove_generic_api_error_logs_and_dms() -> None:
         normalized=_msg("/service_remove 12"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -580,7 +560,6 @@ async def test_service_remove_api_unreachable_dms_error() -> None:
         normalized=_msg("/service_remove 12"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -597,7 +576,6 @@ async def test_sales_state_api_unreachable_dms_error() -> None:
         normalized=_msg("/sales_state"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -630,7 +608,6 @@ async def test_sales_state_unparseable_last_msg_keeps_raw_string() -> None:
         normalized=_msg("/sales_state"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -655,7 +632,6 @@ async def test_log_api_error_status_from_httpx_status_error(
         normalized=_msg("/service_add x"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -678,7 +654,6 @@ async def test_admin_without_operator_record_is_treated_as_unauthorized(
         normalized=_msg("/service_add x", username="@admin"),
         api_client=api,
         send_dm=sent,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

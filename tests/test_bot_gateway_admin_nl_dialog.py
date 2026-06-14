@@ -299,3 +299,44 @@ async def test_intent_keywords_cover_phrasings(fake_api, send_dm):
             admin_username="@admin",
         )
         send_dm.assert_awaited_once()
+
+
+def test_admin_nl_result_returned_via_webhook(tmp_path, monkeypatch):
+    """Exercises the ``admin_nl_result is not None`` branch in the webhook
+    dispatcher (lines 2637-2639 of bot_gateway/app/main.py)."""
+    from fastapi.testclient import TestClient
+
+    from services.bot_gateway.app import main as bot_main
+    from services.bot_gateway.app.main import app as bot_app
+    from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
+
+    monkeypatch.setattr(
+        bot_main,
+        "webhook_update_claim_repository",
+        WebhookUpdateClaimRepository(str(tmp_path / "dedup.sqlite3")),
+    )
+    monkeypatch.setattr(
+        bot_main.api_client,
+        "find_operator_by_username",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "handle_admin_nl_dialog",
+        AsyncMock(return_value={"status": "nl_proposed"}),
+    )
+
+    response = TestClient(bot_app).post(
+        "/telegram/webhook",
+        json={
+            "update_id": 88802,
+            "message": {
+                "message_id": 2,
+                "from": {"id": 1, "username": "ajdevy"},
+                "chat": {"id": 1, "type": "private"},
+                "text": "создай проект Тест",
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "nl_proposed"

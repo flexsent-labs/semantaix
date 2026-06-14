@@ -114,10 +114,12 @@ def test_pending_peek_swallows_network_error(monkeypatch):
 
 def test_operator_branch_runs_when_no_pending_edit(monkeypatch):
     """With peek explicitly mocked to None, the operator reply path runs."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@alice",
-        updated_by="@admin",
+    monkeypatch.setattr(
+        api_client,
+        "find_operator_by_username",
+        AsyncMock(
+            return_value={"username": "@alice", "chat_id": 1, "project_id": 1, "is_active": True}
+        ),
     )
     monkeypatch.setattr(
         api_client,

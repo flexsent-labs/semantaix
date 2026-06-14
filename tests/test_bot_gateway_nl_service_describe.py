@@ -91,7 +91,6 @@ async def test_describe_existing_service_soft_deletes_and_adds_with_new_descript
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -129,7 +128,6 @@ async def test_describe_nonexistent_service_dms_not_found_and_does_not_create() 
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -157,7 +155,6 @@ async def test_describe_missing_description_dms_usage_and_does_nothing() -> None
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

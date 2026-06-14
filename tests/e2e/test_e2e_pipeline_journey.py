@@ -216,6 +216,13 @@ def test_e2e_full_hitl_journey_via_bot_gateway(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
 
+    async def _find_operator(*, username: str):
+        if username == "@operator":
+            return {"username": "@operator", "chat_id": 1, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(bot_api_client, "find_operator_by_username", _find_operator)
+
     api_client = TestClient(api_app)
 
     # 1. Customer sends a free-form question through bot_gateway webhook

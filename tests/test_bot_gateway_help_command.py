@@ -10,12 +10,7 @@ from services.bot_gateway.app.main import app as bot_app
 
 
 class _StubHitlRepo:
-    def __init__(self, runtime_override: str | None = None) -> None:
-        self._runtime_override = runtime_override
-
     def get_runtime_config(self, key: str):
-        if key == "hitl_primary_operator_username":
-            return self._runtime_override
         return None
 
     def set_runtime_config(self, **kwargs):
@@ -30,8 +25,13 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main.settings, "persistence_db_path", str(tmp_path / "story.db"))
     monkeypatch.setattr(bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db"))
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(bot_main.settings, "hitl_primary_operator_username", "@ajdevy")
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
+    async def _default_lookup(*, username: str):
+        if username == "@ajdevy":
+            return {"username": "@ajdevy", "chat_id": 100, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(bot_main.api_client, "find_operator_by_username", _default_lookup)
 
     sent_dms: list[tuple[int, str]] = []
 
@@ -123,8 +123,15 @@ def test_help_from_non_operator_falls_through_to_forward(isolated_bot, monkeypat
     assert forwarded[0]["customer_username"] == "@customer"
 
 
-def test_help_respects_runtime_operator_override(isolated_bot, monkeypatch):
-    monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo("@runtime_op"))
+def test_help_requires_registry_operator(isolated_bot, monkeypatch):
+    """Only a sender registered in the operators registry gets the help DM;
+    an unregistered sender's /help is forwarded to the customer pipeline."""
+    async def registry_op_lookup(*, username: str):
+        if username == "@runtime_op":
+            return {"username": "@runtime_op", "chat_id": 100, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(bot_main.api_client, "find_operator_by_username", registry_op_lookup)
 
     forwarded: list[dict] = []
 
@@ -136,17 +143,17 @@ def test_help_respects_runtime_operator_override(isolated_bot, monkeypatch):
 
     client = TestClient(bot_app)
 
-    settings_op_response = client.post(
+    non_op_response = client.post(
         "/telegram/webhook",
         json=_message(text="/help", username="ajdevy"),
     )
-    assert settings_op_response.json()["status"] == "accepted"
+    assert non_op_response.json()["status"] == "accepted"
     assert len(isolated_bot["dms"]) == 0
     assert len(forwarded) == 1
 
-    runtime_op_response = client.post(
+    registry_op_response = client.post(
         "/telegram/webhook",
         json=_message(text="/help", username="runtime_op"),
     )
-    assert runtime_op_response.json()["status"] == "help_sent"
+    assert registry_op_response.json()["status"] == "help_sent"
     assert len(isolated_bot["dms"]) == 1

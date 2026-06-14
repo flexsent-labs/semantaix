@@ -101,11 +101,6 @@ def test_operator_nl_command_redelivery_acts_once(_operator_env, monkeypatch):
     service-add side effect — exactly ONCE. The redelivery is dropped at the
     webhook entry claim with ``reason=duplicate_update`` before any handler.
     """
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
-    )
     monkeypatch.setattr(
         api_client,
         "find_operator_by_username",

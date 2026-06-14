@@ -120,7 +120,6 @@ async def test_non_trigger_message_returns_none(fake_api, send_dm):
         normalized=_msg("привет"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None
@@ -135,7 +134,6 @@ async def test_mid_message_trigger_does_not_match(fake_api, send_dm):
         normalized=_msg("пожалуйста добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None
@@ -147,7 +145,6 @@ async def test_quoted_reply_does_not_trigger(fake_api, send_dm):
         normalized=_msg("> добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None
@@ -162,7 +159,6 @@ async def test_trigger_from_unregistered_returns_unauthorized_no_dm(
         normalized=_msg("добавь услугу маникюр", username="@stranger"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result == {
@@ -180,7 +176,6 @@ async def test_propose_happy_path_sends_plain_preview(fake_api, send_dm):
         normalized=_msg("добавь услугу маникюр на 60 минут"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "ok"
@@ -213,7 +208,6 @@ async def test_propose_clarify_dms_only_preview(fake_api, send_dm):
         normalized=_msg("добавь услугу маникюр и педикюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["decision"] == "clarify"
@@ -243,7 +237,6 @@ async def test_propose_prior_cancelled_session_emits_two_dms_in_order(
         normalized=_msg("добавь услугу педикюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     texts = _send_dm_texts(send_dm)
@@ -262,7 +255,6 @@ async def test_propose_api_error_dms_russian_error(fake_api, send_dm):
         normalized=_msg("добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -279,7 +271,6 @@ async def test_propose_http_status_error_path(fake_api, send_dm):
         normalized=_msg("добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -300,7 +291,6 @@ async def test_propose_missing_token_dms_unavailable(fake_api, send_dm):
         normalized=_msg("добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -315,7 +305,6 @@ async def _seed_cached_pending(fake_api, send_dm) -> None:
         normalized=_msg("добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     send_dm.reset_mock()
@@ -328,7 +317,6 @@ async def test_da_word_routes_to_confirm(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["route"] == "services_nl_confirm"
@@ -347,7 +335,6 @@ async def test_da_with_no_cached_falls_through(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     # No cached → silent None so other handlers may take over.
@@ -365,7 +352,6 @@ async def test_confirm_slash_with_explicit_token(fake_api, send_dm):
         normalized=_msg(f"/confirm {valid_token}"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["route"] == "services_nl_confirm"
@@ -383,7 +369,6 @@ async def test_confirm_slash_invalid_token_regex_falls_through(fake_api, send_dm
         normalized=_msg("/confirm short"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None
@@ -400,7 +385,6 @@ async def test_confirm_slash_no_token_uses_latest(fake_api, send_dm):
         normalized=_msg("/confirm"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     # Without an explicit token AND no cached entry, falls to "no_pending".
@@ -415,7 +399,6 @@ async def test_confirm_slash_explicit_token_latest_404(fake_api, send_dm):
         normalized=_msg(f"/confirm {valid_token}"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["decision"] == "no_pending"
@@ -432,7 +415,6 @@ async def test_confirm_slash_explicit_token_latest_http_error(fake_api, send_dm)
         normalized=_msg(f"/confirm {valid_token}"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -449,7 +431,6 @@ async def test_confirm_401_invalid_token(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -466,7 +447,6 @@ async def test_confirm_403_not_session_owner(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -483,7 +463,6 @@ async def test_confirm_403_admin_cannot_remove_service(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -500,7 +479,6 @@ async def test_confirm_410_session_expired(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -517,7 +495,6 @@ async def test_confirm_410_session_not_pending(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -532,7 +509,6 @@ async def test_confirm_http_status_error_path(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -549,7 +525,6 @@ async def test_confirm_unmapped_detail_falls_to_generic(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -566,7 +541,6 @@ async def test_net_word_cancels(fake_api, send_dm):
         normalized=_msg("нет"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result == {"status": "ok", "route": "services_nl_cancel"}
@@ -580,7 +554,6 @@ async def test_net_word_no_cached_falls_through(fake_api, send_dm):
         normalized=_msg("нет"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None
@@ -596,7 +569,6 @@ async def test_cancel_slash_uses_latest_when_no_cache(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "ok"
@@ -611,7 +583,6 @@ async def test_cancel_slash_no_latest_dms_no_pending(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["decision"] == "no_pending"
@@ -626,7 +597,6 @@ async def test_cancel_slash_latest_lookup_error(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -642,7 +612,6 @@ async def test_cancel_api_error_path(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -657,7 +626,6 @@ async def test_cancel_http_status_error_path(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["status"] == "error"
@@ -674,7 +642,6 @@ async def test_cancel_unmapped_detail_falls_to_generic(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert "Не удалось отменить" in send_dm.await_args.args[1]
@@ -690,7 +657,6 @@ async def test_cancel_403_not_session_owner(fake_api, send_dm):
         normalized=_msg("/cancel"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert "не принадлежит" in send_dm.await_args.args[1]
@@ -706,7 +672,6 @@ async def test_every_dm_call_has_no_parse_mode_kwarg(fake_api, send_dm):
         normalized=_msg("да"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     for kwargs in _send_dm_kwargs(send_dm):
@@ -752,7 +717,6 @@ async def test_trigger_keywords_route_to_propose(fake_api, send_dm, phrase):
         normalized=_msg(phrase),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     # Defense-in-depth: the bot trigger regex accepts the same inflection
@@ -769,7 +733,6 @@ async def test_yo_normalized_trigger_matches(fake_api, send_dm):
         normalized=_msg("добавь Услугу ёлка"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is not None
@@ -789,7 +752,6 @@ async def test_inactive_operator_unauthorized(fake_api, send_dm):
         normalized=_msg("добавь услугу маникюр"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result["reason"] == "unauthorized_services"
@@ -798,8 +760,8 @@ async def test_inactive_operator_unauthorized(fake_api, send_dm):
 
 @pytest.mark.asyncio
 async def test_primary_fallback_without_project_is_unauthorized(fake_api, send_dm):
-    # find_operator_by_username raises HTTP 5xx → resolver returns
-    # primary_fallback with project_id=None → still unauthorized for NL ops.
+    # find_operator_by_username raises HTTP 5xx → resolver returns None
+    # (fail-closed) → trigger present → unauthorized.
     fake_api.find_operator_by_username = AsyncMock(
         side_effect=httpx.HTTPStatusError(
             "err",
@@ -811,11 +773,8 @@ async def test_primary_fallback_without_project_is_unauthorized(fake_api, send_d
         normalized=_msg("добавь услугу маникюр", username="@primary"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
-    # Resolver returns ResolvedOperator(source="primary_fallback",
-    # project_id=None); NL ops require a project_id so we treat as unauthorized.
     assert result["reason"] == "unauthorized_services"
     send_dm.assert_not_awaited()
 
@@ -827,7 +786,6 @@ async def test_empty_text_short_circuits(fake_api, send_dm):
         normalized=_msg(""),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None
@@ -845,7 +803,6 @@ async def test_confirm_word_from_non_operator_returns_none(fake_api, send_dm):
         normalized=_msg("да", username="@customer"),
         api_client=fake_api,
         send_dm=send_dm,
-        primary_operator_username="@primary",
         internal_token="t",
     )
     assert result is None

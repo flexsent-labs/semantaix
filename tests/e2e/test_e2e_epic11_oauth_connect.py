@@ -199,7 +199,7 @@ def test_epic11_operator_connect_calendar_webhook_dms_consent_url(
         resp.raise_for_status()
         return resp.json()
 
-    async def fake_resolve(*, username, api_client, primary_operator_username):
+    async def fake_resolve(*, username, api_client):
         from services.bot_gateway.app.operator_resolver import ResolvedOperator
 
         return ResolvedOperator(

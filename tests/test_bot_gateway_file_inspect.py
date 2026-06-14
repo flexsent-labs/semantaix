@@ -18,8 +18,14 @@ def isolated_inspect_bot(
     monkeypatch.setattr(bot_main.settings, "persistence_db_path", str(tmp_path / "story.db"))
     monkeypatch.setattr(bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db"))
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(bot_main.settings, "hitl_primary_operator_username", "@alice")
     monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@ajdevy")
+
+    async def _op_lookup(*, username: str):
+        if username == "@alice":
+            return {"username": "@alice", "chat_id": 100, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(bot_main.api_client, "find_operator_by_username", _op_lookup)
 
     class _StubHitlRepo:
         def get_runtime_config(self, key: str) -> str | None:

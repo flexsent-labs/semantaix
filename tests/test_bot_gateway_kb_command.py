@@ -23,8 +23,14 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main.settings, "operator_upload_storage_dir", str(tmp_path / "uploads"))
     monkeypatch.setattr(bot_main.settings, "operator_upload_max_bytes", 1024)
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(bot_main.settings, "hitl_primary_operator_username", "@ajdevy")
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
+
+    async def _op_lookup(*, username: str):
+        if username == "@ajdevy":
+            return {"username": "@ajdevy", "chat_id": 100, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(bot_main.api_client, "find_operator_by_username", _op_lookup)
     fresh_kb_repo = OperatorKbSessionRepository(str(tmp_path / "hitl.db"))
     monkeypatch.setattr(bot_main, "kb_session_repository", fresh_kb_repo)
     fresh_files_repo = OperatorFileRepository(
@@ -662,7 +668,7 @@ def test_kb_command_no_intent_returns_none(isolated_bot, monkeypatch):
         username="@ajdevy",
         text="привет, как дела?",
     )
-    result = asyncio.run(_handle_kb_command(msg, bg))
+    result = asyncio.run(_handle_kb_command(msg, bg, is_operator=True))
     assert result is None
 
 
@@ -689,7 +695,7 @@ def test_kb_inline_intent_empty_cleaned_text_opens_session(isolated_bot, monkeyp
         text="/kb_add",
         caption=None,
     )
-    result = asyncio.run(_handle_kb_command(msg, bg))
+    result = asyncio.run(_handle_kb_command(msg, bg, is_operator=True))
     assert result is not None
     assert result["status"] == "accepted"
     assert result["kb_mode"] == "session_opened"

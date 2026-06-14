@@ -15,6 +15,7 @@ appears. When neither does, the ack stays bare.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -54,7 +55,13 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main.settings, "operator_upload_max_bytes", 1024)
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
     monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@ajdevy"
+        bot_main.api_client,
+        "find_operator_by_username",
+        AsyncMock(
+            return_value={
+                "username": "@ajdevy", "chat_id": 100, "project_id": 7, "is_active": True
+            }
+        ),
     )
     monkeypatch.setattr(
         bot_main.settings, "internal_service_token", "bot-token-x"

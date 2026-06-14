@@ -121,7 +121,6 @@ async def test_admin_with_no_project_mapping_falls_through(
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -156,7 +155,6 @@ async def test_admin_with_resolved_project_runs_classifier() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -183,7 +181,6 @@ async def test_add_duplicate_dms_one_line_and_does_not_log_api_error(
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -207,7 +204,6 @@ async def test_add_other_api_error_dms_generic_unavailable(
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -233,7 +229,6 @@ async def test_add_http_status_error_logs_status() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -252,7 +247,6 @@ async def test_add_request_error_dms_unavailable() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -274,7 +268,6 @@ async def test_list_api_error_dms_unavailable() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -296,7 +289,6 @@ async def test_remove_list_call_fails_dms_unavailable() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -324,7 +316,6 @@ async def test_remove_api_returns_not_found_after_lookup() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -349,7 +340,6 @@ async def test_remove_delete_api_error_other_detail_dms_unavailable() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -374,7 +364,6 @@ async def test_remove_delete_request_error_dms_unavailable() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -396,7 +385,6 @@ async def test_add_api_error_includes_detail_in_result() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -420,7 +408,6 @@ async def test_describe_list_call_fails_dms_unavailable() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -446,7 +433,6 @@ async def test_describe_delete_step_fails_aborts_before_add() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -471,7 +457,6 @@ async def test_describe_add_step_fails_after_delete() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

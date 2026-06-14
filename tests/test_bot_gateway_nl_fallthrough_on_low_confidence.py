@@ -67,7 +67,6 @@ async def test_action_null_returns_none_and_does_not_dm_or_call_api() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -88,7 +87,6 @@ async def test_empty_text_returns_none_without_llm_call() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -108,7 +106,6 @@ async def test_schema_violation_falls_through_silently() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

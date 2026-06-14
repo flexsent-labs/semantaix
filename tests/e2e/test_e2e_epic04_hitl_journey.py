@@ -16,6 +16,9 @@ from services.api.app.main import (
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
+from services.bot_gateway.app.main import (
+    api_client as bot_api_client,
+)
 from services.bot_gateway.app.main import app as bot_app
 from services.bot_gateway.app.main import (
     hitl_ticket_repository as bot_hitl_repo,
@@ -178,8 +181,21 @@ def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
 
 @pytest.mark.story("04-runtime-config")
 def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch):
+    # /hitl_config now registers the operator via the operators registry (not
+    # via runtime_config DB writes) and sets telegram_alert_chat_id.
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    # Admin is not in the operators registry — that's expected.
+    monkeypatch.setattr(
+        bot_api_client, "find_operator_by_username", AsyncMock(return_value=None)
+    )
+    attach_calls: list[dict] = []
+
+    async def fake_attach(*, username, project_id, chat_id=None, display_name=None):
+        attach_calls.append({"username": username, "project_id": project_id, "chat_id": chat_id})
+        return {}
+
+    monkeypatch.setattr(bot_api_client, "attach_operator", fake_attach)
 
     bot_client = TestClient(bot_app)
     config_response = bot_client.post(
@@ -195,12 +211,7 @@ def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch)
         },
     )
     assert config_response.json()["status"] == "configured"
-
-    api_client = TestClient(api_app)
-    inbound = api_client.post(
-        "/conversations/inbound", json={"text": "Need help."}
-    ).json()
-    assert inbound["hitl_operator_username"] == "@runtime_op"
-
-    tickets = api_client.get("/hitl/tickets").json()["items"]
-    assert tickets[0]["operator_username"] == "@runtime_op"
+    # The operator was registered via the API.
+    assert attach_calls == [{"username": "@runtime_op", "project_id": 1, "chat_id": 999}]
+    # The alert chat ID is stored for outbound DMs to the operator.
+    assert bot_hitl_repo.get_runtime_config("telegram_alert_chat_id") == "999"

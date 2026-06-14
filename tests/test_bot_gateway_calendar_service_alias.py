@@ -46,9 +46,6 @@ def isolated_bot(tmp_path, monkeypatch):
         bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db")
     )
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@primary_op"
-    )
     monkeypatch.setattr(bot_main.settings, "internal_service_token", "svc-token")
     monkeypatch.setattr(
         bot_main.settings, "nl_ops_db_path", str(tmp_path / "nl_ops.db")
@@ -237,9 +234,6 @@ def test_alias_skips_hint_when_db_path_not_provided(monkeypatch, tmp_path):
         bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db")
     )
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@primary_op"
-    )
     monkeypatch.setattr(bot_main.settings, "internal_service_token", "svc-token")
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
 
@@ -275,7 +269,6 @@ def test_alias_skips_hint_when_db_path_not_provided(monkeypatch, tmp_path):
             normalized=normalized,
             api_client=bot_main.api_client,
             send_dm=fake_send_dm_direct,
-            primary_operator_username="@primary_op",
             internal_token="svc-token",
             nl_ops_db_path=None,
         )

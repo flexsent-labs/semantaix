@@ -77,10 +77,12 @@ def test_migration_leaves_default_operator_seeded(tmp_path):
 
     _, real_op = _run_bootstrap(hitl_db, operators_db, projects_db)
 
-    from platform_common.settings import get_settings
+    import services.api.app.main as mod
 
-    settings = get_settings()
-    operator = real_op.find_by_username(settings.hitl_primary_operator_username)
+    # Use mod.settings (the same instance _bootstrap_default_entities reads)
+    # rather than get_settings() which may be a different instance after cache
+    # clears in other tests.
+    operator = real_op.find_by_username(mod.settings.hitl_primary_operator_username)
     assert operator is not None
     assert operator.is_active
 
