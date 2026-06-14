@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -211,8 +213,12 @@ def test_operator_message_bypasses_rate_limit(monkeypatch):
     monkeypatch.setattr(settings, "inbound_rate_limit_messages", 0)
     monkeypatch.setattr(settings, "inbound_rate_limit_window_seconds", 300)
 
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username", value="@operator", updated_by="@test"
+    # Register @operator so resolve_operator_for_sender identifies this sender.
+    monkeypatch.setattr(
+        api_client,
+        "find_operator_by_username",
+        AsyncMock(return_value={"username": "@operator", "chat_id": 1, "project_id": 1,
+                               "is_active": True}),
     )
 
     # Operator reply needs an open ticket — stub the fallback lookup

@@ -41,7 +41,6 @@ def files_env(
     monkeypatch.setattr(api_main.settings, "knowledge_db_path", str(knowledge_db))
     monkeypatch.setattr(api_main.settings, "web_auth_db_path", str(web_auth_db))
     monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@ajdevy")
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_username", "@alice")
     monkeypatch.setattr(api_main.settings, "web_session_cookie_secure", False)
     monkeypatch.setattr(api_main.settings, "internal_service_token", "test-bot-token")
     monkeypatch.setattr(api_main, "web_auth_repository", web_auth_repo)

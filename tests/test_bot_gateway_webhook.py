@@ -179,7 +179,7 @@ def test_admin_can_configure_hitl_contact_via_command(tmp_path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "configured"
-    assert data["hitl_primary_operator_username"] == "@flexsentlabs"
+    assert data["operator_username"] == "@flexsentlabs"
     assert data["telegram_alert_chat_id"] == "650934815"
     assert (
         hitl_ticket_repository.get_runtime_config("telegram_alert_chat_id")

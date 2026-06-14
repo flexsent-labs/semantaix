@@ -391,7 +391,6 @@ def _resolve_calendar_operator_chat_id(operator: str) -> int | None:
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
 admin_auth_service = AdminAuthService(
     web_auth_repository=web_auth_repository,
-    hitl_repository=hitl_ticket_repository,
     telegram_bot_sender=telegram_bot_sender,
     settings=settings,
 )
@@ -428,17 +427,17 @@ def _bootstrap_default_entities() -> None:
     rebinding repository db paths.
     """
     default_project = project_repository.ensure_default_project()
-    primary_chat_id_raw = settings.hitl_primary_operator_chat_id
-    primary_chat_id = None
-    if primary_chat_id_raw is not None:
+    alert_chat_id: int | None = None
+    alert_chat_id_raw = settings.telegram_alert_chat_id
+    if alert_chat_id_raw is not None:
         try:
-            primary_chat_id = int(primary_chat_id_raw)
+            alert_chat_id = int(alert_chat_id_raw)
         except (TypeError, ValueError):
-            primary_chat_id = None
+            alert_chat_id = None
     operator_repository.ensure_default_operator(
-        username=settings.hitl_primary_operator_username,
+        username=settings.telegram_alert_username,
         project_id=default_project.id,
-        chat_id=primary_chat_id,
+        chat_id=alert_chat_id,
     )
     # Story 10.5-01 — migrate away from the primary-operator runtime-config
     # indirection. The operators table is now authoritative; these two keys
@@ -1657,17 +1656,18 @@ def _validate_persona_name(value: str) -> str:
 
 
 def _effective_hitl_operator_username() -> str:
-    return (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
-        or settings.hitl_primary_operator_username
-    )
+    operators = operator_repository.list_active()
+    return operators[0].username if operators else ""
 
 
 def _effective_hitl_operator_chat_id() -> str | None:
-    return (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_chat_id")
-        or settings.hitl_primary_operator_chat_id
-    )
+    raw = hitl_ticket_repository.get_runtime_config("telegram_alert_chat_id")
+    if raw is not None:
+        return raw
+    operators = operator_repository.list_active()
+    if operators and operators[0].chat_id is not None:
+        return str(operators[0].chat_id)
+    return None
 
 
 def _effective_inbound_ack_message(project_id: int | None = None) -> str:
@@ -3599,10 +3599,7 @@ async def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
 
 @app.post("/hitl/runtime-config/persona")
 async def update_bot_persona(request: BotPersonaRequest) -> dict[str, object]:
-    effective_operator = (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
-        or settings.hitl_primary_operator_username
-    )
+    effective_operator = _effective_hitl_operator_username()
     if request.updated_by != effective_operator:
         raise HTTPException(status_code=403, detail="not_authorized")
 
@@ -4927,7 +4924,7 @@ async def calendar_oauth_callback(
     if record is not None and record.chat_id is not None:
         operator_chat_id = record.chat_id
     else:
-        fallback = settings.hitl_primary_operator_chat_id
+        fallback = _effective_hitl_operator_chat_id()
         if fallback:
             try:
                 operator_chat_id = int(fallback)

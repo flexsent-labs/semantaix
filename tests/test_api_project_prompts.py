@@ -41,7 +41,7 @@ def env(tmp_path, monkeypatch):
         api_main.settings, "hitl_config_admin_username", "@admin"
     )
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@alice"
+        api_main.settings, "operators_db_path", str(tmp_path / "operators.sqlite3")
     )
     monkeypatch.setattr(
         api_main.settings, "internal_service_token", "test-bot-token"

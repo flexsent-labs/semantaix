@@ -61,7 +61,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     monkeypatch.setattr(api_main.settings, "internal_service_token", _INTERNAL_TOKEN)
     # FR-18 R2: fallback chat_id so the connect-confirmation DM is delivered
     # even though this e2e doesn't seed an operator_repository row.
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", "999")
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "999")
     monkeypatch.setattr(api_main, "calendar_settings_repository", settings_repo)
     monkeypatch.setattr(api_main, "calendar_oauth_state_repository", state_repo)
     monkeypatch.setattr(api_main, "calendar_token_repository", token_repo)

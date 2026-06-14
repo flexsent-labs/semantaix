@@ -81,8 +81,8 @@ def test_migration_leaves_default_operator_seeded(tmp_path):
 
     # Use mod.settings (the same instance _bootstrap_default_entities reads)
     # rather than get_settings() which may be a different instance after cache
-    # clears in other tests.
-    operator = real_op.find_by_username(mod.settings.hitl_primary_operator_username)
+    # clears in other tests. Bootstrap now seeds from telegram_alert_username.
+    operator = real_op.find_by_username(mod.settings.telegram_alert_username)
     assert operator is not None
     assert operator.is_active
 

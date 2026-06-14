@@ -300,7 +300,7 @@ async def _handle_admin_hitl_command(
     )
     return {
         "status": "configured",
-        "hitl_primary_operator_username": operator_username,
+        "operator_username": operator_username,
         "telegram_alert_chat_id": chat_id,
     }
 

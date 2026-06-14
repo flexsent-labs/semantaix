@@ -67,7 +67,7 @@ def _wire(tmp_path, monkeypatch):
     monkeypatch.setattr(
         settings, "persistence_db_path", str(tmp_path / "persistence.sqlite3")
     )
-    monkeypatch.setattr(settings, "hitl_primary_operator_username", "@operator")
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: "@operator")
 
 
 def _post_inbound(client, **kwargs):

@@ -16,11 +16,8 @@ from services.api.app.main import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_runtime_config(tmp_path, monkeypatch):
+def _isolated_runtime_config(tmp_path):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    # Other test files (test_api_hitl_contract, test_api_conversations_inbound)
-    # mutate this global; pin it for this file so the authz contract is stable.
-    monkeypatch.setattr(settings, "hitl_primary_operator_username", "@ajdevy")
     yield
 
 
@@ -200,15 +197,11 @@ def test_persona_endpoint_rejects_unauthorized_caller(monkeypatch):
     assert response.json()["detail"] == "not_authorized"
 
 
-def test_persona_endpoint_accepts_runtime_configured_operator(monkeypatch):
-    """When /hitl_config has moved the operator to @support_b, the persona
-    endpoint must accept calls signed as @support_b (and only @support_b)."""
+def test_persona_endpoint_accepts_effective_operator(monkeypatch):
+    """Endpoint accepts any caller that matches the current effective operator."""
+    import services.api.app.main as api_main
     _patch_identity_calls(monkeypatch)
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@support_b",
-        updated_by="@ajdevy",
-    )
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: "@support_b")
     client = TestClient(api_app)
     response = client.post(
         "/hitl/runtime-config/persona",
@@ -221,22 +214,18 @@ def test_persona_endpoint_accepts_runtime_configured_operator(monkeypatch):
     assert response.status_code == 200
 
 
-def test_persona_endpoint_rejects_default_operator_when_overridden(monkeypatch):
-    """Symmetric guard: once the runtime operator is @support_b, the original
-    default @ajdevy is no longer authorized."""
+def test_persona_endpoint_rejects_caller_not_admin_or_effective_operator(monkeypatch):
+    """Caller that is neither admin nor the effective operator is rejected."""
+    import services.api.app.main as api_main
     _patch_identity_calls(monkeypatch)
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@support_b",
-        updated_by="@ajdevy",
-    )
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: "@support_b")
     client = TestClient(api_app)
     response = client.post(
         "/hitl/runtime-config/persona",
         json={
             "first_name": "Анна",
             "last_name": "Иванова",
-            "updated_by": settings.hitl_primary_operator_username,
+            "updated_by": "@someone_random",
         },
     )
     assert response.status_code == 403

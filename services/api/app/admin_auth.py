@@ -262,12 +262,10 @@ class AdminAuthService:
         self,
         *,
         web_auth_repository: WebAuthRepository,
-        hitl_repository,
         telegram_bot_sender,
         settings,
     ) -> None:
         self.web_auth_repository = web_auth_repository
-        self.hitl_repository = hitl_repository
         self.telegram_bot_sender = telegram_bot_sender
         self.settings = settings
 
@@ -275,16 +273,13 @@ class AdminAuthService:
         return resolve_chat_id_for_username(
             username=username,
             operator_files_db_path=self.settings.operator_files_db_path,
-            hitl_repository=self.hitl_repository,
-            primary_operator_username=self.settings.hitl_primary_operator_username,
+            operators_db_path=self.settings.operators_db_path,
         )
 
     def resolve_role(self, username: str) -> str | None:
         if username == self.settings.hitl_config_admin_username:
             return "admin"
-        if username == self.settings.hitl_primary_operator_username:
-            return "operator"
-        # Anyone with at least one operator_files row counts as operator.
+        # Anyone with a known chat_id (operator_files or operators table) is an operator.
         if self._resolve_chat_id(username) is not None:
             return "operator"
         return None

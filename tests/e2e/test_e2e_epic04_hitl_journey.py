@@ -12,7 +12,6 @@ from services.api.app.main import (
     hitl_ticket_repository,
     incident_repository,
     rag_repository,
-    settings,
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
@@ -28,6 +27,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.epic("04")]
 
 
 def _wire(tmp_path, monkeypatch, *, primary_operator: str = "@ajdevy"):
+    import services.api.app.main as _api_main
     hitl_path = str(tmp_path / "hitl.sqlite3")
     hitl_ticket_repository.db_path = hitl_path
     bot_hitl_repo.db_path = hitl_path
@@ -35,7 +35,7 @@ def _wire(tmp_path, monkeypatch, *, primary_operator: str = "@ajdevy"):
     incident_repository.dedup_window_seconds = 300
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     answer_trace_repository.db_path = str(tmp_path / "answer_traces.sqlite3")
-    monkeypatch.setattr(settings, "hitl_primary_operator_username", primary_operator)
+    monkeypatch.setattr(_api_main, "_effective_hitl_operator_username", lambda: primary_operator)
     monkeypatch.setattr(
         answer_pipeline, "run", AsyncMock(return_value=AnswerResult(handled=False))
     )

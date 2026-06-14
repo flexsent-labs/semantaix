@@ -44,9 +44,6 @@ def isolated_bot(tmp_path, monkeypatch):
         bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db")
     )
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@primary_op"
-    )
     monkeypatch.setattr(bot_main.settings, "internal_service_token", "svc-token")
     monkeypatch.setattr(bot_main.settings, "admin_telegram_username", _ADMIN)
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())

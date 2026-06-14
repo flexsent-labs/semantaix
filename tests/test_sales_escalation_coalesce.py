@@ -115,16 +115,8 @@ def wired(tmp_path, monkeypatch) -> AsyncMock:
     monkeypatch.setattr(
         api_main.telegram_bot_sender, "send_message", send_mock
     )
-    monkeypatch.setattr(
-        api_main.settings,
-        "hitl_primary_operator_username",
-        _OPERATOR_USERNAME,
-    )
-    monkeypatch.setattr(
-        api_main.settings,
-        "hitl_primary_operator_chat_id",
-        _OPERATOR_CHAT_ID,
-    )
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: _OPERATOR_USERNAME)
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: _OPERATOR_CHAT_ID)
     return send_mock
 
 

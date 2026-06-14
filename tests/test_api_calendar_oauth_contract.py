@@ -476,7 +476,7 @@ def test_callback_success_skips_dm_when_already_connected(env, monkeypatch, capl
 
 
 def test_callback_success_skips_dm_when_no_chat_id(env, monkeypatch, caplog):
-    """Operator NOT in registry AND no hitl_primary_operator_chat_id fallback
+    """Operator NOT in registry AND effective operator chat_id returns None
     → send_message is NOT called; calendar_connect_dm_no_chat_id is logged;
     HTML success is still 200; token row IS saved."""
     _stub_exchange(monkeypatch, refresh_token="refresh-secret")
@@ -487,7 +487,7 @@ def test_callback_success_skips_dm_when_no_chat_id(env, monkeypatch, caplog):
         "find_by_username",
         Mock(return_value=None),
     )
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", None)
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: None)
 
     send_message = AsyncMock()
     monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
@@ -549,8 +549,8 @@ def test_callback_success_swallows_dm_send_failure(env, monkeypatch, caplog, exc
 def test_callback_success_uses_fallback_chat_id_when_operator_not_in_registry(
     env, monkeypatch
 ):
-    """find_by_username returns None → fall back to
-    settings.hitl_primary_operator_chat_id (string env value parsed as int)."""
+    """find_by_username returns None → fall back to _effective_hitl_operator_chat_id
+    (string value parsed as int)."""
     _stub_exchange(monkeypatch, refresh_token="refresh-secret")
     state = _mint_state(env)
 
@@ -559,7 +559,7 @@ def test_callback_success_uses_fallback_chat_id_when_operator_not_in_registry(
         "find_by_username",
         Mock(return_value=None),
     )
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", "4242")
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "4242")
 
     send_message = AsyncMock()
     monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
@@ -575,7 +575,7 @@ def test_callback_success_uses_fallback_chat_id_when_operator_not_in_registry(
 def test_callback_success_swallows_operator_lookup_failure(env, monkeypatch, caplog):
     """If operator_repository.find_by_username raises, we treat it as
     "no record" and fall through to the fallback (or skip DM) — never
-    propagate. With no fallback set, the no_chat_id log fires; HTML success
+    propagate. With no fallback available, the no_chat_id log fires; HTML success
     still 200; token saved."""
     _stub_exchange(monkeypatch, refresh_token="refresh-secret")
     state = _mint_state(env)
@@ -585,7 +585,7 @@ def test_callback_success_swallows_operator_lookup_failure(env, monkeypatch, cap
         "find_by_username",
         Mock(side_effect=RuntimeError("registry down")),
     )
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", None)
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: None)
 
     send_message = AsyncMock()
     monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
@@ -617,7 +617,7 @@ def test_callback_success_skips_dm_when_fallback_chat_id_is_unparseable(
         Mock(return_value=None),
     )
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_chat_id", "not-an-int"
+        api_main, "_effective_hitl_operator_chat_id", lambda: "not-an-int"
     )
 
     send_message = AsyncMock()

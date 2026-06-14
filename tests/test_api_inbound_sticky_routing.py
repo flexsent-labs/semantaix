@@ -16,12 +16,10 @@ def stack(tmp_path, monkeypatch):
     operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
     hitl = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
     default = projects.ensure_default_project()
+    operators.create(username="@primary", project_id=default.id)
     monkeypatch.setattr(api_main, "project_repository", projects)
     monkeypatch.setattr(api_main, "operator_repository", operators)
     monkeypatch.setattr(api_main, "hitl_ticket_repository", hitl)
-    monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@primary"
-    )
     return {
         "projects": projects,
         "operators": operators,

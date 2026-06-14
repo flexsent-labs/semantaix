@@ -17,9 +17,9 @@ def test_bootstrap_creates_default_project_and_primary_operator(tmp_path, monkey
     """Calling `_bootstrap_default_entities` on a fresh stack lands the rows."""
     projects, operators = _swap_singletons(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@bootstrap_op"
+        api_main.settings, "telegram_alert_username", "@bootstrap_op"
     )
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", "42")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", "42")
     api_main._bootstrap_default_entities()
 
     default = projects.get_by_slug("default")
@@ -39,9 +39,9 @@ def test_bootstrap_creates_default_project_and_primary_operator(tmp_path, monkey
 def test_bootstrap_handles_missing_primary_chat_id(tmp_path, monkeypatch):
     _, operators = _swap_singletons(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@no_chat"
+        api_main.settings, "telegram_alert_username", "@no_chat"
     )
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", None)
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
     api_main._bootstrap_default_entities()
     operator = operators.find_by_username("@no_chat")
     assert operator is not None
@@ -51,10 +51,10 @@ def test_bootstrap_handles_missing_primary_chat_id(tmp_path, monkeypatch):
 def test_bootstrap_ignores_non_numeric_chat_id(tmp_path, monkeypatch):
     _, operators = _swap_singletons(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@junk_chat"
+        api_main.settings, "telegram_alert_username", "@junk_chat"
     )
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_chat_id", "not-a-number"
+        api_main.settings, "telegram_alert_chat_id", "not-a-number"
     )
     api_main._bootstrap_default_entities()
     operator = operators.find_by_username("@junk_chat")
@@ -63,18 +63,18 @@ def test_bootstrap_ignores_non_numeric_chat_id(tmp_path, monkeypatch):
 
 
 def test_api_app_has_bootstrapped_default_project_on_import(tmp_path, monkeypatch):
-    """Default project + primary operator row exist after a fresh bootstrap.
+    """Default project + alert operator row exist after a fresh bootstrap.
 
-    Other tests in the suite mutate `settings.hitl_primary_operator_username`
-    via direct assignment (no monkeypatch teardown), which would otherwise
-    cause this assertion to flap depending on test order. The swap below
-    isolates the bootstrap against a fresh DB to keep the assertion stable.
+    Bootstrap now seeds from telegram_alert_username so the operators table
+    is always populated on a fresh deployment without any settings duplication.
+    The swap below isolates the bootstrap against a fresh DB to keep the
+    assertion stable across test order.
     """
     projects, operators = _swap_singletons(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@import_op"
+        api_main.settings, "telegram_alert_username", "@import_op"
     )
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", None)
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
     api_main._bootstrap_default_entities()
     default = projects.get_by_slug("default")
     assert default is not None
