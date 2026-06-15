@@ -46,7 +46,7 @@ PYTHONPATH="${ROOT_DIR}" "${ROOT_DIR}/.venv/bin/uvicorn" \
   services.api.app.main:app --port 8009 >/tmp/epic09-api.log 2>&1 &
 API_PID=$!
 trap 'kill "${API_PID}" >/dev/null 2>&1 || true' EXIT
-sleep 2
+until curl -s http://127.0.0.1:8009/health/live >/dev/null 2>&1; do sleep 1; done
 
 PUBLIC_FILE="${UPLOAD_DIR}/public.txt"
 cat <<EOF >"${PUBLIC_FILE}"
