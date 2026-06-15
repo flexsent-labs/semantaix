@@ -185,7 +185,6 @@ async def _run(api: FakeApi, sent: _Sent, payload: dict, *, text: str):
         api_client=api,
         send_dm=sent,
         openrouter=_FakeOpenRouter(payload),
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

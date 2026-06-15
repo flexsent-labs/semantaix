@@ -51,6 +51,7 @@ from services.bot_gateway.app.operator_files import (
     OperatorFileRecord,
     OperatorFileRepository,
 )
+from services.bot_gateway.app.operator_resolver import resolve_operator_for_sender
 from services.bot_gateway.app.operator_service_nl import (
     handle_operator_service_nl_message,
 )
@@ -223,13 +224,6 @@ _HELP_TEXT = (
 )
 
 
-def _effective_operator_username() -> str:
-    return (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
-        or settings.hitl_primary_operator_username
-    )
-
-
 def _handle_admin_scoping_command(
     *, username: str | None, text: str
 ) -> dict[str, str] | None:
@@ -271,48 +265,43 @@ def _handle_admin_scoping_command(
     return {"status": "configured", "scope": target, "preset": preset_name}
 
 
-def _handle_admin_hitl_command(*, username: str | None, text: str) -> dict[str, str] | None:
+async def _handle_admin_hitl_command(
+    *, username: str | None, text: str
+) -> dict[str, str] | None:
     if not text.startswith("/hitl_config"):
         return None
-
     if username != settings.hitl_config_admin_username:
         return {"status": "ignored", "reason": "unauthorized_hitl_config"}
-
     parts = text.split()
     if len(parts) != 3:
         return {"status": "ignored", "reason": "invalid_hitl_config_format"}
-
     _, operator_username, chat_id = parts
     if not operator_username.startswith("@"):
         return {"status": "ignored", "reason": "invalid_operator_username"}
     if not chat_id.isdigit():
         return {"status": "ignored", "reason": "invalid_chat_id"}
-
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value=operator_username,
-        updated_by=username,
-    )
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_chat_id",
-        value=chat_id,
-        updated_by=username,
-    )
+    project_id = _project_repository.ensure_default_project().id
+    try:
+        await api_client.attach_operator(
+            username=operator_username,
+            project_id=project_id,
+            chat_id=int(chat_id),
+        )
+    except Exception as exc:
+        logger.warning(
+            "hitl_config_operator_upsert_failed",
+            extra={"operator_username": operator_username, "error": str(exc)},
+        )
+        return {"status": "error", "reason": "hitl_config_operator_upsert_failed"}
     hitl_ticket_repository.set_runtime_config(
         key="telegram_alert_chat_id",
         value=chat_id,
         updated_by=username,
     )
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_chat_id",
-        value=chat_id,
-        updated_by=username,
-    )
     return {
         "status": "configured",
-        "hitl_primary_operator_username": operator_username,
+        "operator_username": operator_username,
         "telegram_alert_chat_id": chat_id,
-        "hitl_primary_operator_chat_id": chat_id,
     }
 
 
@@ -383,7 +372,7 @@ async def _apply_persona(
 
 
 async def _handle_persona_command(
-    *, normalized: NormalizedTelegramMessage
+    *, normalized: NormalizedTelegramMessage, is_operator: bool
 ) -> dict[str, str] | None:
     username = normalized.username
     text = normalized.text
@@ -394,8 +383,7 @@ async def _handle_persona_command(
     if not is_persona_reply and trigger_match is None:
         return None
 
-    expected_operator = _effective_operator_username()
-    if username != expected_operator:
+    if not is_operator:
         # Visible self-diagnosing reply: the original silent "ignored" response
         # was the source of the "ничего не происходит" bug — the operator had
         # no way to tell whether the bot disagreed about who they were.
@@ -403,15 +391,15 @@ async def _handle_persona_command(
             chat_id=normalized.chat_id,
             text=(
                 "⚠️ Сменить имя бота может только назначенный оператор. "
-                f"Сейчас оператор — {expected_operator}. "
-                f"Ваш аккаунт — {username or '(без username)'}. "
-                "Попросите администратора назначить вас через /hitl_config."
+                f"Ваш аккаунт — {username or '(без username)'} — "
+                "не найден в реестре операторов. "
+                "Попросите администратора зарегистрировать вас через /hitl_config."
             ),
             purpose="persona_unauthorized_notice",
         )
         logger.warning(
             "persona_unauthorized",
-            extra={"username": username, "expected_operator": expected_operator},
+            extra={"username": username},
         )
         return {"status": "ignored", "reason": "unauthorized_persona"}
 
@@ -508,34 +496,31 @@ async def _handle_persona_command(
 
 
 async def _handle_help_command(
-    *, normalized: NormalizedTelegramMessage
+    *, normalized: NormalizedTelegramMessage, is_operator: bool
 ) -> dict[str, str] | None:
     if not _HELP_TRIGGER_RE.match(normalized.text or ""):
         return None
-    operator_username = _effective_operator_username()
-    if not normalized.username or normalized.username != operator_username:
+    if not is_operator:
         return None
     await _send_dm(normalized.chat_id, _HELP_TEXT)
     return {"status": "help_sent"}
 
 
 async def _handle_whoami_command(
-    *, normalized: NormalizedTelegramMessage
+    *, normalized: NormalizedTelegramMessage, is_operator: bool
 ) -> dict[str, str] | None:
-    """Diagnostic: tell any sender what @username the bot sees and which
-    operator it's configured to recognise. Intentionally open to all senders
+    """Diagnostic: tell any sender what @username the bot sees and whether
+    they are a registered operator. Intentionally open to all senders
     so that someone hitting a silent "unauthorized" can self-diagnose without
     server logs."""
     if not _WHOAMI_TRIGGER_RE.match(normalized.text or ""):
         return None
-    expected = _effective_operator_username()
     sender = normalized.username or "(без username)"
-    match_line = "✅ совпадает" if normalized.username == expected else "❌ не совпадает"
+    operator_line = "✅ зарегистрирован" if is_operator else "❌ не зарегистрирован"
     text = (
         f"🪪 username: {sender}\n"
-        f"🛡️ оператор: {expected}\n"
         f"📨 chat_id: {normalized.chat_id}\n"
-        f"{match_line}"
+        f"🛡️ оператор: {operator_line}"
     )
     await _safe_send_text(
         chat_id=normalized.chat_id, text=text, purpose="whoami_diagnostic"
@@ -544,9 +529,8 @@ async def _handle_whoami_command(
         "whoami_sent",
         extra={
             "username": normalized.username,
-            "expected_operator": expected,
             "chat_id": normalized.chat_id,
-            "match": normalized.username == expected,
+            "is_operator": is_operator,
         },
     )
     return {"status": "whoami_sent"}
@@ -1138,9 +1122,9 @@ async def _handle_kb_cancel(
 async def _handle_kb_command(
     normalized: NormalizedTelegramMessage,
     background_tasks: BackgroundTasks,
+    is_operator: bool,
 ) -> dict[str, str] | None:
-    operator_username = _effective_operator_username()
-    if not normalized.username or normalized.username != operator_username:
+    if not is_operator:
         return None
 
     cancel_result = await _handle_kb_cancel(normalized)
@@ -1216,6 +1200,7 @@ async def _handle_kb_session_continuation(
     *,
     normalized: NormalizedTelegramMessage,
     background_tasks: BackgroundTasks,
+    is_operator: bool,
 ) -> dict[str, str] | None:
     """Route an attachment-only operator message into the open KB session.
 
@@ -1228,9 +1213,7 @@ async def _handle_kb_session_continuation(
     """
     if not normalized.attachments:
         return None
-    if not normalized.username:
-        return None
-    if normalized.username != _effective_operator_username():
+    if not is_operator:
         return None
     session = kb_session_repository.get_active(
         chat_id=normalized.chat_id,
@@ -1286,6 +1269,7 @@ async def _handle_operator_media_group_orphan(
     *,
     normalized: NormalizedTelegramMessage,
     background_tasks: BackgroundTasks,
+    is_operator: bool,
 ) -> dict[str, str] | None:
     """Speculatively buffer a caption-less operator media-group sibling.
 
@@ -1301,7 +1285,7 @@ async def _handle_operator_media_group_orphan(
         return None
     if normalized.media_group_id is None:
         return None
-    if not normalized.username or normalized.username != _effective_operator_username():
+    if not is_operator:
         return None
     _buffer_attachments_for_media_group(
         normalized=normalized,
@@ -1482,15 +1466,13 @@ _FILES_DELETE_ALL_BULK_LIMIT = 10_000
 async def _handle_file_inspect_command(
     *,
     normalized: NormalizedTelegramMessage,
+    is_operator: bool,
 ) -> dict[str, str] | None:
     """Dispatch `/file <short_id>` and `/files_find <query>` for operator/admin.
 
     Returns None for non-matching commands or unauthorised senders so the
     normal routing continues.
     """
-    if not normalized.username:
-        return None
-    is_operator = normalized.username == _effective_operator_username()
     is_admin = normalized.username == settings.hitl_config_admin_username
     if not (is_operator or is_admin):
         return None
@@ -1510,6 +1492,7 @@ async def _handle_file_inspect_command(
 async def _handle_file_delete_command(
     *,
     normalized: NormalizedTelegramMessage,
+    is_operator: bool,
 ) -> dict[str, str] | None:
     """Dispatch `/file_delete` and `/files_delete_all` for operator/admin.
 
@@ -1521,9 +1504,6 @@ async def _handle_file_delete_command(
     admin delete any file. ``/files_delete_all`` always scopes to the caller's
     own username (admin uses the per-file path to wipe someone else's data).
     """
-    if not normalized.username:
-        return None
-    is_operator = normalized.username == _effective_operator_username()
     is_admin = normalized.username == settings.hitl_config_admin_username
     if not (is_operator or is_admin):
         return None
@@ -1795,15 +1775,14 @@ async def _handle_files_find_command(
 async def _handle_operator_file_library_command(
     *,
     normalized: NormalizedTelegramMessage,
+    is_operator: bool,
 ) -> dict[str, str] | None:
     """Dispatch `/files` and `/send` for the operator only.
 
     Returns None when the message is not one of these commands or the sender
     is not the configured operator (the normal routing continues).
     """
-    if not normalized.username:
-        return None
-    if normalized.username != _effective_operator_username():
+    if not is_operator:
         return None
     text = normalized.text or ""
     if _FILES_TRIGGER_RE.match(text):
@@ -2513,14 +2492,26 @@ async def _process_telegram_update(
             "trace_id": trace_id,
         }
 
-    delete_result = await _handle_file_delete_command(normalized=normalized)
+    # Resolve operator once for this webhook — all operator-identity checks
+    # below use this result. Fail-closed: api unreachable → None → not an op.
+    _resolved_op = await resolve_operator_for_sender(
+        username=normalized.username,
+        api_client=api_client,
+    )
+    is_operator = _resolved_op is not None
+
+    delete_result = await _handle_file_delete_command(
+        normalized=normalized, is_operator=is_operator
+    )
     if delete_result is not None:
         response = {"trace_id": trace_id}
         response.update(delete_result)
         _log_routed(trace_id=trace_id, result=delete_result, fallback="file_delete")
         return response
 
-    inspect_result = await _handle_file_inspect_command(normalized=normalized)
+    inspect_result = await _handle_file_inspect_command(
+        normalized=normalized, is_operator=is_operator
+    )
     if inspect_result is not None:
         response = {"trace_id": trace_id}
         response.update(inspect_result)
@@ -2528,7 +2519,7 @@ async def _process_telegram_update(
         return response
 
     file_lib_result = await _handle_operator_file_library_command(
-        normalized=normalized
+        normalized=normalized, is_operator=is_operator
     )
     if file_lib_result is not None:
         response = {"trace_id": trace_id}
@@ -2536,7 +2527,7 @@ async def _process_telegram_update(
         _log_routed(trace_id=trace_id, result=file_lib_result, fallback="file_library")
         return response
 
-    kb_result = await _handle_kb_command(normalized, background_tasks)
+    kb_result = await _handle_kb_command(normalized, background_tasks, is_operator)
     if kb_result is not None:
         response = {"trace_id": trace_id}
         response.update(kb_result)
@@ -2546,6 +2537,7 @@ async def _process_telegram_update(
     session_result = await _handle_kb_session_continuation(
         normalized=normalized,
         background_tasks=background_tasks,
+        is_operator=is_operator,
     )
     if session_result is not None:
         response = {"trace_id": trace_id}
@@ -2558,6 +2550,7 @@ async def _process_telegram_update(
     orphan_result = await _handle_operator_media_group_orphan(
         normalized=normalized,
         background_tasks=background_tasks,
+        is_operator=is_operator,
     )
     if orphan_result is not None:
         response = {"trace_id": trace_id}
@@ -2576,7 +2569,7 @@ async def _process_telegram_update(
         )
         return {"status": "ignored", "reason": "attachment_only", "trace_id": trace_id}
 
-    admin_command_result = _handle_admin_hitl_command(
+    admin_command_result = await _handle_admin_hitl_command(
         username=normalized.username,
         text=normalized.text,
     )
@@ -2598,7 +2591,6 @@ async def _process_telegram_update(
         normalized=normalized,
         api_client=api_client,
         send_dm=_send_dm,
-        primary_operator_username=_effective_operator_username(),
         internal_token=settings.internal_service_token or "",
         nl_ops_db_path=settings.nl_ops_db_path,
     )
@@ -2651,7 +2643,6 @@ async def _process_telegram_update(
         normalized=normalized,
         api_client=api_client,
         send_dm=_send_dm,
-        primary_operator_username=_effective_operator_username(),
         admin_username=settings.hitl_config_admin_username,
         internal_token=settings.internal_service_token or "",
     )
@@ -2669,7 +2660,6 @@ async def _process_telegram_update(
         normalized=normalized,
         api_client=api_client,
         send_dm=_send_dm,
-        primary_operator_username=_effective_operator_username(),
         admin_username=settings.hitl_config_admin_username,
         internal_token=settings.internal_service_token or "",
         downloader_factory=_material_downloader_factory,
@@ -2690,7 +2680,6 @@ async def _process_telegram_update(
         api_client=api_client,
         send_dm=_send_dm,
         openrouter=operator_service_nl_openrouter,
-        primary_operator_username=_effective_operator_username(),
         admin_username=settings.hitl_config_admin_username,
         internal_token=settings.internal_service_token or "",
     )
@@ -2708,7 +2697,6 @@ async def _process_telegram_update(
         normalized=normalized,
         api_client=api_client,
         send_dm=_send_dm,
-        primary_operator_username=_effective_operator_username(),
         internal_token=settings.internal_service_token or "",
     )
     if services_nl_result is not None:
@@ -2716,19 +2704,25 @@ async def _process_telegram_update(
         response.update(services_nl_result)
         return response
 
-    whoami_result = await _handle_whoami_command(normalized=normalized)
+    whoami_result = await _handle_whoami_command(
+        normalized=normalized, is_operator=is_operator
+    )
     if whoami_result is not None:
         response = {"trace_id": trace_id}
         response.update(whoami_result)
         return response
 
-    persona_result = await _handle_persona_command(normalized=normalized)
+    persona_result = await _handle_persona_command(
+        normalized=normalized, is_operator=is_operator
+    )
     if persona_result is not None:
         response = {"trace_id": trace_id}
         response.update(persona_result)
         return response
 
-    help_result = await _handle_help_command(normalized=normalized)
+    help_result = await _handle_help_command(
+        normalized=normalized, is_operator=is_operator
+    )
     if help_result is not None:
         response = {"trace_id": trace_id}
         response.update(help_result)
@@ -2787,8 +2781,7 @@ async def _process_telegram_update(
         response.update(pending_prompt_result)
         return response
 
-    operator_username = _effective_operator_username()
-    if normalized.username and normalized.username == operator_username:
+    if is_operator:
         operator_result = await _handle_operator_reply(normalized)
         response = {"trace_id": trace_id}
         response.update(operator_result)

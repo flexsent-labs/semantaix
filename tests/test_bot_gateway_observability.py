@@ -24,9 +24,6 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(
         bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db")
     )
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@ajdevy"
-    )
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
 
     class _StubHitlRepo:
@@ -40,6 +37,18 @@ def isolated_bot(tmp_path, monkeypatch):
             return []
 
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
+
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        bot_main.api_client,
+        "find_operator_by_username",
+        AsyncMock(
+            return_value={
+                "username": "@ajdevy", "chat_id": 100, "project_id": 1, "is_active": True
+            }
+        ),
+    )
+
     monkeypatch.setattr(
         bot_main,
         "operator_file_repository",

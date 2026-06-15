@@ -22,9 +22,6 @@ def isolated_bot(tmp_path, monkeypatch):
         bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db")
     )
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@ajdevy"
-    )
 
     class _StubHitlRepo:
         def get_runtime_config(self, key):
@@ -37,6 +34,13 @@ def isolated_bot(tmp_path, monkeypatch):
             return []
 
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
+
+    async def _op_lookup(*, username: str):
+        if username == "@ajdevy":
+            return {"username": "@ajdevy", "chat_id": 100, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(bot_main.api_client, "find_operator_by_username", _op_lookup)
     fresh_files_repo = OperatorFileRepository(
         str(tmp_path / "operator_files.db")
     )
@@ -662,11 +666,7 @@ def test_file_delete_from_non_operator_non_admin_ignored(isolated_bot, monkeypat
 
 
 def test_file_delete_admin_can_run(isolated_bot, monkeypatch):
-    # The fixture pins @ajdevy as primary operator AND admin (same username
-    # in this fixture); set distinct admin so we exercise the admin branch.
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@alice"
-    )
+    # The admin @ajdevy is authorized for file_delete regardless of operator status.
     monkeypatch.setattr(
         bot_main.settings, "hitl_config_admin_username", "@ajdevy"
     )

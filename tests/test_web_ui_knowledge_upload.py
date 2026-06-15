@@ -21,39 +21,35 @@ def test_landing_page_links_to_upload(monkeypatch, tmp_path):
     assert "/knowledge-upload" in response.text
 
 
-def test_upload_form_uses_runtime_config_operator_username(monkeypatch, tmp_path):
-    repo = _hitl_repo(tmp_path)
-    repo.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@from_config",
-        updated_by="test",
-    )
-    monkeypatch.setattr(web_ui_main, "hitl_ticket_repository", repo)
+def test_upload_form_shows_operator_from_registry(monkeypatch, tmp_path):
+    from services.api.app.operators import OperatorRepository
+    op_repo = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    op_repo.create(username="@from_registry", project_id=1)
+    monkeypatch.setattr(web_ui_main, "hitl_ticket_repository", _hitl_repo(tmp_path))
+    monkeypatch.setattr(web_ui_main, "operator_repository", op_repo)
     client = TestClient(web_ui_app)
 
     response = client.get("/knowledge-upload")
 
     assert response.status_code == 200
-    assert "@from_config" in response.text
+    assert "@from_registry" in response.text
     assert "enctype='multipart/form-data'" in response.text
     assert "<input type='file' name='upload'" in response.text
     assert "<textarea name='inline_text'" in response.text
     assert "name='is_confidential'" in response.text
 
 
-def test_upload_form_falls_back_to_settings_default(monkeypatch, tmp_path):
+def test_upload_form_shows_empty_when_no_operators_registered(monkeypatch, tmp_path):
+    from services.api.app.operators import OperatorRepository
+    empty_op_repo = OperatorRepository(str(tmp_path / "operators.sqlite3"))
     monkeypatch.setattr(web_ui_main, "hitl_ticket_repository", _hitl_repo(tmp_path))
-    monkeypatch.setattr(
-        web_ui_main._settings,
-        "hitl_primary_operator_username",
-        "@settings_default",
-    )
+    monkeypatch.setattr(web_ui_main, "operator_repository", empty_op_repo)
     client = TestClient(web_ui_app)
 
     response = client.get("/knowledge-upload")
 
     assert response.status_code == 200
-    assert "@settings_default" in response.text
+    assert "enctype='multipart/form-data'" in response.text
 
 
 def test_upload_submit_forwards_inline_text_and_renders_result(monkeypatch, tmp_path):

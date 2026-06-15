@@ -44,7 +44,6 @@ async def test_bot_resolves_registered_operator_via_real_api(tmp_path, monkeypat
     resolved = await resolve_operator_for_sender(
         username="@op-b",
         api_client=client,
-        primary_operator_username="@primary",
     )
     assert resolved is not None
     assert resolved.username == "@op-b"
@@ -55,22 +54,18 @@ async def test_bot_resolves_registered_operator_via_real_api(tmp_path, monkeypat
     none_result = await resolve_operator_for_sender(
         username="@stranger",
         api_client=client,
-        primary_operator_username="@primary",
     )
     assert none_result is None
 
 
 @pytest.mark.story("10-07")
 @pytest.mark.asyncio
-async def test_bot_falls_back_to_primary_when_api_is_down():
-    """Independent of api state: connect errors fall back when username matches."""
+async def test_bot_is_fail_closed_when_api_is_down():
+    """Fail-closed: api unreachable → resolver returns None regardless of username."""
     client = AsyncMock()
     client.find_operator_by_username.side_effect = httpx.ConnectError("down")
     resolved = await resolve_operator_for_sender(
-        username="@primary",
+        username="@any-operator",
         api_client=client,
-        primary_operator_username="@primary",
-        primary_operator_chat_id=42,
     )
-    assert resolved is not None
-    assert resolved.source == "primary_fallback"
+    assert resolved is None

@@ -140,7 +140,6 @@ def test_inbound_pipeline_handled_delivers_and_persists_trace(tmp_path, monkeypa
 
 def test_inbound_pipeline_unhandled_escalates_to_hitl(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = "@ajdevy"
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     _stub_pipeline(monkeypatch, AnswerResult(handled=False))
@@ -180,7 +179,6 @@ def test_inbound_pipeline_timeout_escalates_to_hitl(tmp_path, monkeypatch):
     escalated to a human (ack + ticket), never left to stall past the gateway's
     forward deadline (which would retry → dedup → silence)."""
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = "@ajdevy"
     monkeypatch.setattr(settings, "inbound_pipeline_timeout_seconds", 0.1)
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
@@ -235,7 +233,8 @@ def test_inbound_escalation_sends_ack_to_customer(tmp_path, monkeypatch):
 
 def test_inbound_escalation_notifies_operator_with_question(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_chat_id = "555"
+    import services.api.app.main as api_main
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "555")
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     _stub_pipeline(monkeypatch, AnswerResult(handled=False))
@@ -256,12 +255,12 @@ def test_inbound_escalation_notifies_operator_with_question(tmp_path, monkeypatc
     assert "HITL ticket #" in operator_calls[0].kwargs["text"]
     assert "@customer" in operator_calls[0].kwargs["text"]
     assert "Когда придёт возврат?" in operator_calls[0].kwargs["text"]
-    settings.hitl_primary_operator_chat_id = None
 
 
 def test_inbound_ack_failure_emits_incident_but_returns_200(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_chat_id = None
+    import services.api.app.main as api_main
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: None)
     monkeypatch.setattr(
         telegram_bot_sender,
         "send_message",
@@ -279,17 +278,14 @@ def test_inbound_ack_failure_emits_incident_but_returns_200(tmp_path, monkeypatc
     assert len(incidents) >= 1
 
 
-def test_inbound_uses_runtime_configured_operator(tmp_path, monkeypatch):
+def test_inbound_uses_operator_table_for_hitl_username(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = "@default_op"
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@runtime_op",
-        updated_by="@ajdevy",
-    )
-    monkeypatch.setattr(
-        telegram_bot_sender, "send_message", AsyncMock(return_value=1)
-    )
+    import services.api.app.main as api_main
+    from services.api.app.operators import OperatorRepository
+    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    fresh_operators.create(username="@runtime_op", project_id=1)
+    monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     _stub_pipeline(monkeypatch, AnswerResult(handled=False))
     client = TestClient(api_app)
 
@@ -322,7 +318,8 @@ def test_inbound_invalid_grounding_threshold_falls_back_to_setting(tmp_path, mon
 
 def test_inbound_invalid_operator_chat_id_skips_notification(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_chat_id = "not-a-number"
+    import services.api.app.main as api_main
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "not-a-number")
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     _stub_pipeline(monkeypatch, AnswerResult(handled=False))
@@ -335,7 +332,6 @@ def test_inbound_invalid_operator_chat_id_skips_notification(tmp_path, monkeypat
         c for c in send_mock.await_args_list if c.kwargs["chat_id"] != 9001
     ]
     assert operator_calls == []
-    settings.hitl_primary_operator_chat_id = None
 
 
 def test_inbound_replaying_same_trace_id_does_not_resend_ack_or_create_ticket(
@@ -348,8 +344,8 @@ def test_inbound_replaying_same_trace_id_does_not_resend_ack_or_create_ticket(
     _wire(tmp_path)
     import services.api.app.main as main_mod
     monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
-    settings.hitl_primary_operator_username = "@op"
-    settings.hitl_primary_operator_chat_id = "555"
+    monkeypatch.setattr(main_mod, "_effective_hitl_operator_username", lambda: "@op")
+    monkeypatch.setattr(main_mod, "_effective_hitl_operator_chat_id", lambda: "555")
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     _stub_pipeline(monkeypatch, AnswerResult(handled=False))
@@ -379,7 +375,6 @@ def test_inbound_replaying_same_trace_id_does_not_resend_ack_or_create_ticket(
 
     tickets = client.get("/hitl/tickets").json()["items"]
     assert len(tickets) == 1
-    settings.hitl_primary_operator_chat_id = None
 
 
 def test_inbound_inflight_duplicate_is_deduped_without_processing(tmp_path, monkeypatch):
@@ -429,8 +424,8 @@ def test_inbound_followup_question_coalesces_to_active_ticket(tmp_path, monkeypa
     _wire(tmp_path)
     import services.api.app.main as main_mod
     monkeypatch.setattr(main_mod, "_should_send_interim", lambda text, chat_id: False)
-    settings.hitl_primary_operator_username = "@op"
-    settings.hitl_primary_operator_chat_id = "555"
+    monkeypatch.setattr(main_mod, "_effective_hitl_operator_username", lambda: "@op")
+    monkeypatch.setattr(main_mod, "_effective_hitl_operator_chat_id", lambda: "555")
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     _stub_pipeline(monkeypatch, AnswerResult(handled=False))
@@ -479,7 +474,6 @@ def test_inbound_followup_question_coalesces_to_active_ticket(tmp_path, monkeypa
     # And of course exactly one HITL ticket exists.
     tickets = client.get("/hitl/tickets").json()["items"]
     assert len(tickets) == 1
-    settings.hitl_primary_operator_chat_id = None
 
 
 def test_inbound_project_prompt_override_wins_over_runtime_config(

@@ -45,8 +45,6 @@ class AppSettings(BaseSettings):
     incident_dedup_window_seconds: int = 300
     telegram_alert_debounce_seconds: int = 300
     hitl_ticket_db_path: str = ".data/semantaix_hitl.db"
-    hitl_primary_operator_username: str = "@ajdevy"
-    hitl_primary_operator_chat_id: str | None = None
     inbound_ack_message: str = (
         "Минутку, уточню и вернусь с ответом."
     )

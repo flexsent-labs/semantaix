@@ -12,10 +12,12 @@ from services.api.app.main import (
     hitl_ticket_repository,
     incident_repository,
     rag_repository,
-    settings,
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
+from services.bot_gateway.app.main import (
+    api_client as bot_api_client,
+)
 from services.bot_gateway.app.main import app as bot_app
 from services.bot_gateway.app.main import (
     hitl_ticket_repository as bot_hitl_repo,
@@ -25,6 +27,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.epic("04")]
 
 
 def _wire(tmp_path, monkeypatch, *, primary_operator: str = "@ajdevy"):
+    import services.api.app.main as _api_main
     hitl_path = str(tmp_path / "hitl.sqlite3")
     hitl_ticket_repository.db_path = hitl_path
     bot_hitl_repo.db_path = hitl_path
@@ -32,7 +35,7 @@ def _wire(tmp_path, monkeypatch, *, primary_operator: str = "@ajdevy"):
     incident_repository.dedup_window_seconds = 300
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     answer_trace_repository.db_path = str(tmp_path / "answer_traces.sqlite3")
-    monkeypatch.setattr(settings, "hitl_primary_operator_username", primary_operator)
+    monkeypatch.setattr(_api_main, "_effective_hitl_operator_username", lambda: primary_operator)
     monkeypatch.setattr(
         answer_pipeline, "run", AsyncMock(return_value=AnswerResult(handled=False))
     )
@@ -178,8 +181,21 @@ def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
 
 @pytest.mark.story("04-runtime-config")
 def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch):
+    # /hitl_config now registers the operator via the operators registry (not
+    # via runtime_config DB writes) and sets telegram_alert_chat_id.
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    # Admin is not in the operators registry — that's expected.
+    monkeypatch.setattr(
+        bot_api_client, "find_operator_by_username", AsyncMock(return_value=None)
+    )
+    attach_calls: list[dict] = []
+
+    async def fake_attach(*, username, project_id, chat_id=None, display_name=None):
+        attach_calls.append({"username": username, "project_id": project_id, "chat_id": chat_id})
+        return {}
+
+    monkeypatch.setattr(bot_api_client, "attach_operator", fake_attach)
 
     bot_client = TestClient(bot_app)
     config_response = bot_client.post(
@@ -195,12 +211,7 @@ def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch)
         },
     )
     assert config_response.json()["status"] == "configured"
-
-    api_client = TestClient(api_app)
-    inbound = api_client.post(
-        "/conversations/inbound", json={"text": "Need help."}
-    ).json()
-    assert inbound["hitl_operator_username"] == "@runtime_op"
-
-    tickets = api_client.get("/hitl/tickets").json()["items"]
-    assert tickets[0]["operator_username"] == "@runtime_op"
+    # The operator was registered via the API.
+    assert attach_calls == [{"username": "@runtime_op", "project_id": 1, "chat_id": 999}]
+    # The alert chat ID is stored for outbound DMs to the operator.
+    assert bot_hitl_repo.get_runtime_config("telegram_alert_chat_id") == "999"

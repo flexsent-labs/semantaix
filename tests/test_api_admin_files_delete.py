@@ -47,12 +47,17 @@ def delete_env(
     web_auth_db = tmp_path / "web_auth.db"
     web_auth_repo = WebAuthRepository(db_path=str(web_auth_db))
 
+    from services.api.app.operators import OperatorRepository as _OperatorRepository
+    operators_db = tmp_path / "operators.sqlite3"
+    _op_repo = _OperatorRepository(str(operators_db))
+    _op_repo.create(username="@alice", project_id=1, chat_id=4242)
+
     monkeypatch.setattr(api_main.settings, "operator_files_db_path", str(operator_files_db))
     monkeypatch.setattr(api_main.settings, "knowledge_db_path", str(knowledge_db))
     monkeypatch.setattr(api_main.settings, "rag_db_path", str(rag_db))
     monkeypatch.setattr(api_main.settings, "web_auth_db_path", str(web_auth_db))
+    monkeypatch.setattr(api_main.settings, "operators_db_path", str(operators_db))
     monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@ajdevy")
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_username", "@alice")
     monkeypatch.setattr(api_main.settings, "web_session_cookie_secure", False)
     monkeypatch.setattr(api_main.settings, "internal_service_token", "test-bot-token")
     monkeypatch.setattr(api_main, "web_auth_repository", web_auth_repo)

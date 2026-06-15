@@ -272,6 +272,15 @@ class HitlTicketRepository:
                 return None
             return str(row["value"])
 
+    def delete_runtime_config(self, key: str) -> None:
+        """Delete a runtime-config row by key (no-op if absent)."""
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            connection.execute(
+                "DELETE FROM hitl_runtime_config WHERE key = ?",
+                (key,),
+            )
+
     def get_bot_persona(
         self, *, default_first_name: str, default_last_name: str
     ) -> tuple[str, str]:

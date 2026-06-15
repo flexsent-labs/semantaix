@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from services.api.app.sales.scoping_schema_repository import (
 from services.api.app.sales.services_repository import ServicesRepository
 from services.bot_gateway.app import main as bot_main
 from services.bot_gateway.app.main import app as bot_app
+from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
 
 _ADMIN = "@ajdevy"
 _NOW = datetime(2026, 5, 30, tzinfo=UTC)
@@ -36,6 +38,17 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", _ADMIN)
     bot_main.hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(tmp_path / "persistence.sqlite3"))
+    # Isolate dedup store so update_ids don't collide across tests in full suite.
+    monkeypatch.setattr(
+        bot_main,
+        "webhook_update_claim_repository",
+        WebhookUpdateClaimRepository(str(tmp_path / "dedup.sqlite3")),
+    )
+    monkeypatch.setattr(
+        bot_main.api_client,
+        "find_operator_by_username",
+        AsyncMock(return_value=None),
+    )
     return schema_repo, services_repo, project_repo
 
 

@@ -84,9 +84,6 @@ def wired_stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
     monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", _OPERATOR_AT
-    )
-    monkeypatch.setattr(
         bot_main.settings, "internal_service_token", _INTERNAL_TOKEN
     )
     monkeypatch.setattr(

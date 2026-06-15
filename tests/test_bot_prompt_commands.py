@@ -583,3 +583,44 @@ def test_format_detail_empty_when_detail_none():
         "boom", request=request, response=response, detail=None
     )
     assert _format_detail(err) == ""
+
+
+def test_prompt_command_result_returned_via_webhook(tmp_path, monkeypatch):
+    """Exercises the ``prompt_command_result is not None`` branch in the webhook
+    dispatcher (lines 2613-2615 of bot_gateway/app/main.py)."""
+    from fastapi.testclient import TestClient
+
+    from services.bot_gateway.app import main as bot_main
+    from services.bot_gateway.app.main import app as bot_app
+    from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
+
+    monkeypatch.setattr(
+        bot_main,
+        "webhook_update_claim_repository",
+        WebhookUpdateClaimRepository(str(tmp_path / "dedup.sqlite3")),
+    )
+    monkeypatch.setattr(
+        bot_main.api_client,
+        "find_operator_by_username",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "handle_prompt_command",
+        AsyncMock(return_value={"status": "prompts_listed"}),
+    )
+
+    response = TestClient(bot_app).post(
+        "/telegram/webhook",
+        json={
+            "update_id": 88801,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 1, "username": "ajdevy"},
+                "chat": {"id": 1, "type": "private"},
+                "text": "/prompts",
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "prompts_listed"

@@ -42,9 +42,6 @@ def isolated_bot(tmp_path, monkeypatch):
         bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db")
     )
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@primary_op"
-    )
     monkeypatch.setattr(bot_main.settings, "internal_service_token", "svc-token")
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
 
@@ -206,10 +203,9 @@ def test_connect_calendar_non_designated_operator_ignored(
 def test_connect_calendar_operator_without_project_ignored(
     isolated_bot, monkeypatch
 ):
-    # Registered + active but no project binding (primary-fallback shape):
-    # stub the resolver to return a project-less operator so the bot-side gate
-    # treats it as unauthorized without calling the api.
-    async def fake_resolve(*, username, api_client, primary_operator_username):
+    # Registered + active but no project binding: stub the resolver to return
+    # a project-less operator so the bot-side gate treats it as unauthorized.
+    async def fake_resolve(*, username, api_client):
         from services.bot_gateway.app.operator_resolver import ResolvedOperator
 
         return ResolvedOperator(
@@ -217,7 +213,7 @@ def test_connect_calendar_operator_without_project_ignored(
             chat_id=100,
             project_id=None,
             is_active=True,
-            source="primary_fallback",
+            source="registry",
         )
 
     monkeypatch.setattr(

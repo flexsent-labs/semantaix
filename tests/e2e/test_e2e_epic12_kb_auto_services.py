@@ -188,10 +188,20 @@ def wired_stack(monkeypatch: pytest.MonkeyPatch, shared_paths: dict[str, Path]):
     monkeypatch.setattr(bot_main.settings, "operator_upload_max_bytes", 5 * 1024 * 1024)
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
     monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", f"@{_OPERATOR_USERNAME}"
-    )
-    monkeypatch.setattr(
         bot_main.settings, "internal_service_token", _INTERNAL_TOKEN
+    )
+    from unittest.mock import AsyncMock as _AsyncMock
+    monkeypatch.setattr(
+        bot_main.api_client,
+        "find_operator_by_username",
+        _AsyncMock(
+            return_value={
+                "username": f"@{_OPERATOR_USERNAME}",
+                "chat_id": _CHAT_ID,
+                "project_id": 1,
+                "is_active": True,
+            }
+        ),
     )
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
     monkeypatch.setattr(

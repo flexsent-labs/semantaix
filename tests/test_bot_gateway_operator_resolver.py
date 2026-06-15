@@ -1,4 +1,4 @@
-"""Tests for the bot's multi-operator resolver."""
+"""Tests for the bot's fail-closed operator resolver (Epic 10.5, story 10.5-02)."""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ async def test_empty_username_returns_none():
     result = await resolve_operator_for_sender(
         username=None,
         api_client=api,
-        primary_operator_username="@primary",
     )
     assert result is None
     api.find_operator_by_username.assert_not_awaited()
@@ -48,7 +47,6 @@ async def test_registered_active_operator_resolves():
     result = await resolve_operator_for_sender(
         username="@op-b",
         api_client=api,
-        primary_operator_username="@primary",
     )
     assert result == ResolvedOperator(
         username="@op-b",
@@ -71,7 +69,6 @@ async def test_inactive_operator_returns_none():
     result = await resolve_operator_for_sender(
         username="@op-b",
         api_client=api,
-        primary_operator_username="@primary",
     )
     assert result is None
 
@@ -82,47 +79,42 @@ async def test_unknown_username_with_no_fallback_returns_none():
     result = await resolve_operator_for_sender(
         username="@ghost",
         api_client=api,
-        primary_operator_username="@primary",
     )
     assert result is None
 
 
 @pytest.mark.asyncio
-async def test_primary_fallback_on_api_5xx():
+async def test_api_5xx_returns_none():
+    """API errors are fail-closed — no fallback."""
     api = FakeApi()
     api.find_operator_by_username.side_effect = _http_error(500)
     result = await resolve_operator_for_sender(
         username="@primary",
         api_client=api,
-        primary_operator_username="@primary",
-        primary_operator_chat_id=99,
     )
-    assert result is not None
-    assert result.source == "primary_fallback"
-    assert result.chat_id == 99
+    assert result is None
 
 
 @pytest.mark.asyncio
-async def test_primary_fallback_on_network_error():
+async def test_network_error_returns_none():
+    """Network errors are fail-closed — no fallback."""
     api = FakeApi()
     api.find_operator_by_username.side_effect = httpx.ConnectError("boom")
     result = await resolve_operator_for_sender(
         username="@primary",
         api_client=api,
-        primary_operator_username="@primary",
     )
-    assert result is not None
-    assert result.source == "primary_fallback"
+    assert result is None
 
 
 @pytest.mark.asyncio
-async def test_no_fallback_for_non_primary_on_failure():
+async def test_api_error_for_any_sender_returns_none():
+    """Fail-closed: errors return None regardless of sender identity."""
     api = FakeApi()
     api.find_operator_by_username.side_effect = _http_error(500)
     result = await resolve_operator_for_sender(
         username="@stranger",
         api_client=api,
-        primary_operator_username="@primary",
     )
     assert result is None
 
@@ -139,7 +131,6 @@ async def test_chat_id_none_handled():
     result = await resolve_operator_for_sender(
         username="@op",
         api_client=api,
-        primary_operator_username="@primary",
     )
     assert result is not None
     assert result.chat_id is None

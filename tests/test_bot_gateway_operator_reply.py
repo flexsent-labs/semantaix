@@ -11,6 +11,12 @@ from services.bot_gateway.app.main import api_client, hitl_ticket_repository
 from services.bot_gateway.app.main import app as bot_app
 
 
+def _stub_operator_lookup(monkeypatch, *, record):
+    async def fake_lookup(*, username: str):
+        return record
+    monkeypatch.setattr(api_client, "find_operator_by_username", fake_lookup)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_hitl(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
@@ -88,10 +94,9 @@ def test_customer_forward_failure_does_not_leak_to_webhook_response(monkeypatch)
 
 
 def test_operator_reply_with_ticket_quote_routes_to_api(monkeypatch):
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
+    _stub_operator_lookup(
+        monkeypatch,
+        record={"username": "@operator", "chat_id": 1, "project_id": 1, "is_active": True},
     )
     monkeypatch.setattr(api_client, "forward_inbound", AsyncMock(return_value={}))
     deliver = AsyncMock(return_value={"delivered": True, "resolved": True})
@@ -117,10 +122,9 @@ def test_operator_reply_with_ticket_quote_routes_to_api(monkeypatch):
 
 
 def test_operator_reply_without_quote_uses_single_open_ticket(monkeypatch):
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
+    _stub_operator_lookup(
+        monkeypatch,
+        record={"username": "@operator", "chat_id": 1, "project_id": 1, "is_active": True},
     )
     ticket = hitl_ticket_repository.create(
         conversation_ref="q", reason="awaiting_human_response", target_chat_id=9001
@@ -150,10 +154,9 @@ def test_operator_reply_without_quote_and_multiple_tickets_requests_disambiguati
     must DM the operator a disambiguation prompt. Silently dropping the
     reply (the historical behaviour) would hide the operator's response
     from the customer, which is the worst-case failure mode."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
+    _stub_operator_lookup(
+        monkeypatch,
+        record={"username": "@operator", "chat_id": 1, "project_id": 1, "is_active": True},
     )
     for i in range(2):
         t = hitl_ticket_repository.create(
@@ -185,10 +188,9 @@ def test_operator_reply_without_quote_and_no_open_tickets_is_ignored(monkeypatch
     """With zero assigned tickets there's nothing to disambiguate; the
     handler logs+ignores rather than DMing the operator about an empty
     list."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
+    _stub_operator_lookup(
+        monkeypatch,
+        record={"username": "@operator", "chat_id": 1, "project_id": 1, "is_active": True},
     )
     deliver = AsyncMock(return_value={"delivered": True})
     monkeypatch.setattr(api_client, "deliver_operator_reply", deliver)
@@ -208,13 +210,9 @@ def test_operator_reply_without_quote_and_no_open_tickets_is_ignored(monkeypatch
 
 
 def test_operator_admin_command_takes_precedence_over_reply_branch(monkeypatch):
-    # Even when the sender matches the configured operator, a /hitl_config
-    # command must still be handled by the admin branch.
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@ajdevy",
-        updated_by="@ajdevy",
-    )
+    # Even when the sender is the admin, a /hitl_config command must be
+    # handled by the admin branch (not the operator reply branch).
+    monkeypatch.setattr(api_client, "attach_operator", AsyncMock(return_value={}))
     deliver = AsyncMock(return_value={"delivered": True})
     monkeypatch.setattr(api_client, "deliver_operator_reply", deliver)
 
@@ -232,10 +230,9 @@ def test_operator_admin_command_takes_precedence_over_reply_branch(monkeypatch):
 
 
 def test_operator_reply_api_failure_is_reported(monkeypatch):
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
+    _stub_operator_lookup(
+        monkeypatch,
+        record={"username": "@operator", "chat_id": 1, "project_id": 1, "is_active": True},
     )
     monkeypatch.setattr(
         api_client,
@@ -258,11 +255,7 @@ def test_operator_reply_api_failure_is_reported(monkeypatch):
 
 
 def test_non_operator_message_is_not_routed_to_reply_branch(monkeypatch):
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
-    )
+    _stub_operator_lookup(monkeypatch, record=None)
     deliver = AsyncMock(return_value={})
     forward = AsyncMock(return_value={})
     monkeypatch.setattr(api_client, "deliver_operator_reply", deliver)

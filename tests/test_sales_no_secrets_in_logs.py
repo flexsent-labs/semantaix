@@ -125,12 +125,8 @@ def wired(tmp_path, monkeypatch) -> None:
     # secret leaked into the outbound text).
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_mock)
-    monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_username", "@ops_demo"
-    )
-    monkeypatch.setattr(
-        api_main.settings, "hitl_primary_operator_chat_id", "9999"
-    )
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: "@ops_demo")
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "9999")
     return send_mock
 
 

@@ -170,7 +170,6 @@ async def handle_services_nl_message(
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
     send_dm: SendDmFn,
-    primary_operator_username: str,
     internal_token: str,
 ) -> dict[str, str] | None:
     """Top-level dispatcher for the operator services NL dialog.
@@ -216,7 +215,6 @@ async def handle_services_nl_message(
     resolved = await resolve_operator_for_sender(
         username=normalized.username,
         api_client=api_client,
-        primary_operator_username=primary_operator_username,
     )
 
     if resolved is None or resolved.project_id is None:

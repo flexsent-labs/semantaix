@@ -320,7 +320,6 @@ async def handle_calendar_command(
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
     send_dm: SendDmFn,
-    primary_operator_username: str,
     internal_token: str,
     nl_ops_db_path: str | None = None,
     now_fn: Callable[[], datetime] | None = None,
@@ -368,7 +367,6 @@ async def handle_calendar_command(
     resolved = await resolve_operator_for_sender(
         username=normalized.username,
         api_client=api_client,
-        primary_operator_username=primary_operator_username,
     )
     if resolved is None or resolved.project_id is None:
         # The new `/service` command uses a different ignored-reason so log

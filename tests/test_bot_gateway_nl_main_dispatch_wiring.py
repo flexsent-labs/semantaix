@@ -53,11 +53,6 @@ def _webhook_payload(*, text: str, username: str = "operator", reply_to: str | N
 def test_authorized_operator_nl_add_routes_through_new_handler(monkeypatch):
     """The operator types ``"добавь услугу X"`` → LLM classifies → bot routes
     via the new dispatcher, calls ``add_sales_service``, DMs the confirmation."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
-    )
     find_op = AsyncMock(
         return_value={
             "username": "@operator",
@@ -101,11 +96,6 @@ def test_operator_chatter_falls_through_to_operator_reply(monkeypatch):
     """When the LLM returns ``action: null`` (operator chatter, not a service
     op), the dispatcher MUST return None so the rest of the inbound pipeline —
     including the operator-reply branch — keeps running unchanged."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
-    )
     find_op = AsyncMock(
         return_value={
             "username": "@operator",
@@ -154,11 +144,6 @@ async def test_operator_reply_branch_runs_when_classifier_returns_null_direct(mo
     instrumented for clean line tracing."""
     from fastapi import BackgroundTasks
 
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
-    )
     find_op = AsyncMock(
         return_value={
             "username": "@operator",
@@ -199,11 +184,6 @@ def test_pending_prompt_edit_branch_runs_when_classifier_returns_null(monkeypatc
     is conservative (returns ``action: null`` for non-service inputs)."""
     from services.bot_gateway.app import prompt_commands
 
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@operator",
-        updated_by="@ajdevy",
-    )
     find_op = AsyncMock(
         return_value={
             "username": "@operator",

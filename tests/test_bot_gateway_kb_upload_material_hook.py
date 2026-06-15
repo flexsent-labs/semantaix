@@ -56,10 +56,15 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main.settings, "operator_upload_max_bytes", 1024)
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
     monkeypatch.setattr(
-        bot_main.settings, "hitl_primary_operator_username", "@ajdevy"
-    )
-    monkeypatch.setattr(
         bot_main.settings, "internal_service_token", "bot-token-x"
+    )
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        bot_main.api_client,
+        "find_operator_by_username",
+        AsyncMock(
+            return_value={"username": "@ajdevy", "chat_id": 100, "project_id": 1, "is_active": True}
+        ),
     )
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
     fresh_kb_repo = OperatorKbSessionRepository(str(tmp_path / "hitl.db"))

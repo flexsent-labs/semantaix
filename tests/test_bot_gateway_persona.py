@@ -10,7 +10,6 @@ from platform_common.settings import get_settings
 from services.bot_gateway.app.main import (
     api_client,
     hitl_ticket_repository,
-    settings,
     telegram_bot_sender,
 )
 from services.bot_gateway.app.main import app as bot_app
@@ -28,10 +27,14 @@ def _isolated_bot_gateway(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     persistence_path = tmp_path / "persistence.sqlite3"
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(persistence_path))
-    # Other test files mutate this global; pin it so the persona authz
-    # contract (effective operator = @ajdevy by default) is stable.
-    monkeypatch.setattr(settings, "hitl_primary_operator_username", "@ajdevy")
     get_settings.cache_clear()
+
+    async def _default_operator_lookup(*, username: str):
+        if username == "@ajdevy":
+            return {"username": "@ajdevy", "chat_id": 1, "project_id": 1, "is_active": True}
+        return None
+
+    monkeypatch.setattr(api_client, "find_operator_by_username", _default_operator_lookup)
     yield
     get_settings.cache_clear()
 
@@ -189,18 +192,21 @@ def test_persona_caller_other_than_effective_operator_replies_with_diagnostic(mo
     send.assert_awaited_once()
     sent_text = send.await_args.kwargs["text"]
     assert "Сменить имя бота может только" in sent_text
-    assert "@ajdevy" in sent_text  # configured operator
     assert "@random_user" in sent_text  # sender as the bot saw them
 
 
 def test_persona_runtime_configured_operator_can_rename(monkeypatch):
-    """When /hitl_config sets a different operator, that operator (not the
-    default admin) is authorized to rename the bot — this is the regression
-    fix for 'смени имя на …' silently failing for non-admin operators."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@support_b",
-        updated_by="@ajdevy",
+    """A registered operator (not the default admin) is authorized to rename
+    the bot — regression fix for 'смени имя на …' silently failing for
+    non-admin operators when they were registered in the operators registry."""
+    monkeypatch.setattr(
+        api_client,
+        "find_operator_by_username",
+        AsyncMock(
+            return_value={
+                "username": "@support_b", "chat_id": 1, "project_id": 1, "is_active": True
+            }
+        ),
     )
     set_persona = AsyncMock(
         return_value={"first_name": "Анна", "last_name": "Иванова"}
@@ -220,14 +226,12 @@ def test_persona_runtime_configured_operator_can_rename(monkeypatch):
     )
 
 
-def test_persona_default_admin_is_no_longer_special_when_operator_overridden(monkeypatch):
-    """If the runtime operator is @support_b, then @ajdevy is just an ex-operator —
-    persona commands from @ajdevy must be rejected. The diagnostic reply names
-    @support_b as the configured operator so the ex-admin can see the override."""
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@support_b",
-        updated_by="@ajdevy",
+def test_persona_unregistered_sender_is_rejected(monkeypatch):
+    """A sender not in the operators registry is rejected from persona commands."""
+    monkeypatch.setattr(
+        api_client,
+        "find_operator_by_username",
+        AsyncMock(return_value=None),
     )
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
@@ -243,7 +247,6 @@ def test_persona_default_admin_is_no_longer_special_when_operator_overridden(mon
     set_persona.assert_not_awaited()
     send.assert_awaited_once()
     sent_text = send.await_args.kwargs["text"]
-    assert "@support_b" in sent_text
     assert "@ajdevy" in sent_text
 
 
@@ -338,12 +341,6 @@ def test_persona_trigger_does_not_hijack_unrelated_operator_reply(monkeypatch):
     deliver = AsyncMock(return_value={"delivered": True})
     monkeypatch.setattr(api_client, "deliver_operator_reply", deliver)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock())
-
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@ajdevy",
-        updated_by="@ajdevy",
-    )
 
     client = TestClient(bot_app)
     response = client.post(
@@ -484,7 +481,6 @@ def test_persona_unauthorized_logs_warning(monkeypatch, caplog):
     record = records[0]
     assert record.levelno == logging.WARNING
     assert record.username == "@random_user"
-    assert record.expected_operator == "@ajdevy"
 
 
 def test_persona_natural_oneshot_with_only_first_logs(monkeypatch, caplog):
@@ -695,7 +691,6 @@ def test_whoami_replies_with_mismatch_when_sender_is_not_operator(monkeypatch):
     send.assert_awaited_once()
     sent_text = send.await_args.kwargs["text"]
     assert "@random_user" in sent_text
-    assert "@ajdevy" in sent_text  # configured operator
     assert "❌" in sent_text
 
 

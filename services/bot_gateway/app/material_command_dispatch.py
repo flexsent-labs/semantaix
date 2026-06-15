@@ -83,7 +83,6 @@ async def handle_material_command(
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
     send_dm: SendDmFn,
-    primary_operator_username: str,
     admin_username: str,
     internal_token: str,
     downloader_factory: DownloaderFactory,
@@ -96,7 +95,6 @@ async def handle_material_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="material_list",
@@ -108,7 +106,6 @@ async def handle_material_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="material_remove",
@@ -120,7 +117,6 @@ async def handle_material_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="material",
@@ -139,7 +135,6 @@ async def _dispatch(
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
     send_dm: SendDmFn,
-    primary_operator_username: str,
     admin_username: str,
     internal_token: str,
     route: str,
@@ -150,7 +145,6 @@ async def _dispatch(
     resolved = await resolve_operator_for_sender(
         username=normalized.username,
         api_client=api_client,
-        primary_operator_username=primary_operator_username,
     )
     is_admin = (
         normalized.username is not None

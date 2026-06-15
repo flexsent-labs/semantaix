@@ -68,7 +68,6 @@ async def test_unauthorized_sender_does_not_call_llm_or_api_or_dm(
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -93,7 +92,6 @@ async def test_missing_username_does_not_call_llm() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -119,7 +117,6 @@ async def test_inactive_operator_does_not_call_llm() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -140,7 +137,6 @@ async def test_admin_without_project_id_is_ignored() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

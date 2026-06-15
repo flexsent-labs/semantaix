@@ -10,7 +10,6 @@ from services.api.app.main import (
     hitl_ticket_repository,
     incident_repository,
     rag_repository,
-    settings,
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
@@ -34,7 +33,6 @@ def _force_escalation(monkeypatch):
 @pytest.mark.story("04-02")
 def test_inbound_escalation_creates_and_assigns_hitl_ticket(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = "@ajdevy"
     _force_escalation(monkeypatch)
     client = TestClient(api_app)
 
@@ -55,9 +53,10 @@ def test_inbound_escalation_creates_and_assigns_hitl_ticket(tmp_path, monkeypatc
     assert tickets[0]["target_chat_id"] is None
 
 
-def test_hitl_route_missing_operator_emits_incident(tmp_path):
+def test_hitl_route_missing_operator_emits_incident(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = ""
+    import services.api.app.main as api_main
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: "")
     client = TestClient(api_app)
     created = hitl_ticket_repository.create(conversation_ref="conv-2", reason="uncertain")
 
@@ -191,14 +190,13 @@ def test_hitl_reply_missing_bot_token_emits_incident(tmp_path, monkeypatch):
     assert len(incidents) == 1
 
 
-def test_inbound_uses_runtime_configured_hitl_operator(tmp_path, monkeypatch):
+def test_inbound_uses_operator_table_for_hitl_username(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = "@default"
-    hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_username",
-        value="@flexsentlabs",
-        updated_by="@ajdevy",
-    )
+    import services.api.app.main as api_main
+    from services.api.app.operators import OperatorRepository
+    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    fresh_operators.create(username="@flexsentlabs", project_id=1)
+    monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     _force_escalation(monkeypatch)
     client = TestClient(api_app)
 
@@ -209,41 +207,51 @@ def test_inbound_uses_runtime_configured_hitl_operator(tmp_path, monkeypatch):
     assert response.json()["hitl_operator_username"] == "@flexsentlabs"
 
 
-def test_effective_hitl_operator_chat_id_prefers_runtime_config(tmp_path):
+def test_effective_hitl_operator_chat_id_prefers_runtime_config(tmp_path, monkeypatch):
+    import services.api.app.main as api_main
     from services.api.app.main import _effective_hitl_operator_chat_id
+    from services.api.app.operators import OperatorRepository
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = "111"
+    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    fresh_operators.create(username="@ajdevy", project_id=1, chat_id=111)
+    monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     hitl_ticket_repository.set_runtime_config(
-        key="hitl_primary_operator_chat_id",
-        value="222",
-        updated_by="@ajdevy",
+        key="telegram_alert_chat_id", value="222", updated_by="@ajdevy"
     )
     assert _effective_hitl_operator_chat_id() == "222"
 
 
-def test_effective_hitl_operator_chat_id_falls_back_to_env(tmp_path):
+def test_effective_hitl_operator_chat_id_falls_back_to_operator_table(tmp_path, monkeypatch):
+    import services.api.app.main as api_main
     from services.api.app.main import _effective_hitl_operator_chat_id
+    from services.api.app.operators import OperatorRepository
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = "333"
+    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    fresh_operators.create(username="@ajdevy", project_id=1, chat_id=333)
+    monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     assert _effective_hitl_operator_chat_id() == "333"
 
 
-def test_effective_hitl_operator_chat_id_none_when_unset(tmp_path):
+def test_effective_hitl_operator_chat_id_none_when_unset(tmp_path, monkeypatch):
+    import services.api.app.main as api_main
     from services.api.app.main import _effective_hitl_operator_chat_id
+    from services.api.app.operators import OperatorRepository
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = None
+    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     assert _effective_hitl_operator_chat_id() is None
 
 
 @pytest.mark.asyncio
 async def test_notify_hitl_operator_summary_skips_when_no_chat_id(tmp_path, monkeypatch):
+    import services.api.app.main as api_main
     from services.api.app.main import _notify_hitl_operator_summary
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = None
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: None)
     mock_send = AsyncMock()
     monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
 
@@ -256,10 +264,11 @@ async def test_notify_hitl_operator_summary_skips_when_no_chat_id(tmp_path, monk
 async def test_notify_hitl_operator_summary_rejects_non_numeric_chat_id(
     tmp_path, monkeypatch
 ):
+    import services.api.app.main as api_main
     from services.api.app.main import _notify_hitl_operator_summary
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = "not-a-number"
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "not-a-number")
     mock_send = AsyncMock()
     monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
 
@@ -272,10 +281,11 @@ async def test_notify_hitl_operator_summary_rejects_non_numeric_chat_id(
 async def test_notify_hitl_operator_summary_returns_false_on_send_failure(
     tmp_path, monkeypatch
 ):
+    import services.api.app.main as api_main
     from services.api.app.main import _notify_hitl_operator_summary
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = "650934815"
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "650934815")
     monkeypatch.setattr(
         telegram_bot_sender,
         "send_message",
@@ -288,10 +298,11 @@ async def test_notify_hitl_operator_summary_returns_false_on_send_failure(
 
 @pytest.mark.asyncio
 async def test_notify_hitl_operator_summary_sends_and_returns_true(tmp_path, monkeypatch):
+    import services.api.app.main as api_main
     from services.api.app.main import _notify_hitl_operator_summary
 
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
-    settings.hitl_primary_operator_chat_id = "650934815"
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "650934815")
     mock_send = AsyncMock(return_value=999)
     monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
 
@@ -310,8 +321,11 @@ async def test_notify_hitl_operator_summary_sends_and_returns_true(tmp_path, mon
 @pytest.mark.story("04-operator-dm")
 def test_inbound_escalation_dms_operator_when_chat_id_configured(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_username = "@flexsentlabs"
-    settings.hitl_primary_operator_chat_id = "650934815"
+    import services.api.app.main as api_main
+    from services.api.app.operators import OperatorRepository
+    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+    fresh_operators.create(username="@flexsentlabs", project_id=1, chat_id=650934815)
+    monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     _force_escalation(monkeypatch)
     mock_send = AsyncMock(return_value=1234)
     monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
@@ -339,12 +353,12 @@ def test_inbound_escalation_dms_operator_when_chat_id_configured(tmp_path, monke
     assert "HITL ticket #" in operator_text
     assert "Need escalation" in operator_text
     assert "@cust" in operator_text
-    settings.hitl_primary_operator_chat_id = None
 
 
 def test_inbound_escalation_skips_dm_when_chat_id_missing(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_chat_id = None
+    import services.api.app.main as api_main
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: None)
     _force_escalation(monkeypatch)
     mock_send = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
@@ -365,7 +379,8 @@ def test_inbound_escalation_skips_dm_when_chat_id_missing(tmp_path, monkeypatch)
 @pytest.mark.story("04-operator-dm")
 def test_hitl_route_dms_operator_when_chat_id_configured(tmp_path, monkeypatch):
     _wire(tmp_path)
-    settings.hitl_primary_operator_chat_id = "650934815"
+    import services.api.app.main as api_main
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "650934815")
     mock_send = AsyncMock(return_value=4321)
     monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
     client = TestClient(api_app)
@@ -382,4 +397,3 @@ def test_hitl_route_dms_operator_when_chat_id_configured(tmp_path, monkeypatch):
         chat_id=650934815,
         text=f"HITL ticket #{created.id}: assigned to @flexsentlabs",
     )
-    settings.hitl_primary_operator_chat_id = None

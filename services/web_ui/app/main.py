@@ -10,6 +10,7 @@ from platform_common.settings import get_settings
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.backups import BackupRepository
 from services.api.app.hitl import HitlTicketRepository
+from services.api.app.operators import OperatorRepository
 from services.web_ui.app.admin import router as admin_router
 from services.web_ui.app.auth import _api_get, _resolve_principal
 from services.web_ui.app.usage_dashboard import router as usage_router
@@ -28,13 +29,12 @@ answer_trace_repository = AnswerTraceRepository(
     snippet_max_chars=_settings.answer_trace_snippet_max_chars,
 )
 hitl_ticket_repository = HitlTicketRepository(_settings.hitl_ticket_db_path)
+operator_repository = OperatorRepository(_settings.operators_db_path)
 
 
 def _default_operator_username() -> str:
-    return (
-        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
-        or _settings.hitl_primary_operator_username
-    )
+    operators = operator_repository.list_active()
+    return operators[0].username if operators else ""
 
 
 async def _forward_upload_to_api(

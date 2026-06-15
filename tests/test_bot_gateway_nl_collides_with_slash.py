@@ -79,7 +79,6 @@ async def test_slash_prefixed_text_short_circuits_without_llm(slash_text: str) -
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -103,7 +102,6 @@ async def test_non_slash_text_still_invokes_llm() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

@@ -72,7 +72,6 @@ async def test_nl_add_without_description_calls_api_and_dms_confirmation() -> No
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -102,7 +101,6 @@ async def test_nl_add_with_description_passes_description_to_api() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -141,7 +139,6 @@ async def test_nl_list_returns_same_view_as_slash_service_list() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -163,7 +160,6 @@ async def test_nl_list_when_empty_uses_same_hint_as_slash() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -197,7 +193,6 @@ async def test_nl_remove_by_name_resolves_id_then_deletes() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -220,7 +215,6 @@ async def test_nl_remove_when_name_not_found_dms_not_found() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )
@@ -248,7 +242,6 @@ async def test_nl_remove_case_insensitive_name_match() -> None:
         api_client=api,
         send_dm=sent,
         openrouter=openrouter,
-        primary_operator_username="@op",
         admin_username="@admin",
         internal_token="bot-tok",
     )

@@ -62,7 +62,6 @@ async def handle_sales_command(
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
     send_dm: SendDmFn,
-    primary_operator_username: str,
     admin_username: str,
     internal_token: str,
 ) -> dict[str, str] | None:
@@ -78,7 +77,6 @@ async def handle_sales_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="service_add",
@@ -89,7 +87,6 @@ async def handle_sales_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="service_list",
@@ -100,7 +97,6 @@ async def handle_sales_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="service_remove",
@@ -111,7 +107,6 @@ async def handle_sales_command(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
-            primary_operator_username=primary_operator_username,
             admin_username=admin_username,
             internal_token=internal_token,
             route="sales_state",
@@ -125,7 +120,6 @@ async def _dispatch(
     normalized: NormalizedTelegramMessage,
     api_client: ApiClient,
     send_dm: SendDmFn,
-    primary_operator_username: str,
     admin_username: str,
     internal_token: str,
     route: str,
@@ -135,7 +129,6 @@ async def _dispatch(
     resolved = await resolve_operator_for_sender(
         username=normalized.username,
         api_client=api_client,
-        primary_operator_username=primary_operator_username,
     )
     is_admin = (
         normalized.username is not None
@@ -381,7 +374,6 @@ async def _handle_sales_state(
         customer = await resolve_operator_for_sender(
             username=customer_arg,
             api_client=api_client,
-            primary_operator_username="",
         )
         if customer is None or customer.chat_id is None:
             await send_dm(
