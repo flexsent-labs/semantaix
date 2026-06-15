@@ -46,7 +46,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
         answer_pipeline, "run", AsyncMock(return_value=AnswerResult(handled=False))
     )
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
-    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_username", _OPERATOR)
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: _OPERATOR)
 
     # Ensure project_id resolves to a non-None value on both paths:
     # ctx.project_id (inbound escalation) and _default_project_id() (reply endpoint)
