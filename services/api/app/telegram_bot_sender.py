@@ -55,7 +55,13 @@ class TelegramBotSender:
     def _is_token_configured(self) -> bool:
         return bool(self.bot_token) and self.bot_token != "replace-me"
 
-    async def send_message(self, *, chat_id: int, text: str) -> int:
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> int:
         self._require_token()
 
         # sendMessage is NOT idempotent and Telegram offers no dedup key, so a
@@ -67,7 +73,9 @@ class TelegramBotSender:
         # already delivered the message, so retrying would double-post the same
         # text to the customer. We surface those immediately instead.
         url = f"{self._base_url}/bot{self.bot_token}/sendMessage"
-        body = {"chat_id": chat_id, "text": text}
+        body: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if reply_markup is not None:
+            body["reply_markup"] = reply_markup
         async with self._client(timeout=15) as client:
             try:
                 response = await client.post(url, json=body)
@@ -77,6 +85,41 @@ class TelegramBotSender:
                 response.raise_for_status()
             payload = response.json()
             return int(payload["result"]["message_id"])
+
+    async def answer_callback_query(
+        self,
+        *,
+        callback_query_id: str,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_token()
+        url = f"{self._base_url}/bot{self.bot_token}/answerCallbackQuery"
+        body: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text is not None:
+            body["text"] = text
+        async with self._client(timeout=15) as client:
+            response = await client.post(url, json=body)
+            response.raise_for_status()
+            return response.json()
+
+    async def edit_message_reply_markup(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        reply_markup: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        self._require_token()
+        url = f"{self._base_url}/bot{self.bot_token}/editMessageReplyMarkup"
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": reply_markup,
+        }
+        async with self._client(timeout=15) as client:
+            response = await client.post(url, json=body)
+            response.raise_for_status()
+            return response.json()
 
     async def send_video(
         self,

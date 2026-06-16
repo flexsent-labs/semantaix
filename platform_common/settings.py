@@ -12,6 +12,11 @@ class AppSettings(BaseSettings):
     bot_gateway_port: int = 8002
     ingest_worker_port: int = 8003
     scheduler_port: int = 8004
+    user_gateway_port: int = 8005
+    user_gateway_db_path: str = ".data/semantaix_user_gateway.db"
+    tg_user_session_path: str = ".data/user_gateway.session"
+    user_gateway_base_url: str = "http://user_gateway:8005"
+    operator_sessions_dir: str = ".data/operator_sessions"
     qdrant_url: str = "http://qdrant:6333"
     database_url: str = "postgresql://postgres:postgres@postgres:5432/semantaix"
     persistence_db_path: str = ".data/semantaix_story1.db"
@@ -63,13 +68,16 @@ class AppSettings(BaseSettings):
         "Это не ко мне.\n"
         "С этим не помогу."
     )
-    bot_persona_first_name: str = "Анна"
-    bot_persona_last_name: str = "Иванова"
+    bot_persona_first_name: str = "Semantaix"
+    bot_persona_last_name: str = ""
+    telegram_platform_bot_username: str = "@semantaix_bot"
     bot_telegram_description: str = (
-        "Здравствуйте! Напишите свой вопрос — постараюсь ответить здесь сразу. "
-        "Если потребуется помощь коллег, передам им и вернусь к вам с ответом."
+        "Semantaix — платформа для операторов. "
+        "Новым операторам: отправьте /register для подачи заявки."
     )
-    bot_telegram_short_description: str = "На связи в чате. Пишите ваш вопрос."
+    bot_telegram_short_description: str = "Semantaix — регистрация и настройка операторов."
+    sales_persona_first_name: str = "Анна"
+    sales_persona_last_name: str = "Иванова"
     api_internal_base_url: str = "http://api:8000"
     rag_grounding_score_threshold: float = 0.6
     default_language: str = "ru"
@@ -79,6 +87,12 @@ class AppSettings(BaseSettings):
     weather_provider_base_url: str = "https://api.open-meteo.com"
     rag_db_path: str = ".data/semantaix_rag.db"
     knowledge_db_path: str = ".data/semantaix_knowledge.db"
+    # Epic 10 legacy bootstrap (pre-10.5): operator identity that used to be
+    # read from Settings. Epic 10.5 makes operators table authoritative, but
+    # we keep these settings fields for backwards-compatible `.env` loading
+    # (tests + existing deployments) even though runtime reads were migrated.
+    hitl_primary_operator_username: str = "@ajdevy"
+    hitl_primary_operator_chat_id: int | None = None
     hitl_config_admin_username: str = "@ajdevy"
     answer_trace_db_path: str = ".data/semantaix_answer_traces.db"
     answer_trace_snippet_max_chars: int = 240

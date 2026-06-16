@@ -31,13 +31,16 @@ docker compose up --build -d
 
 # Full Epic signoff (CI parity + live demo)
 bash scripts/run_all_epic_feature_signoffs.sh
+
+# Epic 16 signoff (operator registration + onboarding)
+bash scripts/epic16_signoff.sh
 ```
 
 CI runs `ruff check .` then `pytest` with coverage on every PR and push to main.
 
 ## Architecture
 
-**Semantaix** is a Docker-first microservices platform with five FastAPI services behind an nginx reverse proxy:
+**Semantaix** is a Docker-first microservices platform with six FastAPI services behind an nginx reverse proxy:
 
 | Service | Port | Role |
 |---------|------|------|
@@ -46,6 +49,7 @@ CI runs `ruff check .` then `pytest` with coverage on every PR and push to main.
 | `bot_gateway` | 8002 | Telegram webhook ingress |
 | `ingest_worker` | 8003 | Heartbeat placeholder |
 | `scheduler` | 8004 | Heartbeat placeholder |
+| `user_gateway` | 8005 | Telegram user account MTProto gateway (per-operator customer channel) |
 
 **Infrastructure:** nginx (port 80) routes `/api` → api, `/admin` → web_ui, `/telegram/webhook` → bot_gateway. Qdrant (port 6333) is the vector store. SQLite databases live in `.data/`.
 
@@ -58,13 +62,15 @@ Each concern has its own DB file in `.data/`:
 - `semantaix_rag.db` — RAG chunks (SHA-256 dedup)
 - `semantaix_knowledge.db` — Knowledge candidates + moderation queue (WAL)
 - `semantaix_operator_files.db` — Operator file registry (WAL; cross-read RO by api)
+- `semantaix_operators.db` — Operators registry + registration requests + onboarding events (Epic 16)
 - `semantaix_web_auth.db` — Web UI auth: one-time login codes + permanent sessions
 
 Both the `operator_files` and `knowledge_moderation_candidates` tables run in WAL mode so the api service can open `semantaix_operator_files.db` read-only and ATTACH the knowledge DB in a single SQLite query (see `services/api/app/operator_files_view.py`).
 
 ### Core API Flows (`services/api/`)
 
-- **`/conversations/inbound`** — single entry point for every customer message. Builds an `AnswerContext`, runs an `AnswerPipeline` of answerers in order: `DateTimeAnswerer` → `HolidayAnswerer` (RU calendar by default via `holidays`) → `WeatherAnswerer` (Open-Meteo, with Cyrillic→Latin city map) → `GroundedRagAnswerer` (RAG retrieve → strict-grounding LLM with `ESCALATE_TO_HUMAN` sentinel → LLM verifier → regex guardrails → profanity check). If no answerer handles the question, it escalates to HITL: ack to customer + create+assign ticket + DM operator with the verbatim question. The LLM is never in the user-visible answer unless it passes all four grounding layers. Pipeline lives in `services/api/app/answerers/`.
+- **`/conversations/inbound`** — single entry point for every customer message. Builds an `AnswerContext`, runs an `AnswerPipeline` of answerers in order: `DateTimeAnswerer` → `HolidayAnswerer` (RU calendar by default via `holidays`) → `WeatherAnswerer` (Open-Meteo, with Cyrillic→Latin city map) → `GroundedRagAnswerer` (RAG retrieve → strict-grounding LLM with `ESCALATE_TO_HUMAN` sentinel → LLM verifier → regex guardrails → profanity check). If no answerer handles the question, it escalates to HITL: ack to customer + create+assign ticket + DM operator with the verbatim question. The LLM is never in the user-visible answer unless it passes all four grounding layers. Pipeline lives in `services/api/app/answerers/`. Accepts `delivery_channel` (`bot` default, or `operator_user` with `operator_id` for per-operator Telethon delivery via `user_gateway`).
+- **`/operators/register-request`**, **`/operators/register-requests/*`** — operator self-registration: pending requests, admin approve/reject, onboarding-notify, onboarding event audit (`operator_registration.py` + `operator_registration_routes.py`).
 - **`/incidents/*`** — Dedup window (300 s default), status lifecycle, event timeline in `incidents.py`
 - **`/hitl/tickets/*`** — Route/assign/reply workflow in `hitl.py`; reply auto-resolves the ticket. Runtime config (operator mapping, ack message, country/timezone/location, grounding threshold) stored in `hitl_runtime_config`.
 - **`/knowledge/extract`** — Pulls transcript lines → moderation candidates (`knowledge_moderation.py`)
@@ -78,15 +84,26 @@ Both the `operator_files` and `knowledge_moderation_candidates` tables run in WA
 - `settings.py` — Single `Settings` class (Pydantic, env-based) shared by all services
 - `app_factory.py` — Creates FastAPI app with `/health/live`, `/ready`, `/startup` endpoints
 
-### Bot Gateway (`services/bot_gateway/`)
+### Bot Gateway (`services/bot_gateway/`) — platform bot **@semantaix_bot** (display name **Semantaix**)
 
-Validates Telegram webhook payload, normalizes + persists messages, then branches by sender:
-- **Customer message** → `ApiClient.forward_inbound` to api `/conversations/inbound`.
-- **Operator message** (sender matches `hitl_primary_operator_username`) → extract ticket id from `reply_to_message` text or fall back to "single open assigned ticket"; route via `ApiClient.deliver_operator_reply` to `/hitl/tickets/{id}/reply` (which auto-resolves).
+Validates Telegram webhook payload, normalizes + persists messages, handles `callback_query` updates, then branches by sender:
+
+| Surface | Who | What |
+|---------|-----|------|
+| **Customer DM** | End user → platform bot | `ApiClient.forward_inbound` → api `/conversations/inbound` (`delivery_channel=bot`). |
+| **Self-registration** | Non-operator | `/register [display_name]` → `POST /operators/register-request`; admin DM with **Approve** / **Reject** (`op_reg:approve:{id}` / `op_reg:reject:{id}`). |
+| **Onboarding** | Newly approved operator | Post-approval DM with **Подключить Google Calendar** (`onboard:cal:{operator_id}`) and **Привязать Telegram-аккаунт** (`onboard:tg:{operator_id}` → QR via `user_gateway`). |
+| **Operator reply** | Registered operator | HITL: extract ticket id from `reply_to_message` or single open assigned ticket → `/hitl/tickets/{id}/reply`. |
+| **Admin / operator commands** | See existing slash commands below | `/hitl_config`, `/files`, `/file`, `/files_find`, … |
+
 - **`/hitl_config @user chat_id`** admin command → upserts runtime config keys for operator routing.
 - **`/files [N]`** operator command → list operator's recent uploads (metadata only).
 - **`/file <short_id>`** operator-or-admin command → DM metadata + first 3072 chars of extracted text + link to `/admin/files/<short_id>`. Calls api `/admin/files/{short_id}` via `internal_service_token`.
 - **`/files_find <query>`** operator-or-admin command → DM up to 10 hits with one-line snippets. Calls api `/admin/files/search`.
+
+### User Gateway (`services/user_gateway/`) — operator-linked Telegram **user** accounts
+
+Per-operator Telethon sessions (`.data/operator_sessions/{operator_id}.session`). Auth: `POST /auth/qr_start`, `GET /auth/status`, `POST /auth/verify_2fa`. Customer DMs on the linked user account are forwarded to api `/conversations/inbound` with `delivery_channel=operator_user`; pipeline and HITL replies go out via `POST /messages/send` on the same session (not Bot API).
 
 ### Russian-first text handling (`services/api/app/russian_text/`)
 

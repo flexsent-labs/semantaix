@@ -4,10 +4,10 @@ from platform_common.logging_config import configure_logging
 from platform_common.settings import get_settings
 
 
-def create_service_app(service_name: str) -> FastAPI:
+def create_service_app(service_name: str, *, lifespan=None) -> FastAPI:
     configure_logging(service_name)
     settings = get_settings()
-    app = FastAPI(title=f"semantaix-{service_name}")
+    app = FastAPI(title=f"semantaix-{service_name}", lifespan=lifespan)
 
     @app.get("/health/live")
     def live() -> dict[str, str]:

@@ -32,23 +32,20 @@ def test_sales_state_repository_bootstrap_creates_table() -> None:
 
 
 def test_effective_sales_persona_name_joins_first_and_last(monkeypatch) -> None:
-    """The configurable persona name flows into the sales LLM prompts via
-    `_effective_sales_persona_name()`."""
+    """Sales LLM persona uses ``sales_persona_*`` settings, not platform bot name."""
 
-    def fake_persona() -> tuple[str, str]:
-        return ("Анна", "Иванова")
-
-    monkeypatch.setattr(main, "_effective_bot_persona", fake_persona)
+    monkeypatch.setattr(main.hitl_ticket_repository, "get_runtime_config", lambda _key: None)
+    monkeypatch.setattr(main.settings, "sales_persona_first_name", "Анна")
+    monkeypatch.setattr(main.settings, "sales_persona_last_name", "Иванова")
     assert main._effective_sales_persona_name() == "Анна Иванова"
 
 
 def test_effective_sales_persona_name_uses_first_only_when_last_empty(
     monkeypatch,
 ) -> None:
-    def fake_persona() -> tuple[str, str]:
-        return ("Анна", "")
-
-    monkeypatch.setattr(main, "_effective_bot_persona", fake_persona)
+    monkeypatch.setattr(main.hitl_ticket_repository, "get_runtime_config", lambda _key: None)
+    monkeypatch.setattr(main.settings, "sales_persona_first_name", "Анна")
+    monkeypatch.setattr(main.settings, "sales_persona_last_name", "")
     assert main._effective_sales_persona_name() == "Анна"
 
 

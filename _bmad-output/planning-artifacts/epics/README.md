@@ -26,6 +26,8 @@ This directory contains the BMAD feature-based sequential epic layout.
 12. `epic-12-sales-conversation-persona.md` *(planning merged via PR [#82](https://github.com/flexsent-labs/semantaix/pull/82) + cap PR [#83](https://github.com/flexsent-labs/semantaix/pull/83); stories backlog)*
 13. `epic-13-unified-project-services-catalog.md` *(shipped via PR [#80](https://github.com/flexsent-labs/semantaix/pull/80))*
 14. `epic-14-usage-cost-monitoring.md` *(planning — Step 2 of `bmad-create-epics-and-stories` complete; queued post-Epic 10.5 for stories 14.07 + 14.08; other stories can proceed in parallel)*
+15. Epic 15 — Telegram User Account Gateway (`user_gateway`) — stories in `stories/epic-15/` *(planning — IR READY 2026-06-09; starts after Epic 14)*
+16. `epic-16-operator-self-registration-onboarding.md` *(planning — 2026-06-16; starts after Epic 15.01–15.02; operator `/register` → admin approve → onboarding buttons for calendar + per-operator Telegram QR link)*
 
 ## Recent Implementation Notes
 - **Epic 04 (HITL escalation):** runtime HITL recipient/chat routing can be updated by Telegram command `/hitl_config @username <chat_id>`.

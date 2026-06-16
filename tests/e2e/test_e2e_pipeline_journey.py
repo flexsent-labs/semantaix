@@ -68,6 +68,10 @@ def _wire(tmp_path, monkeypatch):
         settings, "persistence_db_path", str(tmp_path / "persistence.sqlite3")
     )
     monkeypatch.setattr(api_main, "_effective_hitl_operator_username", lambda: "@operator")
+    async def _sales_skip(*, question, ctx):
+        return AnswerResult(handled=False)
+
+    monkeypatch.setattr(api_main.sales_persona_answerer, "try_answer", _sales_skip)
 
 
 def _post_inbound(client, **kwargs):

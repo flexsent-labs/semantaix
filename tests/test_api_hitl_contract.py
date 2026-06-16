@@ -13,9 +13,11 @@ from services.api.app.main import (
     telegram_bot_sender,
 )
 from services.api.app.main import app as api_app
+from tests.conftest import wire_isolated_primary_operator
 
 
 def _wire(tmp_path):
+    wire_isolated_primary_operator(tmp_path)
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
@@ -194,7 +196,9 @@ def test_inbound_uses_operator_table_for_hitl_username(tmp_path, monkeypatch):
     _wire(tmp_path)
     import services.api.app.main as api_main
     from services.api.app.operators import OperatorRepository
-    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+
+    operators_db = str(tmp_path / "operators_override.sqlite3")
+    fresh_operators = OperatorRepository(operators_db)
     fresh_operators.create(username="@flexsentlabs", project_id=1)
     monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     _force_escalation(monkeypatch)
@@ -323,7 +327,9 @@ def test_inbound_escalation_dms_operator_when_chat_id_configured(tmp_path, monke
     _wire(tmp_path)
     import services.api.app.main as api_main
     from services.api.app.operators import OperatorRepository
-    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+
+    operators_db = str(tmp_path / "operators_override.sqlite3")
+    fresh_operators = OperatorRepository(operators_db)
     fresh_operators.create(username="@flexsentlabs", project_id=1, chat_id=650934815)
     monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     _force_escalation(monkeypatch)

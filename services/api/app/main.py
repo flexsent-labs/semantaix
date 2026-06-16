@@ -110,6 +110,9 @@ from services.api.app.nl_knowledge_ops import (
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.operator_files_admin import OperatorFilesAdminWriter
 from services.api.app.operator_files_view import OperatorFilesView
+from services.api.app.operator_registration import OperatorRegistrationRepository
+from services.api.app.operator_registration_notify import build_operator_registration_notifier
+from services.api.app.operator_registration_routes import wire_operator_registration_routes
 from services.api.app.operators import (
     Operator,
     OperatorRepository,
@@ -221,6 +224,7 @@ from services.api.app.usage.repositories import (
     UsageLlmCallRepository,
     UsageMessageRepository,
 )
+from services.api.app.user_gateway_client import UserGatewayClient
 from services.api.app.web_auth import WebAuthRepository
 
 app = create_service_app("api")
@@ -262,6 +266,10 @@ trace_correction_repository = TraceCorrectionRepository(db_path=settings.nl_ops_
 weather_client = WeatherClient(base_url=settings.weather_provider_base_url)
 project_repository = ProjectRepository(settings.projects_db_path)
 operator_repository = OperatorRepository(settings.operators_db_path)
+operator_registration_repository = OperatorRegistrationRepository(
+    settings.operators_db_path
+)
+user_gateway_client = UserGatewayClient(base_url=settings.user_gateway_base_url)
 project_prompt_repository = ProjectPromptRepository(settings.hitl_ticket_db_path)
 catalog_digest_service = CatalogDigestService(
     repository=CatalogDigestRepository(settings.rag_db_path),
@@ -459,12 +467,18 @@ def _effective_bot_persona() -> tuple[str, str]:
 def _effective_sales_persona_name() -> str:
     """Resolve the persona name passed to the sales LLM prompts.
 
-    Joins the configurable first/last name (already used by the HITL bot
-    identity) so the sales persona is the same human face the customer
-    sees elsewhere.
+  Customer-facing sales copy uses ``sales_persona_*`` (human operator voice).
+  The platform Telegram bot identity uses ``bot_persona_*`` (Semantaix).
     """
-    first, last = _effective_bot_persona()
-    return f"{first} {last}".strip() if last else first
+    first = hitl_ticket_repository.get_runtime_config("sales_persona_first_name")
+    last = hitl_ticket_repository.get_runtime_config("sales_persona_last_name")
+    resolved_first = (
+        first if first is not None else settings.sales_persona_first_name
+    )
+    resolved_last = (
+        last if last is not None else settings.sales_persona_last_name
+    )
+    return f"{resolved_first} {resolved_last}".strip() if resolved_last else resolved_first
 
 
 def _effective_scope_decline_messages() -> str:
@@ -545,7 +559,6 @@ wire_usage_api_routes(
     incident_repo=_usage_incident_repo,
     operator_repo=operator_repository,
 )
-
 # Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
 # `sales_conversation_state` table is bootstrapped at startup. Story 12.09
 # wires the answerer into `answer_pipeline` below, immediately BEFORE the
@@ -814,6 +827,23 @@ def _project_to_dict(project: Project) -> dict[str, object]:
     }
 
 
+def _admin_registration_notify_chat_id() -> int | None:
+    """Resolve admin DM target for operator registration approval DMs."""
+    admin = operator_repository.find_by_username(settings.admin_telegram_username)
+    if admin is not None and admin.chat_id is not None:
+        return admin.chat_id
+    fallback = operator_repository.find_by_username(settings.hitl_config_admin_username)
+    if fallback is not None and fallback.chat_id is not None:
+        return fallback.chat_id
+    raw = _effective_hitl_operator_chat_id()
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _operator_to_dict(operator: Operator) -> dict[str, object]:
     return {
         "id": operator.id,
@@ -825,6 +855,40 @@ def _operator_to_dict(operator: Operator) -> dict[str, object]:
         "created_at": operator.created_at,
         "updated_at": operator.updated_at,
     }
+
+
+notify_admin_new_request, send_onboarding_dm = build_operator_registration_notifier(
+    telegram_sender=telegram_bot_sender,
+    registration_repository=operator_registration_repository,
+    admin_chat_id_getter=lambda: _admin_registration_notify_chat_id(),
+)
+wire_operator_registration_routes(
+    app_router=app,
+    registration_repository=operator_registration_repository,
+    operator_repository=operator_repository,
+    require_internal_token=require_internal_token,
+    require_admin_or_internal=require_admin_or_internal,
+    operator_to_dict=_operator_to_dict,
+    ensure_default_project_id=lambda: project_repository.ensure_default_project().id,
+    notify_admin_new_request=notify_admin_new_request,
+    send_onboarding_dm=send_onboarding_dm,
+    record_onboarding_event=operator_registration_repository.record_onboarding_event,
+)
+
+
+async def _send_reject_applicant_dm(*, request_id: int) -> bool:
+    request = operator_registration_repository.get(request_id)
+    if request is None:
+        return False
+    if request.chat_id is None:
+        return False
+    await telegram_bot_sender.send_message(
+        chat_id=request.chat_id,
+        text=(
+            "Заявка отклонена. Повторная подача возможна через 24 часа."
+        ),
+    )
+    return True
 
 
 @app.post("/admin/login/request")
@@ -1319,6 +1383,18 @@ def get_operator_by_username(username: str) -> dict[str, object]:
     return _operator_to_dict(operator)
 
 
+@app.post("/operators/register-requests/{request_id}/reject-notify")
+async def notify_rejected_registration(
+    request_id: int,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    request = operator_registration_repository.get(request_id)
+    if request is None:
+        raise HTTPException(status_code=404, detail="request_not_found")
+    await _send_reject_applicant_dm(request_id=request_id)
+    return {"request_id": request_id, "notified": True}
+
+
 @app.patch("/operators/{username:path}")
 def patch_operator(
     username: str,
@@ -1556,6 +1632,8 @@ class InboundMessageRequest(BaseModel):
     chat_id: int | None = None
     trace_id: str | None = None
     customer_username: str | None = None
+    delivery_channel: str = "bot"
+    operator_id: int | None = None
 
 
 class IncidentEventRequest(BaseModel):
@@ -1846,6 +1924,24 @@ def _resolve_inbound_project_id(chat_id: int | None) -> int | None:
     return default_project_id
 
 
+def _resolve_project_for_inbound(
+    *,
+    chat_id: int | None,
+    delivery_channel: str,
+    operator_id: int | None,
+) -> int | None:
+    if delivery_channel == "operator_user":
+        if operator_id is None:
+            return _default_project_id()
+        operator = next(
+            (item for item in operator_repository.list_all() if item.id == operator_id),
+            None,
+        )
+        if operator is not None:
+            return operator.project_id
+    return _resolve_inbound_project_id(chat_id)
+
+
 def _default_project_id() -> int | None:
     default = project_repository.get_by_slug("default")
     return default.id if default is not None else None
@@ -1919,26 +2015,49 @@ def _build_answer_context(
     customer_username: str | None,
     trace_id: str,
     now: datetime,
+    delivery_channel: str = "bot",
+    operator_id: int | None = None,
 ) -> AnswerContext:
     return AnswerContext(
         chat_id=chat_id,
         customer_username=customer_username,
         trace_id=trace_id,
         now=now,
+        delivery_channel=delivery_channel,
+        operator_id=operator_id,
         language=_effective_default_language(),
         country_code=_effective_default_country(),
         timezone=_effective_default_timezone(),
         location=_effective_default_location(),
         grounding_threshold=_effective_grounding_threshold(),
-        project_id=_resolve_inbound_project_id(chat_id),
+        project_id=_resolve_project_for_inbound(
+            chat_id=chat_id,
+            delivery_channel=delivery_channel,
+            operator_id=operator_id,
+        ),
     )
 
 
 async def _safe_send_message(
-    *, chat_id: int, text: str, failure_summary: str, failure_kind: str
+    *,
+    chat_id: int,
+    text: str,
+    failure_summary: str,
+    failure_kind: str,
+    delivery_channel: str = "bot",
+    operator_id: int | None = None,
 ) -> bool:
     try:
-        await telegram_bot_sender.send_message(chat_id=chat_id, text=text)
+        if delivery_channel == "operator_user":
+            if operator_id is None:
+                raise RuntimeError("missing_operator_id")
+            await user_gateway_client.send_message(
+                operator_id=operator_id,
+                chat_id=chat_id,
+                text=text,
+            )
+        else:
+            await telegram_bot_sender.send_message(chat_id=chat_id, text=text)
         return True
     except Exception as exc:  # broad: ack/notify are best-effort
         incident = incident_repository.ingest(
@@ -2216,12 +2335,16 @@ async def _escalate_calendar_availability(
             text=ack_message,
             failure_summary="Inbound ack delivery failed",
             failure_kind="inbound_ack_failed",
+            delivery_channel=request.delivery_channel,
+            operator_id=request.operator_id,
         )
     ticket = await asyncio.to_thread(
         hitl_ticket_repository.create,
         conversation_ref=request.text[:120],
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
+        delivery_channel=request.delivery_channel,
+        operator_id=request.operator_id,
     )
     _enqueue_hitl_event(
         project_id=project_id, event_type="created", ticket_id=ticket.id, trace_id=trace_id
@@ -2308,6 +2431,8 @@ async def _dispatch_sales_escalation(
             text=answer_text,
             failure_summary="Inbound sales answer delivery failed",
             failure_kind="inbound_delivery_failed",
+            delivery_channel=request.delivery_channel,
+            operator_id=request.operator_id,
         )
         if delivered:
             _enqueue_outbound_customer_message(project_id=project_id, trace_id=trace_id)
@@ -2365,6 +2490,8 @@ async def _dispatch_sales_escalation(
         conversation_ref=request.text[:120],
         reason=hitl_reason,
         target_chat_id=request.chat_id,
+        delivery_channel=request.delivery_channel,
+        operator_id=request.operator_id,
     )
     _enqueue_hitl_event(
         project_id=project_id, event_type="created", ticket_id=ticket.id, trace_id=trace_id
@@ -2424,6 +2551,10 @@ async def _dispatch_sales_escalation(
 async def conversations_inbound(request: InboundMessageRequest) -> dict[str, object]:
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="empty_text")
+    if request.delivery_channel not in {"bot", "operator_user"}:
+        raise HTTPException(status_code=422, detail="invalid_delivery_channel")
+    if request.delivery_channel == "operator_user" and request.operator_id is None:
+        raise HTTPException(status_code=422, detail="operator_id_required")
 
     started_at = time.perf_counter()
     trace_id = request.trace_id or str(uuid.uuid4())
@@ -2515,6 +2646,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             customer_username=request.customer_username,
             trace_id=trace_id,
             now=now,
+            delivery_channel=request.delivery_channel,
+            operator_id=request.operator_id,
         )
 
         # Story 12.13 — defer the interim ack: run the pipeline, and send
@@ -2537,6 +2670,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                     text=_effective_inbound_interim_message(),
                     failure_summary="Interim ack delivery failed",
                     failure_kind="inbound_interim_failed",
+                    delivery_channel=request.delivery_channel,
+                    operator_id=request.operator_id,
                 )
 
         # Story 12.36 (D12) — bound the pipeline so a slow/hung turn escalates
@@ -2574,12 +2709,16 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 text=ack_message,
                 failure_summary="Pipeline-error ack delivery failed",
                 failure_kind="inbound_pipeline_error_ack_failed",
+                delivery_channel=request.delivery_channel,
+                operator_id=request.operator_id,
             )
         ticket = await asyncio.to_thread(
             hitl_ticket_repository.create,
             conversation_ref=request.text[:120],
             reason="pipeline_error",
             target_chat_id=request.chat_id,
+            delivery_channel=request.delivery_channel,
+            operator_id=request.operator_id,
         )
         _enqueue_hitl_event(
             project_id=ctx.project_id if ctx is not None else _default_project_id(),
@@ -2668,6 +2807,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
                 text=pipeline_result.text or "",
                 failure_summary="Inbound answer delivery failed",
                 failure_kind="inbound_delivery_failed",
+                delivery_channel=request.delivery_channel,
+                operator_id=request.operator_id,
             )
             if delivered:
                 _enqueue_outbound_customer_message(
@@ -2774,6 +2915,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             text=ack_message,
             failure_summary="Inbound ack delivery failed",
             failure_kind="inbound_ack_failed",
+            delivery_channel=request.delivery_channel,
+            operator_id=request.operator_id,
         )
 
     ticket = await asyncio.to_thread(
@@ -2781,6 +2924,8 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         conversation_ref=request.text[:120],
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
+        delivery_channel=request.delivery_channel,
+        operator_id=request.operator_id,
     )
     _enqueue_hitl_event(
         project_id=ctx.project_id, event_type="created", ticket_id=ticket.id, trace_id=trace_id
@@ -3539,6 +3684,8 @@ def list_hitl_tickets() -> dict[str, object]:
                 "status": ticket.status,
                 "operator_username": ticket.operator_username,
                 "target_chat_id": ticket.target_chat_id,
+                "delivery_channel": ticket.delivery_channel,
+                "operator_id": ticket.operator_id,
                 "created_at": ticket.created_at,
                 "updated_at": ticket.updated_at,
                 "resolved_at": ticket.resolved_at,
@@ -3600,7 +3747,10 @@ async def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
 @app.post("/hitl/runtime-config/persona")
 async def update_bot_persona(request: BotPersonaRequest) -> dict[str, object]:
     effective_operator = _effective_hitl_operator_username()
-    if request.updated_by != effective_operator:
+    if (
+        request.updated_by != effective_operator
+        and request.updated_by != settings.hitl_config_admin_username
+    ):
         raise HTTPException(status_code=403, detail="not_authorized")
 
     first_name = _validate_persona_name(request.first_name)
@@ -3811,12 +3961,22 @@ async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -
         )
         raise HTTPException(status_code=503, detail="missing_target_chat_id")
 
+    message_id: int | None = None
     try:
-        # Delivers only the operator-authored body as bot text.
-        message_id = await telegram_bot_sender.send_message(
-            chat_id=ticket.target_chat_id,
-            text=request.reply_text.strip(),
-        )
+        if ticket.delivery_channel == "operator_user":
+            if ticket.operator_id is None:
+                raise RuntimeError("missing_operator_id")
+            await user_gateway_client.send_message(
+                operator_id=ticket.operator_id,
+                chat_id=ticket.target_chat_id,
+                text=request.reply_text.strip(),
+            )
+        else:
+            # Delivers only the operator-authored body as bot text.
+            message_id = await telegram_bot_sender.send_message(
+                chat_id=ticket.target_chat_id,
+                text=request.reply_text.strip(),
+            )
     except RuntimeError as exc:
         incident = incident_repository.ingest(
             fingerprint="hitl_delivery_failures",
@@ -3838,7 +3998,10 @@ async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -
         incident_repository.append_event(
             incident_id=incident.id,
             event_type="hitl_delivery_failed",
-            details=f"ticket_id={ticket_id};reason=provider_error",
+            details=(
+                f"ticket_id={ticket_id};reason=provider_error;"
+                f"delivery_channel={ticket.delivery_channel}"
+            ),
         )
         raise HTTPException(status_code=502, detail="hitl_delivery_failed") from exc
 

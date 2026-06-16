@@ -249,6 +249,14 @@ Acceptance criteria:
 
 *Delivery:* **Epic 08**, Story 08.04; moderation mechanics per **Epic 06**.
 
+### Feature Group: Operator Self-Registration & Onboarding (Epic 16)
+
+Platform bot **@semantaix_bot** (display name **Semantaix**) lets prospective operators self-register; admins approve or reject via inline Telegram buttons; approved operators receive onboarding (Google Calendar connect + per-operator Telegram user-account link via `user_gateway`). Customer conversations on the linked user account route through `delivery_channel=operator_user` (inbound + reply-only outbound on Telethon, not Bot API).
+
+Functional requirements **FR-16-01 — FR-16-16** and **NFR-16-01 — NFR-16-07** are authored in the [Epic 16 PRD addendum](prd-addenda/epic-16-operator-self-registration.md) (addendum IDs are distinct from **FR-16** Natural-Language Tenant Knowledge Operations above).
+
+*Delivery:* **Epic 15** (`user_gateway` skeleton) + **Epic 16** stories 16-01 — 16-08; signoff `scripts/epic16_signoff.sh`; E2E matrix row in `_bmad-output/implementation-artifacts/e2e-coverage.md`.
+
 ### Feature Group: Calendar Availability & Scheduling (Epic 11)
 
 Read-only availability first: the bot answers customer questions like "is service X available at date/time Y" by combining a calendar operator's Google Calendar free/busy with per-service scheduling rules. The feature is **opt-in per project and default-off** — most projects never enable it, and when disabled it is a silent no-op in the answer pipeline. Booking/event creation is explicitly out of scope for this phase (see §2.2).

@@ -46,6 +46,9 @@ def _make_ctx() -> AnswerContext:
 
 
 def _wire(tmp_path) -> None:
+    from tests.conftest import wire_isolated_primary_operator
+
+    wire_isolated_primary_operator(tmp_path)
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
@@ -338,9 +341,10 @@ def test_inscope_ask_at_scope_guard_escalates_to_hitl(tmp_path, monkeypatch):
 
     tickets = client.get("/hitl/tickets").json()["items"]
     assert len(tickets) == 1
-    # The customer got an ack (not a scope decline).
-    assert len(send_calls) == 1
-    assert send_calls[0][1] != "Этим не занимаюсь."
+    # The customer got an ack (not a scope decline); operator also gets a DM.
+    customer_sends = [call for call in send_calls if call[0] == 5003]
+    assert len(customer_sends) == 1
+    assert customer_sends[0][1] != "Этим не занимаюсь."
 
 
 def test_offtopic_message_trace_persisted(tmp_path, monkeypatch):

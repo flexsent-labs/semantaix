@@ -886,3 +886,60 @@ async def test_delete_project_service_raises_api_error(monkeypatch):
             internal_token="t",
         )
     assert info.value.detail == "admin_cannot_remove_service"
+
+
+@pytest.mark.asyncio
+async def test_operator_registration_methods_post_expected_paths(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"ok": True})
+    client = ApiClient(base_url="http://api:8000", internal_token="svc")
+
+    await client.create_operator_register_request(
+        username="@op",
+        chat_id=101,
+        display_name="Оператор",
+    )
+    assert http.post.await_args.args[0] == "http://api:8000/operators/register-request"
+    assert http.post.await_args.kwargs["headers"] == {"X-Internal-Token": "svc"}
+
+    await client.approve_operator_register_request(request_id=7, project_id=11)
+    assert (
+        http.post.await_args.args[0]
+        == "http://api:8000/operators/register-requests/7/approve"
+    )
+
+    await client.reject_operator_register_request(request_id=7)
+    assert (
+        http.post.await_args.args[0]
+        == "http://api:8000/operators/register-requests/7/reject"
+    )
+
+    await client.record_onboarding_event(
+        operator_id=3, event_type="telegram_link_started"
+    )
+    assert (
+        http.post.await_args.args[0]
+        == "http://api:8000/operators/3/onboarding-events"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_operator_by_id_returns_none_on_404(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        method="get",
+        response=_error_response(status_code=404, body={"detail": "operator_not_found"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    assert await client.get_operator_by_id(operator_id=99) is None
+
+
+@pytest.mark.asyncio
+async def test_get_operator_by_id_reraises_non_404(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        method="get",
+        response=_error_response(status_code=500, body={"detail": "server_error"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError):
+        await client.get_operator_by_id(operator_id=99)

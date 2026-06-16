@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app import main as api_main
+from services.api.app.answerers import AnswerResult
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.main import (
     answer_trace_repository,
@@ -101,6 +102,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     monkeypatch.setattr(
         api_main, "_resolve_inbound_project_id", lambda chat_id: 14
     )
+
+    async def _sales_skip(*, question, ctx):
+        return AnswerResult(handled=False)
+
+    monkeypatch.setattr(api_main.sales_persona_answerer, "try_answer", _sales_skip)
 
     rag_repository.ingest(
         source_id="delivery-faq",

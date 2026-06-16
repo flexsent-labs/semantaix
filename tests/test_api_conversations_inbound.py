@@ -36,6 +36,9 @@ def _no_interim(monkeypatch):
 
 
 def _wire(tmp_path) -> None:
+    from tests.conftest import wire_isolated_primary_operator
+
+    wire_isolated_primary_operator(tmp_path)
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
@@ -282,7 +285,9 @@ def test_inbound_uses_operator_table_for_hitl_username(tmp_path, monkeypatch):
     _wire(tmp_path)
     import services.api.app.main as api_main
     from services.api.app.operators import OperatorRepository
-    fresh_operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
+
+    operators_db = str(tmp_path / "operators_override.sqlite3")
+    fresh_operators = OperatorRepository(operators_db)
     fresh_operators.create(username="@runtime_op", project_id=1)
     monkeypatch.setattr(api_main, "operator_repository", fresh_operators)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))

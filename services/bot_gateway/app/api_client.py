@@ -589,6 +589,54 @@ class ApiClient:
             payload["display_name"] = display_name
         return await self._post("/operators", payload, auth=True)
 
+    async def create_operator_register_request(
+        self,
+        *,
+        username: str,
+        chat_id: int,
+        display_name: str | None,
+    ) -> dict:
+        return await self._post(
+            "/operators/register-request",
+            {
+                "username": username,
+                "chat_id": chat_id,
+                "display_name": display_name,
+            },
+            auth=True,
+        )
+
+    async def approve_operator_register_request(
+        self, *, request_id: int, project_id: int | None = None
+    ) -> dict:
+        return await self._post(
+            f"/operators/register-requests/{request_id}/approve",
+            {"project_id": project_id},
+            auth=True,
+        )
+
+    async def reject_operator_register_request(self, *, request_id: int) -> dict:
+        return await self._post(
+            f"/operators/register-requests/{request_id}/reject",
+            {},
+            auth=True,
+        )
+
+    async def record_onboarding_event(self, *, operator_id: int, event_type: str) -> dict:
+        return await self._post(
+            f"/operators/{operator_id}/onboarding-events",
+            {"event_type": event_type},
+            auth=True,
+        )
+
+    async def get_operator_by_id(self, *, operator_id: int) -> dict | None:
+        try:
+            return await self._get(f"/operators/id/{operator_id}", auth=True)
+        except ApiError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
     async def detach_operator(self, *, username: str) -> dict:
         return await self._patch(
             f"/operators/{username}", {"is_active": False}, auth=True

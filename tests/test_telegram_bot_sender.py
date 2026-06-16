@@ -97,6 +97,37 @@ async def test_send_message_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_message_includes_reply_markup(monkeypatch):
+    captured: list[dict] = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"message_id": 88}}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            captured.append(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: FakeClient())
+    sender = TelegramBotSender(bot_token="token")
+    markup = {"inline_keyboard": [[{"text": "ok", "callback_data": "x"}]]}
+    assert (
+        await sender.send_message(chat_id=10, text="hello", reply_markup=markup) == 88
+    )
+    assert captured[0]["reply_markup"] == markup
+
+
+@pytest.mark.asyncio
 async def test_set_my_name_posts_setMyName_payload(monkeypatch):
     client = _CapturingClient()
     monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
@@ -125,6 +156,36 @@ async def test_set_my_short_description_posts_setMyShortDescription_payload(monk
     await sender.set_my_short_description(short_description="На связи.")
     assert client.calls[0][0].endswith("/botabc/setMyShortDescription")
     assert client.calls[0][1] == {"short_description": "На связи."}
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_posts_payload(monkeypatch):
+    client = _CapturingClient()
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="abc")
+    result = await sender.answer_callback_query(callback_query_id="cq-1", text="ok")
+    assert result == {"ok": True, "result": {"message_id": 77}}
+    assert client.calls[0][0].endswith("/botabc/answerCallbackQuery")
+    assert client.calls[0][1] == {"callback_query_id": "cq-1", "text": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_edit_message_reply_markup_posts_payload(monkeypatch):
+    client = _CapturingClient()
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="abc")
+    result = await sender.edit_message_reply_markup(
+        chat_id=1,
+        message_id=2,
+        reply_markup=None,
+    )
+    assert result == {"ok": True, "result": {"message_id": 77}}
+    assert client.calls[0][0].endswith("/botabc/editMessageReplyMarkup")
+    assert client.calls[0][1] == {
+        "chat_id": 1,
+        "message_id": 2,
+        "reply_markup": None,
+    }
 
 
 class _FlakyClient:
