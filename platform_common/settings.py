@@ -87,12 +87,6 @@ class AppSettings(BaseSettings):
     weather_provider_base_url: str = "https://api.open-meteo.com"
     rag_db_path: str = ".data/semantaix_rag.db"
     knowledge_db_path: str = ".data/semantaix_knowledge.db"
-    # Epic 10 legacy bootstrap (pre-10.5): operator identity that used to be
-    # read from Settings. Epic 10.5 makes operators table authoritative, but
-    # we keep these settings fields for backwards-compatible `.env` loading
-    # (tests + existing deployments) even though runtime reads were migrated.
-    hitl_primary_operator_username: str = "@ajdevy"
-    hitl_primary_operator_chat_id: int | None = None
     hitl_config_admin_username: str = "@ajdevy"
     answer_trace_db_path: str = ".data/semantaix_answer_traces.db"
     answer_trace_snippet_max_chars: int = 240
