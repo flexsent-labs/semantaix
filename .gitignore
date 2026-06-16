@@ -27,6 +27,7 @@ ENV/
 .coverage.*
 coverage.xml
 htmlcov/
+*.py,cover
 
 # Build / packaging artifacts
 build/
