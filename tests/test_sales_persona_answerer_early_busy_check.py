@@ -3489,3 +3489,65 @@ async def test_english_working_days_faq_no_russian_text_leak() -> None:
         f"English reply must contain 'every day', got: {text!r}"
     )
     assert openrouter.calls == []
+
+
+# --- Story R30-2 / R30-3: greeting-stage bare-time guard + complete-opener skip ---
+
+
+@pytest.mark.asyncio
+async def test_greeting_bare_time_asks_date_before_booking() -> None:
+    # R30-3: greeting LLM may infer a date into ``merged`` for a bare-time opener;
+    # the raw-question guard must ask for the date instead of calling freeBusy.
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {"dates": "завтра", "headcount": 2},
+            "next_question": "На когда?",
+        }
+    )
+    answerer, _s, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    result = await answerer.try_answer(
+        question="Можно в 16:00 на багги?", ctx=_ctx()
+    )
+    assert result.text == ASK_FOR_DATE_LINE
+    assert freebusy.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_greeting_complete_opener_skips_scoping_to_booking() -> None:
+    # R30-2: opener already satisfies required scoping fields → booking verdict on
+    # turn one (no intermediate scoping question from the LLM).
+    openrouter = _FakeOpenRouter()
+    openrouter.queue_response(
+        {
+            "extracted_fields": {
+                "dates": "завтра в 14:00",
+                "headcount": 8,
+                "vehicle_count": 2,
+            },
+            "next_question": "Какой маршрут?",
+        }
+    )
+    answerer, _s, _, freebusy = _build(
+        state=None,
+        openrouter=openrouter,
+        cal_settings=_FakeCalSettings(),
+        token_provider=_TokenProvider(),
+        freebusy=_FreeBusy(busy=()),
+    )
+    answerer._required_fields_getter = lambda: (
+        "dates",
+        "headcount",
+        "vehicle_count",
+    )
+    result = await answerer.try_answer(
+        question="Завтра в 14:00, нас 8 человек, нужно 2 багги", ctx=_ctx()
+    )
+    assert result.text == SLOT_FREE_HANDOFF_LINE
+    assert freebusy.calls >= 1
