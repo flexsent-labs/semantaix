@@ -3,10 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_PATH="${ROOT_DIR}/.data/epic01_signoff.sqlite3"
+DEDUP_DB="${ROOT_DIR}/.data/epic01_signoff_dedup.sqlite3"
 
 cd "${ROOT_DIR}"
 mkdir -p .data
-rm -f "${DB_PATH}"
+rm -f "${DB_PATH}" "${DEDUP_DB}"
 
 # Load local environment (including OPENROUTER_API_KEY) when available.
 if [[ -f "${ROOT_DIR}/.env" ]]; then
@@ -17,10 +18,8 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
 fi
 
 export PERSISTENCE_DB_PATH="${DB_PATH}"
-export WEBHOOK_DEDUP_DB_PATH="${ROOT_DIR}/.data/epic01_dedup.db"
+export WEBHOOK_DEDUP_DB_PATH="${DEDUP_DB}"
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-demo-key-not-used}"
-
-rm -f "${ROOT_DIR}/.data/epic01_dedup.db"
 
 uvicorn services.bot_gateway.app.main:app --port 8002 >/tmp/epic01-bot.log 2>&1 &
 BOT_PID=$!
@@ -33,7 +32,7 @@ cleanup() {
 trap cleanup EXIT
 
 until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1 && \
-      curl -s http://127.0.0.1:8002/health/live >/dev/null 2>&1; do sleep 1; done
+      curl -s http://127.0.0.1:8002/health/live >/dev/null 2>&1; do sleep 0.5; done
 
 echo "== webhook call =="
 curl -s -X POST http://127.0.0.1:8002/telegram/webhook \
