@@ -206,6 +206,8 @@ No dedicated UX Design specification document exists for this project. Epic 14's
 | **NFR-9 Usage RBAC** | **Epic 14 → Story 14.07** |
 | **NFR-10 Usage Storage Scale** | **Epic 14 → Story 14.01 + 14.05** |
 | **NFR-11 Usage Backup Coverage** | **Epic 14 → Story 14.10** |
+| **FR-16-01 — FR-16-16 Operator Self-Registration & Onboarding** (addendum numbering; distinct from **FR-16** NL knowledge ops) | **Epic 16** |
+| **NFR-16-01 — NFR-16-07** (Epic 16 non-functionals) | **Epic 16** |
 
 ## Epic List
 
@@ -229,6 +231,7 @@ Feature-sequential — only one feature epic in implementation at a time, per `e
 | 13 | Unified Project Services Catalog | Shipped (PR [#80](https://github.com/flexsent-labs/semantaix/pull/80)) | [epic-13-unified-project-services-catalog.md](epics/epic-13-unified-project-services-catalog.md) |
 | **14** | **Usage / Token / Cost Monitoring + Cost-Spike Alerting** | **Planning (Step 2 of `bmad-create-epics-and-stories` complete; Step 3 next)** | [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md) |
 | **15** | **Telegram User Account Gateway (`user_gateway`)** | **Planning (requirements confirmed)** | [epic-15-telegram-user-gateway.md](epics/epic-15-telegram-user-gateway.md) |
+| **16** | **Operator Self-Registration & Onboarding** | **Shipped** | [epic-16-operator-self-registration-onboarding.md](epics/epic-16-operator-self-registration-onboarding.md) |
 
 Detailed Epic 14 design — goal, in-scope, out-of-scope, dependencies, exit criteria, and the 10-story split — is authored in [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md). This index file remains canonical for the Requirements Inventory (FR-1 — FR-36 / NFR-1 — NFR-11) and Epic List.
 
@@ -576,3 +579,105 @@ Full ACs: [story-15-04-spam-filters.md](epics/stories/epic-15/story-15-04-spam-f
 Since all routing is restricted to private DMs (`e.is_private == True`), a customer cannot simultaneously DM both the bot account and the user account with the same message. This story is deferred until there is confirmed production evidence of double-routing from group membership. Covers: `WebhookUpdateClaimRepository`-style dedup keyed by Telegram `message_id`, shared across both services via the existing `inbound_rate_limit_db_path` store or a new dedicated dedup DB.
 
 Full ACs: deferred — no story file created yet.
+
+---
+
+## Epic 16: Operator Self-Registration & Onboarding
+
+### Epic 16 — Requirements Inventory
+
+#### Functional Requirements
+
+FR-16-01: Non-operator may `/register [display_name]` via bot → pending registration request.
+FR-16-02: Admin receives DM with applicant details + Approve/Reject inline buttons.
+FR-16-03: Approve atomically creates `operators` row (default project) + marks request approved.
+FR-16-04: Reject notifies applicant; 24 h re-application cooldown.
+FR-16-05: Post-approval onboarding DM with inline action buttons.
+FR-16-06: Calendar button triggers Epic 11 OAuth connect flow.
+FR-16-07: Telegram link button triggers per-operator QR auth (Epic 15 pattern).
+FR-16-08: `callback_query` processing in `bot_gateway` (new capability).
+FR-16-09: `operator_registration_requests` table in operators DB.
+FR-16-10: `operator_onboarding_events` audit table.
+FR-16-11: Internal + admin api endpoints for register/approve/reject/list.
+FR-16-12: Per-operator `user_gateway` sessions (`operator_id` param on auth endpoints).
+FR-16-13: Linked user account IS the operator's customer-facing chat identity (clients DM it).
+FR-16-14: Inbound on operator account → `/conversations/inbound` with `delivery_channel=operator_user` + `operator_id`.
+FR-16-15: Outbound AI/HITL replies on operator-account conversations via `user_gateway POST /messages/send` (Telethon, reply-only).
+
+#### Non-Functional Requirements
+
+NFR-16-01: 100% coverage on new modules.
+NFR-16-02: Approve/reject atomic transactions.
+NFR-16-03: Callback `data` ≤ 64 bytes (`op_reg:approve:123`, `onboard:cal:45`).
+NFR-16-04: 2FA password + session paths never logged.
+NFR-16-05: Cooldown enforced server-side.
+NFR-16-06: Russian-first user copy.
+NFR-16-07: Operator-channel outbound reply-only (exception to Epic 15 receive-only for customer replies).
+
+**Source:** `_bmad-output/planning-artifacts/prd-addenda/epic-16-operator-self-registration.md`
+
+**Depends on:** Epic 10 (operators), Epic 11 (calendar), Epic 15.01–15.02 (user_gateway QR substrate).
+
+### Story 16.01: Registration Requests Schema + API
+
+**As a** platform engineer, **I want** registration-request persistence and admin-gated api endpoints, **so that** bot and admin surfaces can manage operator applications.
+
+Creates `OperatorRegistrationRepository`, tables `operator_registration_requests` + `operator_onboarding_events`, endpoints `POST /operators/register-request`, `GET /operators/register-requests`, approve/reject mutations.
+
+Full ACs: [story-16-01-registration-schema-api.md](epics/stories/epic-16/story-16-01-registration-schema-api.md).
+
+### Story 16.02: `/register` Bot Command
+
+**As a** prospective operator, **I want** `/register` in Telegram, **so that** I can apply without admin manually adding me.
+
+Regex-anchored command, operator gate, `ApiClient.create_operator_register_request`, Russian confirmation DM, admin plain-text notify (buttons in 16-04).
+
+Full ACs: [story-16-02-register-bot-command.md](epics/stories/epic-16/story-16-02-register-bot-command.md).
+
+### Story 16.03: Callback Query Dispatcher
+
+**As a** platform engineer, **I want** `callback_query` normalization and dispatch, **so that** inline keyboard buttons work.
+
+`NormalizedCallbackQuery`, `dispatch_callback_query`, `answerCallbackQuery` always called, prefix router stub.
+
+Full ACs: [story-16-03-callback-query-dispatcher.md](epics/stories/epic-16/story-16-03-callback-query-dispatcher.md).
+
+### Story 16.04: Admin Approval Inline Buttons
+
+**As a** platform admin, **I want** one-tap Approve/Reject on registration DMs, **so that** I can onboard operators quickly.
+
+`op_reg:approve|reject:<id>` callbacks, admin gate, applicant notification on outcome.
+
+Full ACs: [story-16-04-admin-approval-buttons.md](epics/stories/epic-16/story-16-04-admin-approval-buttons.md).
+
+### Story 16.05: Post-Approval Onboarding Buttons
+
+**As a** newly approved operator, **I want** onboarding buttons for calendar + Telegram link, **so that** setup is guided in-bot.
+
+`onboard:cal|tg:<operator_id>` callbacks; calendar reuses `/connect_calendar`; telegram delegates to 16-06.
+
+Full ACs: [story-16-05-onboarding-inline-buttons.md](epics/stories/epic-16/story-16-05-onboarding-inline-buttons.md).
+
+### Story 16.06: Per-Operator `user_gateway` Sessions
+
+**As a** registered operator, **I want** per-operator QR login, **so that** my Telegram user session is isolated from other operators.
+
+Extends Epic 15 auth with `operator_id` param, `operator_telegram_auth` table, `.data/operator_sessions/{id}.session`. Linked account = customer line (messaging wired in 16-08).
+
+Full ACs: [story-16-06-per-operator-user-gateway.md](epics/stories/epic-16/story-16-06-per-operator-user-gateway.md).
+
+### Story 16.08: Operator Customer Chat Channel
+
+**As an** operator, **I want** clients who DM my linked account to get AI answers and HITL replies on that same account, **so that** my business Telegram identity is my user account — not the platform bot.
+
+Per-operator Telethon listeners, `delivery_channel` on inbound seam, outbound router to `user_gateway /messages/send`, HITL ticket channel tagging.
+
+Full ACs: [story-16-08-operator-customer-chat-channel.md](epics/stories/epic-16/story-16-08-operator-customer-chat-channel.md).
+
+### Story 16.07: Epic 16 Signoff
+
+**As a** platform operator, **I want** automated epic signoff, **so that** the registration/onboarding journey stays regression-safe.
+
+`scripts/epic16_signoff.sh`, e2e journey tests, docs + FR coverage map update.
+
+Full ACs: [story-16-07-epic-signoff.md](epics/stories/epic-16/story-16-07-epic-signoff.md).

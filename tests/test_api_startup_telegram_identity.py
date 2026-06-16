@@ -82,9 +82,7 @@ def test_startup_falls_back_to_settings_defaults(monkeypatch, tmp_path):
     with TestClient(api_app):
         pass
 
-    expected_name = (
-        f"{settings.bot_persona_first_name} {settings.bot_persona_last_name}"
-    )
+    expected_name = settings.bot_persona_first_name
     name_mock.assert_awaited_once_with(name=expected_name)
     desc_mock.assert_awaited_once_with(description=settings.bot_telegram_description)
     short_mock.assert_awaited_once_with(

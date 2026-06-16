@@ -118,6 +118,17 @@ Each row marks whether a happy path (`H`) and/or an error/incident path (`E`) is
 | 10.5 | 10.5-04 | Cross-project isolation: P1 operator never receives P2 escalation | H | `tests/e2e/test_e2e_epic10_5_project_isolation.py::test_p1_operator_never_receives_p2_escalation` |
 | 10.5 | 10.5-04 | `_resolve_inbound_project_id` resolves to P2 via prior ticket's operator | H | `tests/e2e/test_e2e_epic10_5_project_isolation.py::test_inbound_project_resolves_to_p2_via_prior_ticket` |
 | 10.5 | 10.5-04 | `list_by_project_id` returns disjoint sets for P1 and P2 | H | `tests/e2e/test_e2e_epic10_5_project_isolation.py::test_operator_list_by_project_is_independent` |
+| 16 | 16-01 | `/register` creates pending request; duplicate pending rejected; existing operator rejected | H/E | `tests/e2e/test_e2e_epic16_registration_journey.py`; `tests/test_bot_gateway_register_command.py`; `tests/test_operator_registration_repository.py`; `tests/test_api_operator_registration_contract.py` |
+| 16 | 16-02 | Admin receives approval DM with inline buttons on new pending request | H | `tests/e2e/test_e2e_epic16_registration_journey.py`; `tests/test_epic16_coverage_gaps.py` |
+| 16 | 16-03 | Admin **Approve** callback creates operator row atomically; idempotent re-approve | H/E | `tests/e2e/test_e2e_epic16_admin_approval.py`; `tests/test_operator_registration_callbacks.py` |
+| 16 | 16-04 | Admin **Reject** callback + 24h re-register cooldown | H/E | `tests/e2e/test_e2e_epic16_admin_approval.py`; `tests/test_operator_registration_repository.py` |
+| 16 | 16-05 | Post-approval onboarding DM with calendar + Telegram link buttons | H | `tests/e2e/test_e2e_epic16_onboarding_buttons.py`; `tests/test_epic16_coverage_gaps.py` |
+| 16 | 16-06 | Onboarding calendar button → same flow as `/connect_calendar` | H | `tests/e2e/test_e2e_epic16_onboarding_buttons.py`; `tests/test_onboarding_callbacks.py` |
+| 16 | 16-06 | Onboarding Telegram link button → QR via `user_gateway` | H/E | `tests/e2e/test_e2e_epic16_onboarding_buttons.py`; `tests/test_bot_gateway_operator_telegram_link.py`; `tests/user_gateway/test_auth_qr_start.py` |
+| 16 | 16-08 | Customer DM on operator-linked user account → inbound + outbound via `user_gateway` | H | `tests/e2e/test_e2e_epic16_operator_customer_channel.py`; `tests/user_gateway/test_message_router.py`; `tests/user_gateway/test_operator_send_message.py` |
+| 16 | 16-08 | HITL tickets carry `delivery_channel` + `operator_id` for operator_user path | H | `tests/test_hitl_ticket_repository.py`; `tests/test_epic16_coverage_gaps.py` |
+| 16 | 16-08 | Unauthorized callback senders ignored (non-admin approval, non-owner onboarding) | E | `tests/test_bot_gateway_callback_dispatch.py`; `tests/test_telegram_callback_normalize.py` |
+| 16 | 16-07 | Scripted signoff: ruff + 100% coverage + epic16 e2e subset | H | `scripts/epic16_signoff.sh` |
 
 ## CI
 

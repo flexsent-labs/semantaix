@@ -29,6 +29,8 @@ def init_schema(db_path: str) -> None:
                 status TEXT NOT NULL,
                 operator_username TEXT,
                 target_chat_id INTEGER,
+                delivery_channel TEXT NOT NULL DEFAULT 'bot',
+                operator_id INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 resolved_at TEXT
@@ -41,6 +43,12 @@ def init_schema(db_path: str) -> None:
         ]
         if "target_chat_id" not in columns:
             connection.execute("ALTER TABLE hitl_tickets ADD COLUMN target_chat_id INTEGER")
+        if "delivery_channel" not in columns:
+            connection.execute(
+                "ALTER TABLE hitl_tickets ADD COLUMN delivery_channel TEXT NOT NULL DEFAULT 'bot'"
+            )
+        if "operator_id" not in columns:
+            connection.execute("ALTER TABLE hitl_tickets ADD COLUMN operator_id INTEGER")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS hitl_runtime_config (
@@ -61,6 +69,8 @@ class HitlTicket:
     status: str
     operator_username: str | None
     target_chat_id: int | None
+    delivery_channel: str
+    operator_id: int | None
     created_at: str
     updated_at: str
     resolved_at: str | None
@@ -77,6 +87,8 @@ class HitlTicketRepository:
         conversation_ref: str,
         reason: str,
         target_chat_id: int | None = None,
+        delivery_channel: str = "bot",
+        operator_id: int | None = None,
     ) -> HitlTicket:
         init_schema(self.db_path)
         now = _now()
@@ -85,16 +97,25 @@ class HitlTicketRepository:
                 """
                 INSERT INTO hitl_tickets (
                     conversation_ref, reason, status, operator_username,
-                    target_chat_id, created_at, updated_at, resolved_at
+                    target_chat_id, delivery_channel, operator_id,
+                    created_at, updated_at, resolved_at
                 )
-                VALUES (?, ?, 'open', NULL, ?, ?, ?, NULL)
+                VALUES (?, ?, 'open', NULL, ?, ?, ?, ?, ?, NULL)
                 """,
-                (conversation_ref, reason, target_chat_id, now, now),
+                (
+                    conversation_ref,
+                    reason,
+                    target_chat_id,
+                    delivery_channel,
+                    operator_id,
+                    now,
+                    now,
+                ),
             )
             row = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
                 """,
@@ -117,7 +138,7 @@ class HitlTicketRepository:
             row = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
                 """,
@@ -141,7 +162,7 @@ class HitlTicketRepository:
             row = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
                 """,
@@ -162,7 +183,7 @@ class HitlTicketRepository:
             row = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE target_chat_id = ?
                   AND status IN ('open', 'assigned')
@@ -186,7 +207,7 @@ class HitlTicketRepository:
             rows = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE operator_username = ?
                   AND status = 'assigned'
@@ -202,7 +223,7 @@ class HitlTicketRepository:
             rows = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 ORDER BY id DESC
                 """
@@ -215,7 +236,7 @@ class HitlTicketRepository:
             row = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
-                       created_at, updated_at, resolved_at
+                       delivery_channel, operator_id, created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
                 """,
@@ -236,7 +257,8 @@ class HitlTicketRepository:
             row = connection.execute(
                 """
                 SELECT id, conversation_ref, reason, status, operator_username,
-                       target_chat_id, created_at, updated_at, resolved_at
+                       target_chat_id, delivery_channel, operator_id,
+                       created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE target_chat_id = ?
                 ORDER BY id DESC
@@ -286,10 +308,11 @@ class HitlTicketRepository:
     ) -> tuple[str, str]:
         """Read persona overrides with settings fallback.
 
-        Returns ``(first_name, last_name)``. Used by the LLM system prompt
-        and the startup Telegram identity sync so they share one source of
-        truth. A stored empty string (operator cleared the surname) is
-        preserved — only an absent key falls back to the settings default.
+        Returns ``(first_name, last_name)``. Used by the startup Telegram
+        identity sync (platform bot display name). Sales LLM persona uses
+        ``sales_persona_*`` runtime keys / settings instead. A stored empty
+        string (operator cleared the surname) is preserved — only an absent
+        key falls back to the settings default.
         """
         first = self.get_runtime_config("bot_persona_first_name")
         last = self.get_runtime_config("bot_persona_last_name")
@@ -309,6 +332,10 @@ class HitlTicketRepository:
             target_chat_id=(
                 int(row["target_chat_id"]) if row["target_chat_id"] is not None else None
             ),
+            delivery_channel=(
+                str(row["delivery_channel"]) if row["delivery_channel"] is not None else "bot"
+            ),
+            operator_id=int(row["operator_id"]) if row["operator_id"] is not None else None,
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             resolved_at=str(row["resolved_at"]) if row["resolved_at"] else None,

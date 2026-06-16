@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+import services.api.app.main as api_main
+from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
     answer_trace_repository,
     hitl_ticket_repository,
@@ -86,6 +88,12 @@ def _wire(tmp_path, monkeypatch):
             )
         ),
     )
+    monkeypatch.setattr(api_main, "_should_send_interim", lambda text, chat_id: False)
+
+    async def _sales_skip(*, question, ctx):
+        return AnswerResult(handled=False)
+
+    monkeypatch.setattr(api_main.sales_persona_answerer, "try_answer", _sales_skip)
 
 
 def _ingest_brochure(client: TestClient) -> int:

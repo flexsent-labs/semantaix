@@ -36,8 +36,11 @@ def test_settings_defaults(monkeypatch):
         ".data/semantaix_web_auth.db",
         ".data/semantaix_operator_files.db",
     ]
-    assert settings.bot_persona_first_name == "Анна"
-    assert settings.bot_persona_last_name == "Иванова"
+    assert settings.bot_persona_first_name == "Semantaix"
+    assert settings.bot_persona_last_name == ""
+    assert settings.telegram_platform_bot_username == "@semantaix_bot"
+    assert settings.sales_persona_first_name == "Анна"
+    assert settings.sales_persona_last_name == "Иванова"
     assert "бот" not in settings.bot_telegram_description.lower()
     assert "бот" not in settings.bot_telegram_short_description.lower()
     assert settings.inbound_ack_message == "Минутку, уточню и вернусь с ответом."
@@ -45,6 +48,10 @@ def test_settings_defaults(monkeypatch):
     assert settings.web_session_cookie_name == "semantaix_session"
     assert settings.web_session_cookie_secure is True
     assert settings.internal_service_token is None
+    assert settings.user_gateway_db_path == ".data/semantaix_user_gateway.db"
+    assert settings.tg_user_session_path == ".data/user_gateway.session"
+    assert settings.user_gateway_base_url == "http://user_gateway:8005"
+    assert settings.operator_sessions_dir == ".data/operator_sessions"
 
 
 def test_settings_env_override(monkeypatch):

@@ -45,3 +45,26 @@ def _isolate_webhook_update_claims(tmp_path, monkeypatch):
             str(tmp_path / "rate_limit.sqlite3"),
         )
     yield
+
+
+def wire_isolated_primary_operator(tmp_path, *, username: str = "@ajdevy", chat_id: int = 999001):
+    """Point operators + projects DBs at tmp_path with a single active operator.
+
+    HITL escalation tests expect ``_effective_hitl_operator_username()`` to
+    resolve to ``@ajdevy``; without isolation the shared ``.data/`` operators
+    table (e.g. ``@flexsentlabs`` first) breaks those assertions.
+    """
+    from services.api.app.main import operator_repository, project_repository
+
+    operator_db = str(tmp_path / "operators.sqlite3")
+    projects_db = str(tmp_path / "projects.sqlite3")
+    operator_repository.db_path = operator_db
+    operator_repository.init_schema()
+    project_repository.db_path = projects_db
+    project_repository.init_schema()
+    default_project = project_repository.ensure_default_project()
+    operator_repository.create(
+        username=username,
+        project_id=default_project.id,
+        chat_id=chat_id,
+    )

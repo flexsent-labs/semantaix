@@ -32,6 +32,7 @@ from services.bot_gateway.app.admin_commands import handle_admin_project_command
 from services.bot_gateway.app.admin_nl_dialog import handle_admin_nl_dialog
 from services.bot_gateway.app.api_client import ApiClient, ApiError
 from services.bot_gateway.app.calendar_commands import handle_calendar_command
+from services.bot_gateway.app.callback_dispatch import dispatch_callback_query
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
 from services.bot_gateway.app.material_command_dispatch import (
@@ -47,9 +48,16 @@ from services.bot_gateway.app.offline_context import (
     is_thin,
     load_context_cues,
 )
+from services.bot_gateway.app.onboarding_callbacks import handle_onboarding_callback
 from services.bot_gateway.app.operator_files import (
     OperatorFileRecord,
     OperatorFileRepository,
+)
+from services.bot_gateway.app.operator_registration_callbacks import (
+    handle_operator_registration_callback,
+)
+from services.bot_gateway.app.operator_registration_commands import (
+    handle_register_command,
 )
 from services.bot_gateway.app.operator_resolver import resolve_operator_for_sender
 from services.bot_gateway.app.operator_service_nl import (
@@ -64,6 +72,7 @@ from services.bot_gateway.app.prompt_commands import (
 from services.bot_gateway.app.rate_limit_repository import InboundRateLimitRepository
 from services.bot_gateway.app.sales_command_dispatch import handle_sales_command
 from services.bot_gateway.app.services_nl_dialog import handle_services_nl_message
+from services.bot_gateway.app.telegram_callback import normalize_callback_query
 from services.bot_gateway.app.telegram_file_download import (
     TelegramFileDownloader,
     TelegramFileDownloadError,
@@ -79,6 +88,7 @@ from services.bot_gateway.app.telegram_update import (
     normalize_update,
 )
 from services.bot_gateway.app.usage_command import handle_usage_command
+from services.bot_gateway.app.user_gateway_client import UserGatewayClient
 from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
 
 app = create_service_app("bot_gateway")
@@ -107,6 +117,10 @@ offline_context_cues = load_context_cues()
 api_client = ApiClient(
     base_url=settings.api_internal_base_url,
     internal_token=settings.admin_internal_token,
+)
+user_gateway_client = UserGatewayClient(
+    base_url=settings.user_gateway_base_url,
+    internal_token=settings.internal_service_token or "",
 )
 telegram_bot_sender = TelegramBotSender(
     bot_token=settings.telegram_bot_token,
@@ -2408,6 +2422,45 @@ def _derive_trace_id(*, header_trace: str | None, update_id: object) -> str:
     return str(uuid.uuid4())
 
 
+async def _handle_op_reg_callback(
+    normalized_callback,
+    action: str,
+    arg: str,
+) -> dict[str, str]:
+    return await handle_operator_registration_callback(
+        normalized_callback,
+        action,
+        arg,
+        api_client=api_client,
+        send_dm=_send_dm,
+        telegram_bot_sender=telegram_bot_sender,
+        admin_username=settings.admin_telegram_username,
+    )
+
+
+async def _handle_onboard_callback(
+    normalized_callback,
+    action: str,
+    arg: str,
+) -> dict[str, str]:
+    return await handle_onboarding_callback(
+        normalized_callback,
+        action,
+        arg,
+        api_client=api_client,
+        user_gateway_client=user_gateway_client,
+        send_dm=_send_dm,
+        telegram_bot_sender=telegram_bot_sender,
+        internal_token=settings.internal_service_token or "",
+    )
+
+
+_CALLBACK_HANDLERS = {
+    "op_reg": _handle_op_reg_callback,
+    "onboard": _handle_onboard_callback,
+}
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(
     request: Request,
@@ -2447,6 +2500,33 @@ async def _process_telegram_update(
     trace_id: str,
     background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
+    callback_query = payload.get("callback_query")
+    if callback_query is not None:
+        try:
+            normalized_callback = normalize_callback_query(payload)
+        except ValueError as exc:
+            logger.warning(
+                "telegram_callback_rejected",
+                extra={"trace_id": trace_id, "reason": str(exc)},
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if normalized_callback is None:
+            return {"status": "ignored", "trace_id": trace_id}
+        if not webhook_update_claim_repository.claim(normalized_callback.update_id):
+            return {
+                "status": "ignored",
+                "reason": "duplicate_update",
+                "trace_id": trace_id,
+            }
+        dispatched = await dispatch_callback_query(
+            normalized_callback,
+            handlers=_CALLBACK_HANDLERS,
+            telegram_bot_sender=telegram_bot_sender,
+        )
+        response = {"trace_id": trace_id}
+        response.update(dispatched)
+        return response
+
     try:
         normalized = normalize_update(payload)
     except TelegramUpdateValidationError as exc:
@@ -2508,6 +2588,18 @@ async def _process_telegram_update(
         api_client=api_client,
     )
     is_operator = _resolved_op is not None
+
+    register_result = await handle_register_command(
+        normalized=normalized,
+        is_operator=is_operator,
+        api_client=api_client,
+        send_dm=_send_dm,
+    )
+    if register_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(register_result)
+        _log_routed(trace_id=trace_id, result=register_result, fallback="register_command")
+        return response
 
     delete_result = await _handle_file_delete_command(
         normalized=normalized, is_operator=is_operator

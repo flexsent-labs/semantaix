@@ -71,13 +71,18 @@ def test_webhook_rejects_malformed_payload():
 
 
 def test_webhook_ignores_callback_query_update():
+    bot_app.dependency_overrides.clear()
+    from services.bot_gateway.app import main as main_module
+
+    main_module.telegram_bot_sender.answer_callback_query = AsyncMock(return_value={"ok": True})
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
         json=load_fixture("update_callback_query_valid.json"),
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "ignored"
+    assert response.json()["status"] == "processed"
+    main_module.telegram_bot_sender.answer_callback_query.assert_awaited_once()
 
 
 def test_webhook_ignores_edited_message_update():

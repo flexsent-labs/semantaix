@@ -22,6 +22,8 @@ class AnswerContext:
     customer_username: str | None
     trace_id: str
     now: datetime
+    delivery_channel: str = "bot"
+    operator_id: int | None = None
     language: str = "ru"
     country_code: str = "RU"
     timezone: str = "Europe/Moscow"

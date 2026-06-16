@@ -103,6 +103,11 @@ def test_webhook_routes_services_nl_dialog_propose(wired_bot, monkeypatch):
     from services.bot_gateway.app import services_nl_dialog
 
     services_nl_dialog._reset_token_cache_for_tests()
+    monkeypatch.setattr(
+        bot_main,
+        "handle_operator_service_nl_message",
+        AsyncMock(return_value=None),
+    )
 
     find_op = AsyncMock(
         return_value={

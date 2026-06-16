@@ -43,12 +43,15 @@
 #   Planning story files in planning-artifacts/epics/stories/epic-14/ (IR: READY).
 # - Epic 15 (Telegram User Account Gateway) starts after Epic 14 closes.
 #   Planning story files in planning-artifacts/epics/stories/epic-15/ (IR: READY).
+# - Epic 16 (Operator Self-Registration & Onboarding) starts after Epic 15.01–15.02.
+#   Planning story files in planning-artifacts/epics/stories/epic-16/ (IR: pending).
+#   Adds callback_query handling + per-operator user_gateway sessions.
 #   15.01 is foundation; 15.02 → 15.03 → 15.04 sequential; 15.05 conditional (deferred).
 #   NFR-15-03/04/05/09 are hard security constraints (2FA never logged, session path never logged,
 #   no automated replies, silent rate-limit drops).
 
 generated: 2026-05-23
-last_updated: 2026-06-14T12:00:00
+last_updated: 2026-06-16T12:00:00
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -235,3 +238,17 @@ development_status:
   15-04-spam-filters: backlog
   15-05-cross-channel-dedup-conditional: backlog
   epic-15-retrospective: optional
+
+  # --- Epic 16 (Operator Self-Registration & Onboarding; backlog after Epic 15.02) ---
+  # Planning story files in planning-artifacts/epics/stories/epic-16/.
+  # Requires callback_query support (new in bot_gateway) + per-operator user_gateway sessions.
+  epic-16: in-progress
+  16-01-registration-schema-api: done
+  16-02-register-bot-command: done
+  16-03-callback-query-dispatcher: done
+  16-04-admin-approval-buttons: done
+  16-05-onboarding-inline-buttons: done
+  16-06-per-operator-user-gateway: done
+  16-08-operator-customer-chat-channel: done
+  16-07-epic-signoff: done
+  epic-16-retrospective: optional

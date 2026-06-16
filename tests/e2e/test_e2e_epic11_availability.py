@@ -115,12 +115,22 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     # Saturday regardless of the wall clock the suite runs on.
     _real_build_ctx = api_main._build_answer_context
 
-    def _frozen_build_ctx(*, chat_id, customer_username, trace_id, now):  # noqa: ARG001
+    def _frozen_build_ctx(
+        *,
+        chat_id,
+        customer_username,
+        trace_id,
+        now,
+        delivery_channel="bot",
+        operator_id=None,
+    ):
         return _real_build_ctx(
             chat_id=chat_id,
             customer_username=customer_username,
             trace_id=trace_id,
             now=_NOW,
+            delivery_channel=delivery_channel,
+            operator_id=operator_id,
         )
 
     monkeypatch.setattr(api_main, "_build_answer_context", _frozen_build_ctx)
