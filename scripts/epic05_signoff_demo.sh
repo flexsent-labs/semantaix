@@ -35,7 +35,7 @@ export TELEGRAM_BOT_TOKEN="stub-token"
 uvicorn services.api.app.main:app --port 8000 >/tmp/epic05-api.log 2>&1 &
 API_PID=$!
 trap 'kill "${API_PID}" >/dev/null 2>&1 || true' EXIT
-sleep 2
+until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1; do sleep 1; done
 
 echo "== ingest RAG content =="
 curl -s -X POST http://127.0.0.1:8000/rag/ingest \

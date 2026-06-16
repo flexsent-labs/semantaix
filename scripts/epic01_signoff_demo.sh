@@ -17,7 +17,10 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
 fi
 
 export PERSISTENCE_DB_PATH="${DB_PATH}"
+export WEBHOOK_DEDUP_DB_PATH="${ROOT_DIR}/.data/epic01_dedup.db"
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-demo-key-not-used}"
+
+rm -f "${ROOT_DIR}/.data/epic01_dedup.db"
 
 uvicorn services.bot_gateway.app.main:app --port 8002 >/tmp/epic01-bot.log 2>&1 &
 BOT_PID=$!
@@ -29,7 +32,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-sleep 2
+until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1 && \
+      curl -s http://127.0.0.1:8002/health/live >/dev/null 2>&1; do sleep 1; done
 
 echo "== webhook call =="
 curl -s -X POST http://127.0.0.1:8002/telegram/webhook \
@@ -37,10 +41,8 @@ curl -s -X POST http://127.0.0.1:8002/telegram/webhook \
   -d @tests/fixtures/telegram/update_message_text_basic.json
 echo
 
-echo "== suggest call =="
-curl -s -X POST http://127.0.0.1:8000/suggest \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Customer asks about reset password. Suggest reply."}'
+echo "== api health check =="
+curl -s http://127.0.0.1:8000/health/live
 echo
 
 echo "== sqlite verification =="

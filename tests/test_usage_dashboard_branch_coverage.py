@@ -6,7 +6,7 @@ error paths (invalid day_utc, unknown tracker_type).
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -70,7 +70,7 @@ def _insert_summary(db: str, *, day: str, tracker: str, **kwargs) -> None:
 def test_dashboard_messages_and_hitl_branches(tmp_path):
     """Seed messages + hitl summary rows; verifies aggregate + series branches execute."""
     db = _db(tmp_path)
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    yesterday = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
     _insert_summary(db, day=yesterday, tracker="messages", call_count=5,
                     in_count=3, out_count=2)
     _insert_summary(db, day=yesterday, tracker="hitl", call_count=2)

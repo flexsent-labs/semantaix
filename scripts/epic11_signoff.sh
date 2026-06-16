@@ -74,7 +74,9 @@ done
 PROJECT_ID=1
 OPERATOR="@ops_demo"
 
-echo "== availability question on DISABLED project -> HITL (no calendar) =="
+echo "== availability question on DISABLED project -> scope_decline (no calendar) =="
+# Disabled noop project: scope_guard declines booking asks rather than creating
+# operator noise via HITL. This is intentional (see scope_guard.py).
 DISABLED=$(curl -s -X POST http://127.0.0.1:8011/conversations/inbound \
   -H 'content-type: application/json' \
   -d '{"text":"можно записаться на маникюр в субботу в 15:00?","chat_id":4242,"trace_id":"epic11-disabled"}')
@@ -82,9 +84,9 @@ echo "${DISABLED}"
 python3 - "${DISABLED}" <<'PY'
 import json, sys
 body = json.loads(sys.argv[1])
-if not body.get("escalated") or body.get("response_mode") != "human_only":
-    raise SystemExit(f"Epic 11 demo failed: disabled project not HITL: {body}")
-print({"disabled_escalated": True})
+if body.get("escalated") or body.get("response_mode") != "scope_decline":
+    raise SystemExit(f"Epic 11 demo failed: disabled project should scope-decline: {body}")
+print({"disabled_scope_decline": True})
 PY
 
 echo "== enable calendar for project ${PROJECT_ID} (mocked /connect_calendar callback) =="
