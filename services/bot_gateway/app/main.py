@@ -78,6 +78,7 @@ from services.bot_gateway.app.telegram_update import (
     TelegramUpdateValidationError,
     normalize_update,
 )
+from services.bot_gateway.app.usage_command import handle_usage_command
 from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
 
 app = create_service_app("bot_gateway")
@@ -2702,6 +2703,20 @@ async def _process_telegram_update(
     if services_nl_result is not None:
         response = {"trace_id": trace_id}
         response.update(services_nl_result)
+        return response
+
+    usage_result = await handle_usage_command(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        admin_username=settings.admin_telegram_username,
+        internal_token=settings.internal_service_token or "",
+        web_ui_base_url=settings.web_ui_base_url,
+        default_timezone=settings.default_timezone,
+    )
+    if usage_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(usage_result)
         return response
 
     whoami_result = await _handle_whoami_command(

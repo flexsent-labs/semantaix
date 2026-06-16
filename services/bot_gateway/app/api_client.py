@@ -984,6 +984,64 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
+    async def fetch_usage_today(
+        self,
+        *,
+        project_id: int,
+        scope: str,
+        as_user: str,
+        today_utc: str,
+        internal_token: str,
+    ) -> dict | None:
+        """Fetch today's usage summary + (admin only) wasted-cost rows.
+
+        Returns ``{"summary_rows": [...], "wasted_rows": [...] | None}`` on
+        success, or ``None`` on connectivity / 5xx errors (caller shows the
+        degraded-state message).  Logs ``usage_command_api_failed`` on error.
+        """
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        common_params = {
+            "project_id": project_id,
+            "from_day_utc": today_utc,
+            "to_day_utc": today_utc,
+            "as_user": as_user,
+        }
+        headers = {"Authorization": f"Bearer {internal_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                summary_resp = await client.get(
+                    f"{self._base_url}/api/usage/summary",
+                    params={**common_params, "trackers": "llm,messages,hitl"},
+                    headers=headers,
+                )
+            _raise_for_status(summary_resp)
+            summary_rows = summary_resp.json().get("rows", [])
+
+            wasted_rows: list | None = None
+            if scope == "admin":
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    wasted_resp = await client.get(
+                        f"{self._base_url}/api/usage/wasted",
+                        params=common_params,
+                        headers=headers,
+                    )
+                _raise_for_status(wasted_resp)
+                wasted_rows = wasted_resp.json().get("rows", [])
+
+            return {"summary_rows": summary_rows, "wasted_rows": wasted_rows}
+        except (httpx.RequestError, httpx.TransportError, OSError) as exc:
+            _log.warning("usage_command_api_failed", extra={"error": str(exc)})
+            return None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (502, 503, 504):
+                _log.warning(
+                    "usage_command_api_failed",
+                    extra={"status": exc.response.status_code},
+                )
+                return None
+            raise
+
     async def _post(
         self,
         path: str,
