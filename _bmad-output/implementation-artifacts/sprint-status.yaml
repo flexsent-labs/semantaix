@@ -220,7 +220,7 @@ development_status:
   14-05-daily-rollup-and-retention: done
   14-06-web-ui-usage-dashboard: done
   14-07-usage-api-and-money-rbac: done
-  14-08-usage-bot-command: backlog
+  14-08-usage-bot-command: review
   14-09-alerting-and-incident-state-machine: backlog
   14-10-epic-14-signoff: backlog
   epic-14-retrospective: optional

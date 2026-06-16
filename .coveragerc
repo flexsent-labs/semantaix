@@ -4,6 +4,7 @@ source =
     services
 omit =
     */__init__.py
+concurrency = thread
 
 [report]
 fail_under = 100

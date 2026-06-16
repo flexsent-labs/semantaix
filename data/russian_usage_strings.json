@@ -1,0 +1,19 @@
+{
+  "header": "📊 Использование за сегодня — {project_name}",
+  "llm_section_admin": "💰 LLM:",
+  "llm_section_operator": "💬 LLM:",
+  "cost_line": "  • Расход: {cost} (потрачено впустую: {wasted})",
+  "tokens_line": "  • Токены: {prompt} prompt + {completion} completion",
+  "calls_line": "  • Вызовов: {count}",
+  "models_line": "  • Модели: {models}",
+  "models_overflow": "(и ещё {n})",
+  "messages_section": "💬 Сообщения: {in_count} входящих, {out_count} исходящих",
+  "hitl_section": "🎫 HITL: {created} создано, {assigned} назначено, {replied} отвечено, {resolved} закрыто",
+  "deep_link_line": "🔗 Подробнее: {url}",
+  "empty_state": "Сегодня данных пока нет.",
+  "degraded_state": "Данные использования временно недоступны.",
+  "no_project_assigned_operator": "У вас не назначен проект — обратитесь к администратору.",
+  "admin_specify_project": "Укажите проект: /usage <название>\n\nДоступные проекты:\n{projects_list}",
+  "unknown_project": "Проект «{name}» не найден.",
+  "null_cost": "—"
+}

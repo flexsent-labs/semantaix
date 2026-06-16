@@ -177,6 +177,7 @@ class AppSettings(BaseSettings):
     usage_daily_rollup_hour_utc: int = 0
     usage_raw_retention_days: int = 30
     usage_rollup_batch_size: int = 10_000
+    web_ui_base_url: str = "http://localhost:8001"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
