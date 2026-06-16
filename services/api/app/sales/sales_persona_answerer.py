@@ -1786,6 +1786,34 @@ class SalesPersonaAnswerer:
         )
         if vague is not None:
             return vague
+        # Story R30-3 — bare-time guard for the greeting stage. The greeting
+        # LLM may add an implicit date (e.g. «завтра») to ``merged.dates`` when
+        # the customer only stated a bare time («Можно в 16:00 на багги?»),
+        # because the system prompt tells the LLM today's date and it infers a
+        # day from context (e.g. when 16:00 has already passed today). This
+        # implicit date makes ``merged.is_complete()`` True so R30-2 calls
+        # ``_complete_booking``, and ``_has_time_without_date`` inside then sees
+        # a date in ``intent.dates`` → returns False → calls freeBusy without
+        # asking for the date. Fix: test the RAW question using an empty Intent
+        # so only the question text is checked (not LLM-inferred dates). Must
+        # run BEFORE the busy-slot intercept (which also calls freeBusy) so
+        # that a dateless opener never reaches the calendar. The 12.99
+        # short-circuit in ``_has_time_without_date`` still fires for genuine
+        # relative offsets («через два часа», «прямо сейчас») and explicit
+        # day+time openers («завтра в 16:00», «9 июня в 12:00»).
+        if await self._has_time_without_date(
+            ctx=ctx, intent=Intent(), question=question
+        ):
+            raw_time_intent = self._fold_raw_time_into_intent(
+                intent=Intent(), question=question
+            )
+            return await self._ask_for_date(
+                ctx=ctx,
+                intent=raw_time_intent,
+                stage_before=STAGE_NEW,
+                base_metadata={},
+                dispatch_fallback=False,
+            )
         # Story 12.25 — if the opener carries a concrete date+time and the
         # slot is already busy, surface it now: customers should not be
         # asked logistics questions about a slot that was never going to
@@ -1811,9 +1839,27 @@ class SalesPersonaAnswerer:
         )
         if price_intercept is not None:
             return price_intercept
-        # Greeting always transitions into scoping. Even if the customer
-        # already supplied every field in the opener (unlikely), the next
-        # turn handles the pitching transition cleanly.
+        # Story R30-2 — when the opener already satisfies ALL required schema
+        # fields (e.g. dates + headcount + vehicle_count with the 3-field
+        # config), skip the intermediate SCOPING hop. The customer gets a
+        # direct booking verdict (free/busy) on the first turn instead of a
+        # redundant clarifying question about an optional field (e.g. route
+        # difficulty). The LLM's ``next_question`` is discarded in this branch
+        # because scoping is already complete.
+        schema = self._resolve_schema(ctx)
+        if merged.is_complete(schema.required_keys()):
+            media_metadata, dispatch_fallback = await self._fire_media_moment(
+                ctx=ctx, intent=merged, purpose="tour_preview"
+            )
+            return await self._complete_booking(
+                ctx=ctx,
+                intent=merged,
+                stage_before=STAGE_NEW,
+                base_metadata=media_metadata,
+                dispatch_fallback=dispatch_fallback,
+                question=question,
+            )
+        # Greeting transitions into scoping for incomplete openers.
         stage_after = STAGE_SCOPING
         await self._persist(
             ctx=ctx,
