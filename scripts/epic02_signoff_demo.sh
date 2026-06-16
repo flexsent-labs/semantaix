@@ -36,7 +36,7 @@ export TELEGRAM_ALERT_CHAT_ID=""
 uvicorn services.api.app.main:app --port 8000 >/tmp/epic02-api.log 2>&1 &
 API_PID=$!
 trap 'kill "${API_PID}" >/dev/null 2>&1 || true' EXIT
-until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1; do sleep 1; done
+until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1; do sleep 0.5; done
 
 echo "== ingest non-critical incident =="
 INGEST=$(curl -s -X POST http://127.0.0.1:8000/incidents/events \

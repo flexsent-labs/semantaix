@@ -273,14 +273,21 @@ async def _handle_admin_hitl_command(
     if username != settings.hitl_config_admin_username:
         return {"status": "ignored", "reason": "unauthorized_hitl_config"}
     parts = text.split()
-    if len(parts) != 3:
+    if len(parts) not in (3, 4):
         return {"status": "ignored", "reason": "invalid_hitl_config_format"}
-    _, operator_username, chat_id = parts
+    _, operator_username, chat_id = parts[0], parts[1], parts[2]
+    project_slug = parts[3] if len(parts) == 4 else None
     if not operator_username.startswith("@"):
         return {"status": "ignored", "reason": "invalid_operator_username"}
     if not chat_id.isdigit():
         return {"status": "ignored", "reason": "invalid_chat_id"}
-    project_id = _project_repository.ensure_default_project().id
+    if project_slug is not None:
+        project = _project_repository.get_by_slug(project_slug)
+        if project is None:
+            return {"status": "ignored", "reason": "unknown_project_slug"}
+        project_id = project.id
+    else:
+        project_id = _project_repository.ensure_default_project().id
     try:
         await api_client.attach_operator(
             username=operator_username,
@@ -301,6 +308,7 @@ async def _handle_admin_hitl_command(
     return {
         "status": "configured",
         "operator_username": operator_username,
+        "project_id": str(project_id),
         "telegram_alert_chat_id": chat_id,
     }
 

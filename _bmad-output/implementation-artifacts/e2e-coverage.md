@@ -106,6 +106,18 @@ Each row marks whether a happy path (`H`) and/or an error/incident path (`E`) is
 | 12 | 12-09 | Persona prompt files checked in + non-empty (greeting, scoping, pricing_hit, proposal, followup, catalog, concept_rag, kb_material_analyzer) | H | `tests/test_sales_system_prompts_present.py` |
 | 12 | 12-09 | Dev-only `POST /sales/_dev/tick-followup-now` gated by `Settings.app_env == "dev"` (404 in non-dev; 200 in dev) | H/E | `tests/test_sales_dev_tick_endpoint_gated.py` |
 | 12 | 12-09 | LLM transport error during sales greeting/scoping falls through to pipeline (no crash) | E | `tests/test_sales_persona_answerer_llm_schema_violation.py::test_llm_transport_error_falls_through_to_pipeline` |
+| 10.5 | 10.5-01 | `AppSettings` has no `hitl_primary_operator_*` fields after migration | H | `tests/e2e/test_e2e_epic10_5_migration.py::test_settings_has_no_primary_operator_fields` |
+| 10.5 | 10.5-01 | Bootstrap seeds operator row from `telegram_alert_username` | H | `tests/e2e/test_e2e_epic10_5_migration.py::test_bootstrap_seeds_operator_row` |
+| 10.5 | 10.5-01 | Bootstrap removes stale `hitl_primary_operator_*` runtime config rows | H | `tests/e2e/test_e2e_epic10_5_migration.py::test_bootstrap_removes_primary_operator_runtime_config_rows` |
+| 10.5 | 10.5-01 | Bootstrap idempotent on second call (no duplicate operator row) | H | `tests/e2e/test_e2e_epic10_5_migration.py::test_bootstrap_idempotent_second_run` |
+| 10.5 | 10.5-02 | Sticky routing: second operator receives escalation after prior ticket history | H | `tests/e2e/test_e2e_epic10_5_operator_routing.py::test_second_operator_receives_escalation_after_sticky_routing` |
+| 10.5 | 10.5-02 | Operator registry resolves both operators via `list_active()` + `find_by_username` | H | `tests/e2e/test_e2e_epic10_5_operator_routing.py::test_operator_registry_resolves_both_operators` |
+| 10.5 | 10.5-03 | Admin login resolves chat_id from operators table (not removed primary_operator field) | H | `tests/e2e/test_e2e_epic10_5_admin.py::test_admin_login_resolves_chat_id_from_operators_table` |
+| 10.5 | 10.5-03 | 4-part `/hitl_config @op chat_id project_slug` registers operator in named project | H | `tests/e2e/test_e2e_epic10_5_admin.py::test_hitl_config_with_project_slug_routes_to_correct_project` |
+| 10.5 | 10.5-03 | Unknown `project_slug` in `/hitl_config` returns `ignored/unknown_project_slug` | E | `tests/e2e/test_e2e_epic10_5_admin.py::test_hitl_config_unknown_project_slug_is_rejected` |
+| 10.5 | 10.5-04 | Cross-project isolation: P1 operator never receives P2 escalation | H | `tests/e2e/test_e2e_epic10_5_project_isolation.py::test_p1_operator_never_receives_p2_escalation` |
+| 10.5 | 10.5-04 | `_resolve_inbound_project_id` resolves to P2 via prior ticket's operator | H | `tests/e2e/test_e2e_epic10_5_project_isolation.py::test_inbound_project_resolves_to_p2_via_prior_ticket` |
+| 10.5 | 10.5-04 | `list_by_project_id` returns disjoint sets for P1 and P2 | H | `tests/e2e/test_e2e_epic10_5_project_isolation.py::test_operator_list_by_project_is_independent` |
 
 ## CI
 

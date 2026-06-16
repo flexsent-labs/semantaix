@@ -62,7 +62,7 @@ PY
 uvicorn services.api.app.main:app --port 8000 >/tmp/epic06-api.log 2>&1 &
 API_PID=$!
 trap 'kill "${API_PID}" >/dev/null 2>&1 || true' EXIT
-until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1; do sleep 1; done
+until curl -s http://127.0.0.1:8000/health/live >/dev/null 2>&1; do sleep 0.5; done
 
 echo "== extract candidates =="
 EXTRACT=$(curl -s -X POST http://127.0.0.1:8000/knowledge/extract \
