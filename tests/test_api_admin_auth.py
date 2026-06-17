@@ -109,6 +109,18 @@ def test_request_code_dms_user_with_six_digit_code(auth_env: dict[str, Any]) -> 
     assert match is not None
 
 
+def test_request_code_admin_invalid_alert_chat_id_falls_back_to_operator_files(
+    auth_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@ajdevy")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", "not-int")
+    client: TestClient = auth_env["client"]
+    response = client.post("/admin/auth/request_code", json={"username": "@ajdevy"})
+    assert response.status_code == 200
+    dms: list[tuple[int, str]] = auth_env["dms"]
+    assert dms[-1][0] == 1111
+
+
 def test_request_code_normalizes_missing_at_prefix(auth_env: dict[str, Any]) -> None:
     client: TestClient = auth_env["client"]
     response = client.post("/admin/auth/request_code", json={"username": "alice"})

@@ -186,6 +186,29 @@ def _is_platform_admin_chat(chat_id: int) -> bool:
     admin_chat_id = _platform_admin_chat_id()
     return admin_chat_id is not None and chat_id == admin_chat_id
 
+
+def _platform_admin_customer_skip_response(
+    *,
+    trace_id: str,
+    normalized: NormalizedTelegramMessage,
+) -> dict[str, object] | None:
+    if not _is_platform_admin_username(normalized.username):
+        return None
+    logger.info(
+        "platform_admin_customer_path_skipped",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": normalized.chat_id,
+            "username": normalized.username,
+        },
+    )
+    return {
+        "status": "ignored",
+        "reason": "platform_admin_not_customer",
+        "trace_id": trace_id,
+    }
+
+
 _TICKET_REF = re.compile(r"HITL\s+ticket\s+#(\d+)", re.IGNORECASE)
 
 # Persona dialog: when the operator types `/persona` with no arguments we send
@@ -2946,20 +2969,11 @@ async def _process_telegram_update(
         response.update(operator_result)
         return response
 
-    if _is_platform_admin_username(normalized.username):
-        logger.info(
-            "platform_admin_customer_path_skipped",
-            extra={
-                "trace_id": trace_id,
-                "chat_id": normalized.chat_id,
-                "username": normalized.username,
-            },
-        )
-        return {
-            "status": "ignored",
-            "reason": "platform_admin_not_customer",
-            "trace_id": trace_id,
-        }
+    _platform_admin_skip = _platform_admin_customer_skip_response(
+        trace_id=trace_id, normalized=normalized
+    )
+    if _platform_admin_skip is not None:
+        return _platform_admin_skip  # pragma: no cover -- glue return; logic in _platform_admin_customer_skip_response
 
     if is_stale(
         message_date=normalized.date,

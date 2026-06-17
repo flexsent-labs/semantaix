@@ -145,7 +145,7 @@ def test_help_requires_registry_operator(isolated_bot, monkeypatch):
 
     non_op_response = client.post(
         "/telegram/webhook",
-        json=_message(text="/help", username="ajdevy"),
+        json=_message(text="/help", username="stranger_user"),
     )
     assert non_op_response.json()["status"] == "accepted"
     assert len(isolated_bot["dms"]) == 0

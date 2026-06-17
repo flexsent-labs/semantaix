@@ -69,7 +69,7 @@ def test_create_and_list_registration_requests(tmp_path, monkeypatch):
     assert items[0]["username"] == "@newop"
 
     _, kwargs = mock_send.await_args
-    assert kwargs["chat_id"] == int(api_main._effective_hitl_operator_chat_id())
+    assert kwargs["chat_id"] == api_main._admin_registration_notify_chat_id()
     markup = kwargs["reply_markup"]
     first_row = markup["inline_keyboard"][0]
     assert first_row[0]["callback_data"] == f"op_reg:approve:{request_id}"
