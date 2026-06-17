@@ -96,7 +96,7 @@ Repository variables (optional):
   DEPLOY_DOMAIN   semantaix.flexsentlabs.com
   DEPLOY_SERVICES api bot_gateway user_gateway nginx
 
-Create environment `production` in GitHub if you want required reviewers before deploy;
+Create environment named production in GitHub if you want required reviewers before deploy;
 then move secrets there and add environment: production to deploy.yml.
 
 First deploy: merge to main after CI passes, or run workflow "Deploy" manually (workflow_dispatch).
