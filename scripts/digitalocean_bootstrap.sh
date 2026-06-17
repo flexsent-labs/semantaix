@@ -33,10 +33,10 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 cloudflare_notes() {
   cat <<EOF
 Cloudflare (semantaix.flexsentlabs.com):
-  • DNS: A record  semantaix  →  <droplet IPv4>  (or A  semantaix.flexsentlabs.com)
-  • First deploy: set the record to **DNS only** (grey cloud) until 'finish' succeeds.
-  • After HTTPS works: SSL/TLS mode **Full (strict)**, then enable **Proxied** (orange).
-  • Do not use SSL mode "Flexible" — Telegram webhooks need HTTPS end-to-end.
+  • DNS: A record  semantaix  →  <droplet IPv4>
+  • SSL/TLS: **Full (strict)** recommended (origin has Let's Encrypt).
+  • HTTP on origin port 80 must **proxy**, not redirect — required for Flexible SSL.
+  • Proxied (orange cloud) is fine after TLS is working.
 EOF
 }
 
@@ -107,6 +107,15 @@ render_host_nginx() {
   rm -f /etc/nginx/sites-enabled/default
   nginx -t
   systemctl enable nginx
+  systemctl reload nginx
+}
+
+render_host_production_nginx() {
+  local site="/etc/nginx/sites-available/semantaix"
+  export DOMAIN
+  envsubst '${DOMAIN}' < "$DEPLOY_DIR/infra/nginx/host-production.conf.template" > "$site"
+  ln -sf "$site" /etc/nginx/sites-enabled/semantaix
+  nginx -t
   systemctl reload nginx
 }
 
@@ -219,9 +228,9 @@ finish_phase() {
   compose restart nginx
   verify_stack
   log "certbot TLS for $DOMAIN"
-  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" \
-    --redirect || die "certbot failed — check DNS points to this host"
-  systemctl reload nginx
+  certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" \
+    || die "certbot failed — check DNS points to this host"
+  render_host_production_nginx
   local https_code
   https_code="$(curl -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/telegram/webhook" || true)"
   printf 'public HTTPS: /telegram/webhook -> %s (expect 405)\n' "$https_code"

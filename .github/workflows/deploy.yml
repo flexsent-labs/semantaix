@@ -54,6 +54,22 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
             ./ "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/semantaix/"
 
+      - name: Ensure Cloudflare DNS (grey cloud)
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "skip: CLOUDFLARE_API_TOKEN not set"
+            exit 0
+          fi
+          python3 scripts/cloudflare_ensure_semantaix_dns.py
+
       - name: Render production .env from GitHub secrets
         env:
           DEPLOY_DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
