@@ -21,14 +21,13 @@ def admin_stack(tmp_path, monkeypatch):
     projects = ProjectRepository(str(tmp_path / "projects.sqlite3"))
     operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
     admin_auth = AdminAuthRepository(str(tmp_path / "admin.sqlite3"))
-    default = projects.ensure_default_project()
-    operators.ensure_default_operator(
-        username="@admin", project_id=default.id, chat_id=99
-    )
+    projects.ensure_default_project()
     monkeypatch.setattr(api_main, "project_repository", projects)
     monkeypatch.setattr(api_main, "operator_repository", operators)
     monkeypatch.setattr(api_main, "admin_auth_repository", admin_auth)
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@admin")
+    monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@admin")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", "99")
     monkeypatch.setattr(api_main.settings, "admin_login_code_ttl_seconds", 300)
     monkeypatch.setattr(api_main.settings, "admin_session_ttl_seconds", 86400)
     send_mock = AsyncMock(return_value=42)
@@ -62,21 +61,13 @@ def test_login_request_rejects_non_admin_username(admin_stack):
     send_mock.assert_not_awaited()
 
 
-def test_login_request_fails_without_admin_chat_id(admin_stack):
+def test_login_request_fails_without_admin_chat_id(admin_stack, monkeypatch):
     client, send_mock, _ = admin_stack
-    # Drop chat_id on the admin operator directly via SQL (the repository
-    # update API treats None as "no change" — see 10.01 design notes).
-    import sqlite3
-
-    with sqlite3.connect(api_main.operator_repository.db_path) as connection:
-        connection.execute(
-            "UPDATE operators SET chat_id = NULL WHERE username = ?",
-            ("@admin",),
-        )
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
     response = client.post(
         "/admin/login/request", json={"admin_username": "@admin"}
     )
-    assert response.status_code == 400
+    assert response.status_code == 404
     send_mock.assert_not_awaited()
 
 
