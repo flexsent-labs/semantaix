@@ -155,6 +155,37 @@ def _redact_token(message: str) -> str:
     """Strip any bot token from a string so it never reaches a log line or DM."""
     return _BOT_TOKEN_RE.sub("bot<REDACTED>", message)
 
+
+def _platform_admin_usernames() -> frozenset[str]:
+    return frozenset(
+        {
+            settings.admin_telegram_username,
+            settings.hitl_config_admin_username,
+        }
+    )
+
+
+def _is_platform_admin_username(username: str | None) -> bool:
+    if not username:
+        return False
+    candidate = username if username.startswith("@") else f"@{username}"
+    return candidate in _platform_admin_usernames()
+
+
+def _platform_admin_chat_id() -> int | None:
+    raw = settings.telegram_alert_chat_id
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_platform_admin_chat(chat_id: int) -> bool:
+    admin_chat_id = _platform_admin_chat_id()
+    return admin_chat_id is not None and chat_id == admin_chat_id
+
 _TICKET_REF = re.compile(r"HITL\s+ticket\s+#(\d+)", re.IGNORECASE)
 
 # Persona dialog: when the operator types `/persona` with no arguments we send
@@ -2241,6 +2272,12 @@ async def _flush_offline_backlog_after_debounce(*, chat_id: int) -> None:
         items = offline_backlog_buffer.drain(chat_id=chat_id)
         if not items:
             return
+        if _is_platform_admin_chat(chat_id):
+            logger.info(
+                "offline_backlog_discarded_platform_admin",
+                extra={"chat_id": chat_id, "buffered_count": len(items)},
+            )
+            return
         latest_message = items[-1]
         if is_thin(
             latest_message.text,
@@ -2329,6 +2366,13 @@ async def _replay_pending_forward(*, chat_id: int) -> None:
     for the next restart instead of dropping the customer's message.
     """
     try:
+        if _is_platform_admin_chat(chat_id):
+            pending_forward_outbox.clear_chat(chat_id=chat_id)
+            logger.info(
+                "pending_forward_discarded_platform_admin",
+                extra={"chat_id": chat_id},
+            )
+            return
         items = pending_forward_outbox.peek_chat(chat_id=chat_id)
         if not items:
             return
@@ -2901,6 +2945,21 @@ async def _process_telegram_update(
         response = {"trace_id": trace_id}
         response.update(operator_result)
         return response
+
+    if _is_platform_admin_username(normalized.username):
+        logger.info(
+            "platform_admin_customer_path_skipped",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": normalized.chat_id,
+                "username": normalized.username,
+            },
+        )
+        return {
+            "status": "ignored",
+            "reason": "platform_admin_not_customer",
+            "trace_id": trace_id,
+        }
 
     if is_stale(
         message_date=normalized.date,
