@@ -26,6 +26,70 @@ Initial Docker-first skeleton for the Semantaix Option B architecture.
    - `curl http://localhost/api/health/live`
    - `curl http://localhost/admin/health/live`
 
+## DigitalOcean (production VPS)
+
+Target: **https://semantaix.flexsentlabs.com** (DNS on Cloudflare).
+
+```bash
+# 1) Server prep on the droplet
+sudo bash scripts/digitalocean_bootstrap.sh prepare \
+  --domain semantaix.flexsentlabs.com \
+  --email you@flexsentlabs.com \
+  --cloudflare
+
+# 2) Cloudflare: A record semantaix → droplet IP, DNS only (grey cloud) until step 4
+
+# 3) Edit secrets
+sudo nano /opt/semantaix/.env
+
+# 4) Deploy + TLS + Telegram webhook
+sudo bash scripts/digitalocean_bootstrap.sh finish \
+  --domain semantaix.flexsentlabs.com \
+  --email you@flexsentlabs.com \
+  --cloudflare
+```
+
+After `finish`: Cloudflare **SSL/TLS → Full (strict)**, then **Proxied** (orange cloud).
+
+Production uses `docker-compose.prod.yml` (compose nginx on `127.0.0.1:8080`; host nginx
+terminates TLS). Day-2 updates: `sudo bash /opt/semantaix/scripts/digitalocean_deploy.sh`.
+
+Set `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`,
+and admin chat IDs before `finish`. Bot: **@semantaix_bot**. Calendar OAuth redirect:
+`https://semantaix.flexsentlabs.com/api/calendar/oauth/callback`.
+
+### GitHub Actions deploy (CI → droplet)
+
+After one-time bootstrap on the droplet, wire **Deploy** workflow (`.github/workflows/deploy.yml`):
+
+1. Generate a deploy key (keep private key for GitHub; install pubkey on the server):
+
+   ```bash
+   ssh-keygen -t ed25519 -f ./gha-deploy -N "" -C "semantaix-gha-deploy"
+   ```
+
+2. On the droplet (root), after `/opt/semantaix` exists:
+
+   ```bash
+   sudo bash /opt/semantaix/scripts/digitalocean_setup_github_actions.sh \
+     --pubkey-file ./gha-deploy.pub
+   ```
+
+3. GitHub → **Settings → Secrets and variables → Actions** → add repository secrets
+   (or use a `production` environment for approval gates):
+
+   | Secret | Value |
+   |--------|--------|
+   | `DEPLOY_HOST` | Droplet IPv4 (`142.93.160.101`) |
+   | `DEPLOY_USER` | `semantaix-deploy` |
+   | `DEPLOY_SSH_KEY` | Full private key (`gha-deploy`) |
+
+4. Optional **variables**: `DEPLOY_DOMAIN` = `semantaix.flexsentlabs.com`;
+   `DEPLOY_SERVICES` = `api bot_gateway user_gateway nginx` (lean 2 GB stack).
+
+Deploy runs automatically when **CI** succeeds on `main`, or manually via **Actions → Deploy → Run workflow**.
+The workflow rsyncs code (preserving server `.env` and `.data`), builds images on the host, and verifies HTTPS.
+
 ## Run Tests
 
 - `python3.11 -m venv .venv && source .venv/bin/activate`
