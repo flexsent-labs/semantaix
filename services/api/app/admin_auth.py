@@ -270,6 +270,17 @@ class AdminAuthService:
         self.settings = settings
 
     def _resolve_chat_id(self, username: str) -> int | None:
+        admin_usernames = {
+            self.settings.admin_telegram_username,
+            self.settings.hitl_config_admin_username,
+        }
+        if username in admin_usernames:
+            raw = self.settings.telegram_alert_chat_id
+            if raw is not None:
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    pass
         return resolve_chat_id_for_username(
             username=username,
             operator_files_db_path=self.settings.operator_files_db_path,
@@ -277,7 +288,11 @@ class AdminAuthService:
         )
 
     def resolve_role(self, username: str) -> str | None:
-        if username == self.settings.hitl_config_admin_username:
+        admin_usernames = {
+            self.settings.hitl_config_admin_username,
+            self.settings.admin_telegram_username,
+        }
+        if username in admin_usernames:
             return "admin"
         # Anyone with a known chat_id (operator_files or operators table) is an operator.
         if self._resolve_chat_id(username) is not None:

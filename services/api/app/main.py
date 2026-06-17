@@ -428,25 +428,21 @@ wire_admin_rag_inspect_routes(
     grounding_threshold=lambda: _effective_grounding_threshold(),
 )
 def _bootstrap_default_entities() -> None:
-    """Idempotently ensure a `default` project and a primary operator row exist.
+    """Idempotently ensure a `default` project exists on a fresh deploy.
 
-    Runs at module import so a fresh `docker compose up` always lands with the
-    schema rows the rest of Epic 10 depends on. Tests can re-run it after
-    rebinding repository db paths.
+    Operators are registered via admin commands or self-registration — the
+    platform admin (``admin_telegram_username``) must not be seeded as an
+    operator row.  Deactivate any legacy operator rows for admin usernames.
     """
-    default_project = project_repository.ensure_default_project()
-    alert_chat_id: int | None = None
-    alert_chat_id_raw = settings.telegram_alert_chat_id
-    if alert_chat_id_raw is not None:
-        try:
-            alert_chat_id = int(alert_chat_id_raw)
-        except (TypeError, ValueError):
-            alert_chat_id = None
-    operator_repository.ensure_default_operator(
-        username=settings.telegram_alert_username,
-        project_id=default_project.id,
-        chat_id=alert_chat_id,
-    )
+    project_repository.ensure_default_project()
+    admin_usernames = {
+        settings.admin_telegram_username,
+        settings.hitl_config_admin_username,
+    }
+    for username in admin_usernames:
+        existing = operator_repository.find_by_username(username)
+        if existing is not None and existing.is_active:
+            operator_repository.update(username=username, is_active=False)
     # Story 10.5-01 — migrate away from the primary-operator runtime-config
     # indirection. The operators table is now authoritative; these two keys
     # are no longer written or read anywhere after Epic 10.5 ships.
@@ -829,6 +825,12 @@ def _project_to_dict(project: Project) -> dict[str, object]:
 
 def _admin_registration_notify_chat_id() -> int | None:
     """Resolve admin DM target for operator registration approval DMs."""
+    raw = settings.telegram_alert_chat_id
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
     admin = operator_repository.find_by_username(settings.admin_telegram_username)
     if admin is not None and admin.chat_id is not None:
         return admin.chat_id

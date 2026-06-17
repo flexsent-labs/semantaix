@@ -22,8 +22,8 @@ def test_settings_has_no_primary_operator_fields():
 
 
 @pytest.mark.story("10.5-01")
-def test_bootstrap_seeds_operator_row(tmp_path):
-    """After bootstrap, operators table contains the configured alert username."""
+def test_bootstrap_does_not_seed_admin_as_operator(tmp_path):
+    """Bootstrap must not auto-create an operator row for the alert username."""
     from unittest.mock import patch
 
     import services.api.app.main as mod
@@ -34,7 +34,7 @@ def test_bootstrap_seeds_operator_row(tmp_path):
     hitl = HitlTicketRepository(str(tmp_path / "hitl.db"))
     ops = OperatorRepository(str(tmp_path / "ops.db"))
     proj = ProjectRepository(str(tmp_path / "proj.db"))
-    default = proj.ensure_default_project()
+    proj.ensure_default_project()
 
     with (
         patch.object(mod, "hitl_ticket_repository", hitl),
@@ -43,10 +43,7 @@ def test_bootstrap_seeds_operator_row(tmp_path):
     ):
         mod._bootstrap_default_entities()
 
-    seeded = ops.find_by_username(mod.settings.telegram_alert_username)
-    assert seeded is not None
-    assert seeded.project_id == default.id
-    assert seeded.is_active
+    assert ops.find_by_username(mod.settings.telegram_alert_username) is None
 
 
 @pytest.mark.story("10.5-01")
@@ -83,7 +80,7 @@ def test_bootstrap_removes_primary_operator_runtime_config_rows(tmp_path):
 
 @pytest.mark.story("10.5-01")
 def test_bootstrap_idempotent_second_run(tmp_path):
-    """A second bootstrap call must not raise or duplicate the operator row."""
+    """A second bootstrap call must not raise or create operator rows."""
     from unittest.mock import patch
 
     import services.api.app.main as mod
@@ -103,6 +100,4 @@ def test_bootstrap_idempotent_second_run(tmp_path):
         mod._bootstrap_default_entities()
         mod._bootstrap_default_entities()
 
-    active = ops.list_active()
-    usernames = [o.username for o in active]
-    assert usernames.count(mod.settings.telegram_alert_username) == 1
+    assert ops.list_active() == []
