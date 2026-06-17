@@ -67,27 +67,29 @@ def test_login_request_fails_without_admin_chat_id(admin_stack, monkeypatch):
     response = client.post(
         "/admin/login/request", json={"admin_username": "@admin"}
     )
-    assert response.status_code == 404
+    assert response.status_code == 400
     send_mock.assert_not_awaited()
 
 
-def test_login_request_fails_when_admin_operator_missing(admin_stack):
+def test_login_request_fails_when_admin_chat_id_invalid(admin_stack, monkeypatch):
     client, send_mock, _ = admin_stack
-    # Mark admin operator inactive — find_by_username still returns row, but
-    # let's instead simulate "no admin operator registered" by replacing the
-    # operator repository with an empty one.
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", "not-a-number")
+    response = client.post(
+        "/admin/login/request", json={"admin_username": "@admin"}
+    )
+    assert response.status_code == 400
+    send_mock.assert_not_awaited()
+
+
+def test_login_request_succeeds_without_operator_row(admin_stack):
+    client, send_mock, _ = admin_stack
     empty = OperatorRepository(api_main.operator_repository.db_path + ".empty")
     api_main.operator_repository = empty  # type: ignore[assignment]
-    try:
-        response = client.post(
-            "/admin/login/request", json={"admin_username": "@admin"}
-        )
-        assert response.status_code == 400
-        send_mock.assert_not_awaited()
-    finally:
-        # Reset is handled by monkeypatch teardown via admin_stack fixture
-        # rebinding on the next test.
-        pass
+    response = client.post(
+        "/admin/login/request", json={"admin_username": "@admin"}
+    )
+    assert response.status_code == 200, response.text
+    send_mock.assert_awaited_once()
 
 
 def test_login_verify_round_trip_returns_session(admin_stack):

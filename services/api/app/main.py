@@ -64,6 +64,9 @@ from services.api.app.calendar.oauth import (
     CalendarOAuthClient,
     OAuthExchangeError,
 )
+from services.api.app.calendar.oauth_production import (
+    assess_calendar_oauth_production_readiness,
+)
 from services.api.app.calendar.oauth_state_repository import (
     CalendarOAuthStateRepository,
     InvalidOAuthState,
@@ -893,11 +896,22 @@ async def _send_reject_applicant_dm(*, request_id: int) -> bool:
     return True
 
 
+def _resolve_admin_login_chat_id() -> int | None:
+    """Admin login DMs use TELEGRAM_ALERT_CHAT_ID — not the operators table."""
+    raw = settings.telegram_alert_chat_id
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.post("/admin/login/request")
 async def admin_login_request(request: AdminLoginRequestModel) -> dict[str, object]:
     _ensure_admin_username(request.admin_username)
-    admin_operator = operator_repository.find_by_username(request.admin_username)
-    if admin_operator is None or admin_operator.chat_id is None:
+    chat_id = _resolve_admin_login_chat_id()
+    if chat_id is None:
         raise HTTPException(status_code=400, detail="admin_operator_chat_id_missing")
     code = admin_auth_repository.request_code(
         admin_username=request.admin_username,
@@ -906,9 +920,7 @@ async def admin_login_request(request: AdminLoginRequestModel) -> dict[str, obje
     minutes = max(1, settings.admin_login_code_ttl_seconds // 60)
     message = f"Ваш код входа: {code} (действителен {minutes} мин)"
     try:
-        await telegram_bot_sender.send_message(
-            chat_id=admin_operator.chat_id, text=message
-        )
+        await telegram_bot_sender.send_message(chat_id=chat_id, text=message)
     except Exception as exc:  # broad: any DM failure surfaces as 502
         logger.warning("admin_login_code_dm_failed: %s", exc)
         raise HTTPException(
@@ -3921,6 +3933,44 @@ async def validate_llm_models_on_startup() -> None:
         )
     else:
         logger.info("llm_models_validated", extra={"models": models})
+
+
+def _calendar_oauth_production_status() -> tuple[bool, dict[str, object]]:
+    return assess_calendar_oauth_production_readiness(
+        app_env=settings.app_env,
+        redirect_uri=settings.google_oauth_redirect_uri,
+        web_ui_base_url=settings.web_ui_base_url,
+        oauth_configured=calendar_oauth_client is not None,
+    )
+
+
+@app.on_event("startup")
+async def validate_calendar_oauth_production_on_startup() -> None:
+    """Epic 11 prod — block silent dev redirect URIs on production deploys."""
+    ok, detail = _calendar_oauth_production_status()
+    if ok:
+        if detail.get("prod_ready"):
+            logger.info("calendar_oauth_production_ready", extra=detail)
+        return
+    logger.error("calendar_oauth_production_misconfigured", extra=detail)
+    if settings.app_env == "production":
+        await _record_and_alert_incident(
+            fingerprint="calendar_oauth_production_misconfigured",
+            severity="critical",
+            summary=(
+                "Google Calendar OAuth is misconfigured for production "
+                f"({detail.get('reason')}). Fix GOOGLE_OAUTH_REDIRECT_URI and "
+                "the Google Cloud Console authorized redirect URI before "
+                "operators run /connect_calendar."
+            ),
+        )
+
+
+@app.get("/health/calendar-oauth")
+async def health_calendar_oauth() -> JSONResponse:
+    """Deploy/monitoring probe — production must use the public HTTPS callback."""
+    ok, detail = _calendar_oauth_production_status()
+    return JSONResponse(status_code=200 if ok else 503, content={"ok": ok, **detail})
 
 
 @app.get("/health/model")

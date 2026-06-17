@@ -72,19 +72,34 @@ def test_migration_idempotent_when_rows_absent(tmp_path):
     assert hitl.get_runtime_config("hitl_primary_operator_chat_id") is None
 
 
-def test_migration_leaves_default_operator_seeded(tmp_path):
+def test_migration_deactivates_active_admin_operator_rows(tmp_path):
     hitl_db, operators_db, projects_db = _bootstrap(tmp_path)
 
-    _, real_op = _run_bootstrap(hitl_db, operators_db, projects_db)
-
     import services.api.app.main as mod
+    from services.api.app.hitl import HitlTicketRepository
+    from services.api.app.operators import OperatorRepository
+    from services.api.app.projects import ProjectRepository
 
-    # Use mod.settings (the same instance _bootstrap_default_entities reads)
-    # rather than get_settings() which may be a different instance after cache
-    # clears in other tests. Bootstrap now seeds from telegram_alert_username.
-    operator = real_op.find_by_username(mod.settings.telegram_alert_username)
+    real_proj = ProjectRepository(projects_db)
+    real_op = OperatorRepository(operators_db)
+    real_hitl = HitlTicketRepository(hitl_db)
+    default = real_proj.ensure_default_project()
+    real_op.create(
+        username=mod.settings.admin_telegram_username,
+        project_id=default.id,
+        chat_id=999,
+    )
+
+    with (
+        patch.object(mod, "hitl_ticket_repository", real_hitl),
+        patch.object(mod, "operator_repository", real_op),
+        patch.object(mod, "project_repository", real_proj),
+    ):
+        mod._bootstrap_default_entities()
+
+    operator = real_op.find_by_username(mod.settings.admin_telegram_username)
     assert operator is not None
-    assert operator.is_active
+    assert operator.is_active is False
 
 
 def test_delete_runtime_config_no_op_when_key_absent(tmp_path):

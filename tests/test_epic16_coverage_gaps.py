@@ -420,6 +420,21 @@ def test_approve_integrity_error_maps_to_username_conflict(tmp_path, monkeypatch
         )
 
 
+def test_admin_registration_notify_chat_id_invalid_alert_falls_back_to_admin_operator(
+    tmp_path, monkeypatch
+):
+    operator_repository.db_path = str(tmp_path / "operators.sqlite3")
+    operator_repository.init_schema()
+    project_repository.db_path = str(tmp_path / "projects.sqlite3")
+    project_repository.init_schema()
+    default = project_repository.ensure_default_project()
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", "bad")
+    monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@admin_op")
+    monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@other_admin")
+    operator_repository.create(username="@admin_op", project_id=default.id, chat_id=888)
+    assert api_main._admin_registration_notify_chat_id() == 888
+
+
 def test_admin_registration_notify_chat_id_hitl_admin_fallback(tmp_path, monkeypatch):
     operator_repository.db_path = str(tmp_path / "operators.sqlite3")
     operator_repository.init_schema()
@@ -428,6 +443,7 @@ def test_admin_registration_notify_chat_id_hitl_admin_fallback(tmp_path, monkeyp
     default = project_repository.ensure_default_project()
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@missing_admin")
     monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@hitl_admin")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
     operator_repository.create(
         username="@hitl_admin", project_id=default.id, chat_id=777
     )
@@ -439,6 +455,17 @@ def test_admin_registration_notify_chat_id_invalid_runtime_chat(tmp_path, monkey
     operator_repository.init_schema()
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@missing_admin")
     monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@also_missing")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
+    monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: None)
+    assert api_main._admin_registration_notify_chat_id() is None
+
+
+def test_admin_registration_notify_chat_id_invalid_runtime_chat_non_int(tmp_path, monkeypatch):
+    operator_repository.db_path = str(tmp_path / "operators.sqlite3")
+    operator_repository.init_schema()
+    monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@missing_admin")
+    monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@also_missing")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
     monkeypatch.setattr(api_main, "_effective_hitl_operator_chat_id", lambda: "not-int")
     assert api_main._admin_registration_notify_chat_id() is None
 

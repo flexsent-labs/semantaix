@@ -119,8 +119,18 @@ jobs:
           domain="${DEPLOY_DOMAIN:-semantaix.flexsentlabs.com}"
           for _ in $(seq 1 30); do
             code="$(curl -s -o /dev/null -w '%{http_code}' "https://${domain}/api/health/live" || true)"
-            [ "$code" = "200" ] && exit 0
+            [ "$code" = "200" ] && break
             sleep 5
           done
-          echo "ERROR: https://${domain}/api/health/live did not return 200 (last: ${code:-none})"
-          exit 1
+          [ "$code" = "200" ] || {
+            echo "ERROR: https://${domain}/api/health/live did not return 200 (last: ${code:-none})"
+            exit 1
+          }
+
+      - name: Verify calendar OAuth production readiness
+        env:
+          DEPLOY_DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
+        run: |
+          set -euo pipefail
+          domain="${DEPLOY_DOMAIN:-semantaix.flexsentlabs.com}"
+          bash scripts/verify_production_calendar_oauth.sh

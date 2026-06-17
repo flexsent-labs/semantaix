@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 
 from platform_common.settings import get_settings
@@ -40,6 +41,27 @@ def _stale_payload(
     username: str = "customer",
 ) -> dict:
     sent = int(datetime.now(UTC).timestamp()) - 3600
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "from": {"id": chat_id, "username": username},
+            "chat": {"id": chat_id, "type": "private"},
+            "text": text,
+            "date": sent,
+        },
+    }
+
+
+def _live_payload(
+    *,
+    update_id: int,
+    message_id: int,
+    text: str,
+    chat_id: int = 5551,
+    username: str = "admin",
+) -> dict:
+    sent = int(datetime.now(UTC).timestamp())
     return {
         "update_id": update_id,
         "message": {
@@ -275,6 +297,11 @@ def test_stale_platform_admin_is_not_forwarded(monkeypatch):
     monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@admin")
     monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@admin")
     monkeypatch.setattr(bot_main.settings, "telegram_alert_chat_id", "5550")
+
+    async def _not_operator(**_kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "resolve_operator_for_sender", _not_operator)
     forward = AsyncMock(return_value={})
     monkeypatch.setattr(api_client, "forward_inbound", forward)
 
@@ -286,6 +313,37 @@ def test_stale_platform_admin_is_not_forwarded(monkeypatch):
             message_id=10,
             text="привет",
             chat_id=5550,
+            username="admin",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ignored"
+    assert body["reason"] == "platform_admin_not_customer"
+    forward.assert_not_awaited()
+
+
+def test_live_platform_admin_username_skips_customer_pipeline(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@admin")
+    monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@admin")
+
+    async def _not_operator(**_kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "resolve_operator_for_sender", _not_operator)
+    monkeypatch.setattr(bot_main, "persist_normalized_message", lambda **_: True)
+    forward = AsyncMock(return_value={})
+    monkeypatch.setattr(api_client, "forward_inbound", forward)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_live_payload(
+            update_id=8020,
+            message_id=20,
+            text="привет",
+            chat_id=5551,
             username="admin",
         ),
     )
@@ -323,3 +381,115 @@ async def test_flush_swallows_unexpected_errors(monkeypatch):
     # Must not raise — a flush failure can never crash the event loop.
     await bot_main._flush_offline_backlog_after_debounce(chat_id=48)
     forward.assert_not_awaited()
+
+
+def test_platform_admin_chat_id_none_when_unset(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "telegram_alert_chat_id", None)
+    assert bot_main._platform_admin_chat_id() is None
+
+
+def test_platform_admin_chat_id_none_when_invalid(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "telegram_alert_chat_id", "not-int")
+    assert bot_main._platform_admin_chat_id() is None
+
+
+def test_platform_admin_customer_skip_response_returns_none_for_non_admin():
+    from services.bot_gateway.app.telegram_update import NormalizedTelegramMessage
+
+    normalized = NormalizedTelegramMessage(
+        update_id=1,
+        source_message_id=1,
+        chat_id=1,
+        user_id=1,
+        username="@customer",
+        text="hi",
+        date=datetime.now(UTC),
+        caption=None,
+        media_group_id=None,
+        attachments=[],
+    )
+    assert (
+        bot_main._platform_admin_customer_skip_response(
+            trace_id="t1", normalized=normalized
+        )
+        is None
+    )
+
+
+def test_platform_admin_customer_skip_response_returns_none_for_empty_username():
+    from services.bot_gateway.app.telegram_update import NormalizedTelegramMessage
+
+    normalized = NormalizedTelegramMessage(
+        update_id=3,
+        source_message_id=3,
+        chat_id=3,
+        user_id=3,
+        username="",
+        text="hi",
+        date=datetime.now(UTC),
+        caption=None,
+        media_group_id=None,
+        attachments=[],
+    )
+    assert (
+        bot_main._platform_admin_customer_skip_response(
+            trace_id="t3", normalized=normalized
+        )
+        is None
+    )
+
+
+def test_platform_admin_customer_skip_response_for_admin_username(monkeypatch):
+    from services.bot_gateway.app.telegram_update import NormalizedTelegramMessage
+
+    monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@admin")
+    monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@admin")
+    normalized = NormalizedTelegramMessage(
+        update_id=2,
+        source_message_id=2,
+        chat_id=9,
+        user_id=9,
+        username="@admin",
+        text="hi",
+        date=datetime.now(UTC),
+        caption=None,
+        media_group_id=None,
+        attachments=[],
+    )
+    result = bot_main._platform_admin_customer_skip_response(
+        trace_id="t2", normalized=normalized
+    )
+    assert result == {
+        "status": "ignored",
+        "reason": "platform_admin_not_customer",
+        "trace_id": "t2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_telegram_update_returns_platform_admin_skip(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@admin")
+    monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@admin")
+
+    async def _not_operator(**_kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "resolve_operator_for_sender", _not_operator)
+    monkeypatch.setattr(bot_main, "persist_normalized_message", lambda **_: True)
+    monkeypatch.setattr(
+        bot_main,
+        "dispatch_pending_prompt_edit",
+        AsyncMock(return_value=None),
+    )
+    payload = _live_payload(
+        update_id=99001,
+        message_id=99,
+        text="привет",
+        chat_id=5552,
+        username="admin",
+    )
+    result = await bot_main._process_telegram_update(
+        payload, "trace-direct", BackgroundTasks()
+    )
+    assert result["status"] == "ignored"
+    assert result["reason"] == "platform_admin_not_customer"

@@ -31,6 +31,7 @@ def test_admin_login_resolves_chat_id_from_operators_table(tmp_path, monkeypatch
     monkeypatch.setattr(api_main, "project_repository", proj)
     monkeypatch.setattr(api_main, "operator_repository", ops)
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@e2e-admin")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", None)
     monkeypatch.setattr(api_main.settings, "operators_db_path", str(tmp_path / "ops.db"))
     monkeypatch.setattr(
         api_main.settings, "operator_files_db_path", str(tmp_path / "nofiles.db")
