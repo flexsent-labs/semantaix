@@ -1,0 +1,28 @@
+# Host nginx site — HTTP only until certbot adds TLS.
+# Render with: DOMAIN=semantaix.example.com envsubst < host-tls.conf.template
+#
+# Proxies public traffic to the Docker stack (docker-compose.prod.yml binds
+# compose nginx to 127.0.0.1:8080).
+
+upstream semantaix_docker {
+    server 127.0.0.1:8080;
+    keepalive 8;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    client_max_body_size 25m;
+
+    location / {
+        proxy_pass http://semantaix_docker;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+}

@@ -1,0 +1,17 @@
+# Production overlay for a DigitalOcean (or any VPS) host.
+#
+# Binds the in-compose nginx to localhost only; the host's system nginx +
+# certbot terminate TLS on :443 and proxy here. Keeps user_gateway off the
+# public internet (bot_gateway/api reach it on the Docker network).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  nginx:
+    ports:
+      - "127.0.0.1:8080:80"
+
+  user_gateway:
+    ports:
+      - "127.0.0.1:8005:8005"

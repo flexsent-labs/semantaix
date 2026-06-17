@@ -1,0 +1,81 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout deployed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync application to server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude '.env' \
+            --exclude '.data/' \
+            --exclude '.venv/' \
+            --exclude '__pycache__/' \
+            --exclude '.git/' \
+            --exclude '_bmad-output/' \
+            --exclude '.claire/' \
+            -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
+            ./ "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/semantaix/"
+
+      - name: Build and restart stack
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SERVICES: ${{ vars.DEPLOY_SERVICES }}
+        run: |
+          set -euo pipefail
+          services="${DEPLOY_SERVICES:-api bot_gateway user_gateway nginx}"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "bash /opt/semantaix/scripts/digitalocean_deploy.sh --no-git --services ${services}"
+
+      - name: Verify public HTTPS
+        env:
+          DEPLOY_DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
+        run: |
+          set -euo pipefail
+          domain="${DEPLOY_DOMAIN:-semantaix.flexsentlabs.com}"
+          for _ in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "https://${domain}/api/health/live" || true)"
+            [ "$code" = "200" ] && exit 0
+            sleep 5
+          done
+          echo "ERROR: https://${domain}/api/health/live did not return 200 (last: ${code:-none})"
+          exit 1
