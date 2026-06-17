@@ -9,9 +9,9 @@
 
 services:
   nginx:
-    ports:
+    ports: !override
       - "127.0.0.1:8080:80"
 
   user_gateway:
-    ports:
+    ports: !override
       - "127.0.0.1:8005:8005"
