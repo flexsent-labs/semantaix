@@ -54,6 +54,35 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
             ./ "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/semantaix/"
 
+      - name: Render production .env from GitHub secrets
+        env:
+          DEPLOY_DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
+          CALENDAR_TOKEN_ENCRYPTION_KEY: ${{ secrets.CALENDAR_TOKEN_ENCRYPTION_KEY }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          python3 scripts/render_production_env.py > /tmp/production.env
+          wc -l /tmp/production.env
+
+      - name: Install production .env on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          scp -i ~/.ssh/deploy_key -o BatchMode=yes /tmp/production.env \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/semantaix/.env"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            'chmod 600 /opt/semantaix/.env'
+
       - name: Build and restart stack
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -61,7 +90,7 @@ jobs:
           DEPLOY_SERVICES: ${{ vars.DEPLOY_SERVICES }}
         run: |
           set -euo pipefail
-          services="${DEPLOY_SERVICES:-api bot_gateway user_gateway nginx}"
+          services="${DEPLOY_SERVICES:-api bot_gateway user_gateway web_ui nginx}"
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "bash /opt/semantaix/scripts/digitalocean_deploy.sh --no-git --services ${services}"
