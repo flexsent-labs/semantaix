@@ -93,4 +93,20 @@ api="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health/l
 printf 'GET http://127.0.0.1:8080/telegram/webhook -> %s (expect 405)\n' "$code"
 printf 'GET http://127.0.0.1:8080/api/health/live  -> %s (expect 200)\n' "$api"
 [ "$code" = "405" ] || die "webhook unhealthy ($code) — see docker compose logs nginx"
+
+if [ -f "$DEPLOY_DIR/.env" ]; then
+  # shellcheck disable=SC1091
+  set -a && source "$DEPLOY_DIR/.env" && set +a
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${WEB_UI_BASE_URL:-}" ]; then
+    domain="${WEB_UI_BASE_URL#https://}"
+    domain="${domain%%/*}"
+    webhook_url="https://${domain}/telegram/webhook"
+    log "setWebhook → $webhook_url"
+    curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+      -d "url=${webhook_url}" | python3 -m json.tool
+  else
+    log "skip setWebhook (TELEGRAM_BOT_TOKEN or WEB_UI_BASE_URL missing)"
+  fi
+fi
+
 log "OK"
