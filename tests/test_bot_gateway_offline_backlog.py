@@ -271,6 +271,45 @@ async def test_startup_recovery_noop_when_buffer_empty(monkeypatch):
     forward.assert_not_awaited()
 
 
+def test_stale_platform_admin_is_not_forwarded(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@admin")
+    monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@admin")
+    monkeypatch.setattr(bot_main.settings, "telegram_alert_chat_id", "5550")
+    forward = AsyncMock(return_value={})
+    monkeypatch.setattr(api_client, "forward_inbound", forward)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_stale_payload(
+            update_id=8010,
+            message_id=10,
+            text="привет",
+            chat_id=5550,
+            username="admin",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ignored"
+    assert body["reason"] == "platform_admin_not_customer"
+    forward.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_offline_backlog_flush_discards_platform_admin_chat(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "telegram_alert_chat_id", "42")
+    forward = AsyncMock(return_value={})
+    monkeypatch.setattr(api_client, "forward_inbound", forward)
+    _seed(42, (1, "привет"))
+
+    await bot_main._flush_offline_backlog_after_debounce(chat_id=42)
+
+    forward.assert_not_awaited()
+    assert bot_main.offline_backlog_buffer.pending_chat_ids() == []
+
+
 @pytest.mark.asyncio
 async def test_flush_swallows_unexpected_errors(monkeypatch):
     forward = AsyncMock(return_value={})

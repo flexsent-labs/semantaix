@@ -172,6 +172,19 @@ async def test_startup_recovery_keeps_rows_when_reforward_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_replay_pending_forward_discards_platform_admin_chat(monkeypatch):
+    monkeypatch.setattr(bot_main.settings, "telegram_alert_chat_id", "88")
+    forward = AsyncMock(return_value={})
+    monkeypatch.setattr(api_client, "forward_inbound", forward)
+    _seed(88, (1, "привет"))
+
+    await bot_main._replay_pending_forward(chat_id=88)
+
+    forward.assert_not_awaited()
+    assert bot_main.pending_forward_outbox.pending_chat_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_replay_empty_chat_is_noop(monkeypatch):
     # A concurrent drain can empty the chat between listing and peeking; the
     # replay must tolerate finding no rows.
