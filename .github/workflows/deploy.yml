@@ -93,7 +93,7 @@ jobs:
           services="${DEPLOY_SERVICES:-api bot_gateway user_gateway web_ui nginx}"
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "bash /opt/semantaix/scripts/digitalocean_deploy.sh --no-git --services ${services}"
+            "bash /opt/semantaix/scripts/digitalocean_deploy.sh --no-git --services '${services}'"
 
       - name: Verify public HTTPS
         env:
