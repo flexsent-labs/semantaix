@@ -39,8 +39,7 @@ sudo bash scripts/digitalocean_bootstrap.sh prepare \
 
 # 2) Cloudflare: A record semantaix → droplet IP, DNS only (grey cloud) until step 4
 
-# 3) Edit secrets
-sudo nano /opt/semantaix/.env
+# 3) Set GitHub Actions secrets (see below) — do not put production secrets on the server by hand
 
 # 4) Deploy + TLS + Telegram webhook
 sudo bash scripts/digitalocean_bootstrap.sh finish \
@@ -54,8 +53,9 @@ After `finish`: Cloudflare **SSL/TLS → Full (strict)**, then **Proxied** (oran
 Production uses `docker-compose.prod.yml` (compose nginx on `127.0.0.1:8080`; host nginx
 terminates TLS). Day-2 updates: `sudo bash /opt/semantaix/scripts/digitalocean_deploy.sh`.
 
-Set `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`,
-and admin chat IDs before `finish`. Bot: **@semantaix_bot**. Calendar OAuth redirect:
+Set production secrets in **GitHub Actions** (repository secrets). Each deploy renders
+`/opt/semantaix/.env` from `.env.production` + those secrets via
+`scripts/render_production_env.py`. Bot: **@semantaix_bot**. Calendar OAuth redirect:
 `https://semantaix.flexsentlabs.com/api/calendar/oauth/callback`.
 
 ### GitHub Actions deploy (CI → droplet)
@@ -75,20 +75,29 @@ After one-time bootstrap on the droplet, wire **Deploy** workflow (`.github/work
      --pubkey-file ./gha-deploy.pub
    ```
 
-3. GitHub → **Settings → Secrets and variables → Actions** → add repository secrets
-   (or use a `production` environment for approval gates):
+3. GitHub → **Settings → Secrets and variables → Actions** → repository secrets:
 
-   | Secret | Value |
-   |--------|--------|
-   | `DEPLOY_HOST` | Droplet IPv4 (`142.93.160.101`) |
+   | Secret | Purpose |
+   |--------|---------|
+   | `DEPLOY_HOST` | Droplet IPv4 |
    | `DEPLOY_USER` | `semantaix-deploy` |
-   | `DEPLOY_SSH_KEY` | Full private key (`gha-deploy`) |
+   | `DEPLOY_SSH_KEY` | Deploy SSH private key |
+   | `TELEGRAM_BOT_TOKEN` | Production bot token |
+   | `OPENROUTER_API_KEY` | LLM API key |
+   | `TELEGRAM_ALERT_CHAT_ID` | Operator alert chat |
+   | `TELEGRAM_API_ID` | my.telegram.org app id (`user_gateway`) |
+   | `TELEGRAM_API_HASH` | my.telegram.org app hash |
+   | `INTERNAL_SERVICE_TOKEN` | Service-to-service auth (generate once: `openssl rand -hex 32`) |
+   | `CALENDAR_TOKEN_ENCRYPTION_KEY` | Optional — Fernet key for calendar OAuth tokens |
+   | `GOOGLE_OAUTH_CLIENT_ID` | Optional — Google Calendar OAuth |
+   | `GOOGLE_OAUTH_CLIENT_SECRET` | Optional — Google Calendar OAuth |
 
-4. Optional **variables**: `DEPLOY_DOMAIN` = `semantaix.flexsentlabs.com`;
-   `DEPLOY_SERVICES` = `api bot_gateway user_gateway nginx` (lean 2 GB stack).
+4. **Variables** (non-secret): `DEPLOY_DOMAIN` = `semantaix.flexsentlabs.com`;
+   `DEPLOY_SERVICES` = `api bot_gateway user_gateway web_ui nginx`.
 
-Deploy runs automatically when **CI** succeeds on `main`, or manually via **Actions → Deploy → Run workflow**.
-The workflow rsyncs code (preserving server `.env` and `.data`), builds images on the host, and verifies HTTPS.
+Deploy runs when **CI** passes on `main`, or manually via **Actions → Deploy**. The workflow
+rsyncs code (never `.env` or `.data`), re-renders `.env` from GitHub secrets, rebuilds, and
+verifies HTTPS.
 
 ## Run Tests
 

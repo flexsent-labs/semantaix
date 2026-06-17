@@ -145,47 +145,19 @@ clone_or_update() {
 
 scaffold_env() {
   local env_file="$DEPLOY_DIR/.env"
-  if [ ! -f "$env_file" ]; then
+  if [ -f "$DEPLOY_DIR/.env.production" ]; then
+    cp "$DEPLOY_DIR/.env.production" "$env_file"
+  elif [ ! -f "$env_file" ]; then
     cp "$DEPLOY_DIR/.env.example" "$env_file"
   fi
-  local token
-  token="$(openssl rand -hex 32)"
-  grep -q '^APP_ENV=' "$env_file" \
-    && sed -i "s/^APP_ENV=.*/APP_ENV=production/" "$env_file" \
-    || echo "APP_ENV=production" >> "$env_file"
-  grep -q '^LOG_FORMAT=' "$env_file" \
-    && sed -i 's/^LOG_FORMAT=.*/LOG_FORMAT=json/' "$env_file" \
-    || echo "LOG_FORMAT=json" >> "$env_file"
-  if ! grep -q '^INTERNAL_SERVICE_TOKEN=' "$env_file"; then
-    echo "INTERNAL_SERVICE_TOKEN=$token" >> "$env_file"
-  elif grep -q '^INTERNAL_SERVICE_TOKEN=$' "$env_file"; then
-    sed -i "s/^INTERNAL_SERVICE_TOKEN=.*/INTERNAL_SERVICE_TOKEN=$token/" "$env_file"
-  fi
-  if grep -q '^WEB_UI_BASE_URL=' "$env_file"; then
-    sed -i "s|^WEB_UI_BASE_URL=.*|WEB_UI_BASE_URL=https://${DOMAIN}/admin|" "$env_file"
-  else
-    echo "WEB_UI_BASE_URL=https://${DOMAIN}/admin" >> "$env_file"
-  fi
-  if grep -q '^TELEGRAM_PLATFORM_BOT_USERNAME=' "$env_file"; then
-    sed -i 's/^TELEGRAM_PLATFORM_BOT_USERNAME=.*/TELEGRAM_PLATFORM_BOT_USERNAME=@semantaix_bot/' \
-      "$env_file"
-  fi
-  local oauth_uri="https://${DOMAIN}/api/calendar/oauth/callback"
-  if grep -q '^GOOGLE_OAUTH_REDIRECT_URI=' "$env_file"; then
-    sed -i "s|^GOOGLE_OAUTH_REDIRECT_URI=.*|GOOGLE_OAUTH_REDIRECT_URI=${oauth_uri}|" "$env_file"
-  else
-    echo "GOOGLE_OAUTH_REDIRECT_URI=${oauth_uri}" >> "$env_file"
-  fi
-  if grep -q '^WEB_UI_ADMIN_COOKIE_SECURE=' "$env_file"; then
-    sed -i 's/^WEB_UI_ADMIN_COOKIE_SECURE=.*/WEB_UI_ADMIN_COOKIE_SECURE=true/' "$env_file"
-  else
-    echo "WEB_UI_ADMIN_COOKIE_SECURE=true" >> "$env_file"
-  fi
-  # Deprecated since Epic 10.5 — remove if a stale template still has them.
+  local domain="${DOMAIN}"
+  sed -i "s|^WEB_UI_BASE_URL=.*|WEB_UI_BASE_URL=https://${domain}/admin|" "$env_file"
+  sed -i "s|^GOOGLE_OAUTH_REDIRECT_URI=.*|GOOGLE_OAUTH_REDIRECT_URI=https://${domain}/api/calendar/oauth/callback|" \
+    "$env_file"
   sed -i '/^HITL_PRIMARY_OPERATOR_USERNAME=/d' "$env_file" || true
   sed -i '/^HITL_PRIMARY_OPERATOR_CHAT_ID=/d' "$env_file" || true
   chmod 600 "$env_file"
-  log "scaffolded $env_file (generated INTERNAL_SERVICE_TOKEN; edit other secrets)"
+  log "scaffolded $env_file from .env.production (secrets: GitHub Actions deploy)"
 }
 
 prepare_phase() {
@@ -201,9 +173,9 @@ prepare_phase() {
 Next steps:
   1. Cloudflare DNS:  semantaix.flexsentlabs.com  A  →  ${droplet_ip}
      (grey cloud / DNS only until 'finish' completes — see --cloudflare)
-  2. Edit secrets:  nano ${DEPLOY_DIR}/.env
-     Required: TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, TELEGRAM_ALERT_CHAT_ID,
-               HITL_CONFIG_ADMIN_USERNAME, TELEGRAM_API_ID, TELEGRAM_API_HASH (user_gateway)
+  2. Secrets: set GitHub Actions repository secrets (see README). The Deploy
+     workflow renders /opt/semantaix/.env on each deploy — do not edit secrets on
+     the server by hand.
   3. Finish deploy:  sudo bash ${DEPLOY_DIR}/scripts/digitalocean_bootstrap.sh finish \\
        --domain ${DOMAIN} --email ${EMAIL} --dir ${DEPLOY_DIR} --cloudflare
 
