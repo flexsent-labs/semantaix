@@ -2973,7 +2973,7 @@ async def _process_telegram_update(
         trace_id=trace_id, normalized=normalized
     )
     if _platform_admin_skip is not None:
-        return _platform_admin_skip  # pragma: no cover -- glue return; logic in _platform_admin_customer_skip_response
+        return _platform_admin_skip  # pragma: no cover
 
     if is_stale(
         message_date=normalized.date,
