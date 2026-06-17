@@ -23,14 +23,11 @@ def test_admin_login_round_trip(tmp_path, monkeypatch):
     projects = ProjectRepository(str(tmp_path / "projects.sqlite3"))
     operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
     admin_auth = AdminAuthRepository(str(tmp_path / "admin.sqlite3"))
-    default = projects.ensure_default_project()
-    operators.ensure_default_operator(
-        username="@e2e_admin", project_id=default.id, chat_id=555
-    )
     monkeypatch.setattr(api_main, "project_repository", projects)
     monkeypatch.setattr(api_main, "operator_repository", operators)
     monkeypatch.setattr(api_main, "admin_auth_repository", admin_auth)
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@e2e_admin")
+    monkeypatch.setattr(api_main.settings, "telegram_alert_chat_id", "555")
     monkeypatch.setattr(api_main.settings, "admin_login_code_ttl_seconds", 300)
     monkeypatch.setattr(api_main.settings, "admin_session_ttl_seconds", 3600)
     send_mock = AsyncMock(return_value=1)
@@ -45,6 +42,7 @@ def test_admin_login_round_trip(tmp_path, monkeypatch):
     assert request_response.status_code == 200
     send_mock.assert_awaited_once()
     dm_text = send_mock.await_args.kwargs["text"]
+    assert send_mock.await_args.kwargs["chat_id"] == 555
     code = "".join(ch for ch in dm_text if ch.isdigit())[:6]
     assert len(code) == 6
 
