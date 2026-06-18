@@ -183,6 +183,10 @@ def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
 def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch):
     # /hitl_config now registers the operator via the operators registry (not
     # via runtime_config DB writes) and sets telegram_alert_chat_id.
+    import services.bot_gateway.app.main as _bot_main
+
+    monkeypatch.setattr(_bot_main.settings, "hitl_config_admin_username", "@ajdevy")
+    monkeypatch.setattr(_bot_main.settings, "admin_telegram_username", "@ajdevy")
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     # Admin is not in the operators registry — that's expected.

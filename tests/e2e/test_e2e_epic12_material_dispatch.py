@@ -195,9 +195,7 @@ def stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(bot_main.settings, "hitl_ticket_db_path", str(paths["hitl_db"]))
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
-    monkeypatch.setattr(
-        bot_main.settings, "hitl_config_admin_username", f"@{_OPERATOR_USERNAME}"
-    )
+    # Keep platform admin off @ajdevy so the operator resolver finds the seeded row.
     monkeypatch.setattr(
         bot_main.settings, "internal_service_token", _INTERNAL_TOKEN
     )

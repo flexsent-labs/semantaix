@@ -548,6 +548,69 @@ def test_approve_operator_username_conflict_via_api(tmp_path, monkeypatch):
     assert response.json()["detail"] == "operator_username_conflict"
 
 
+def test_register_request_rejects_platform_admin_username(tmp_path, monkeypatch):
+    internal, _ = _registration_wire(tmp_path)
+    monkeypatch.setattr(api_main.settings, "internal_service_token", internal)
+    monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@ajdevy")
+    monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@ajdevy")
+    client = TestClient(api_app)
+    response = client.post(
+        "/operators/register-request",
+        headers={"Authorization": f"Bearer {internal}"},
+        json={"username": "@ajdevy", "chat_id": 7001},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "platform_admin_not_operator"
+
+
+def test_approve_rejects_platform_admin_username(tmp_path, monkeypatch):
+    internal, admin = _registration_wire(tmp_path)
+    monkeypatch.setattr(api_main.settings, "internal_service_token", internal)
+    monkeypatch.setattr(api_main.settings, "admin_internal_token", admin)
+    monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@ajdevy")
+    monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@ajdevy")
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    pending = operator_registration_repository.create_request(
+        username="@ajdevy",
+        chat_id=7001,
+        display_name="Admin",
+    )
+    client = TestClient(api_app)
+    response = client.post(
+        f"/operators/register-requests/{pending.id}/approve",
+        headers={"x-internal-token": admin},
+        json={},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "platform_admin_not_operator"
+
+
+def test_approve_registration_not_found_from_repository(tmp_path, monkeypatch):
+    internal, admin = _registration_wire(tmp_path)
+    monkeypatch.setattr(api_main.settings, "internal_service_token", internal)
+    monkeypatch.setattr(api_main.settings, "admin_internal_token", admin)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    client = TestClient(api_app)
+    created = client.post(
+        "/operators/register-request",
+        headers={"Authorization": f"Bearer {internal}"},
+        json={"username": "@race", "chat_id": 3},
+    )
+    request_id = created.json()["request_id"]
+
+    def _raise_not_found(**_: object) -> None:
+        raise op_reg_module.RegistrationNotFound()
+
+    monkeypatch.setattr(operator_registration_repository, "approve", _raise_not_found)
+    response = client.post(
+        f"/operators/register-requests/{request_id}/approve",
+        headers={"x-internal-token": admin},
+        json={},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "request_not_found"
+
+
 def test_reject_not_found_and_get_operator_by_id_not_found(tmp_path, monkeypatch):
     internal, admin = _registration_wire(tmp_path)
     monkeypatch.setattr(api_main.settings, "internal_service_token", internal)

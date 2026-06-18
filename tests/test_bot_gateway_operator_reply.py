@@ -212,6 +212,11 @@ def test_operator_reply_without_quote_and_no_open_tickets_is_ignored(monkeypatch
 def test_operator_admin_command_takes_precedence_over_reply_branch(monkeypatch):
     # Even when the sender is the admin, a /hitl_config command must be
     # handled by the admin branch (not the operator reply branch).
+    import services.bot_gateway.app.main as bot_main
+
+    monkeypatch.setattr(
+        bot_main.settings, "hitl_config_admin_username", "@ajdevy"
+    )
     monkeypatch.setattr(api_client, "attach_operator", AsyncMock(return_value={}))
     deliver = AsyncMock(return_value={"delivered": True})
     monkeypatch.setattr(api_client, "deliver_operator_reply", deliver)

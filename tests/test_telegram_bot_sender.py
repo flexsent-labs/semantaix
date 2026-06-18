@@ -171,7 +171,15 @@ async def test_set_my_commands_posts_setMyCommands_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_answer_callback_query_posts_payload(monkeypatch):
+async def test_set_my_commands_includes_scope_when_provided(monkeypatch):
+    client = _CapturingClient()
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="abc")
+    commands = [{"command": "start", "description": "Начать"}]
+    scope = {"type": "all_private_chats"}
+    await sender.set_my_commands(commands=commands, scope=scope)
+    assert client.calls[0][1] == {"commands": commands, "scope": scope}
+
     client = _CapturingClient()
     monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
     sender = TelegramBotSender(bot_token="abc")
