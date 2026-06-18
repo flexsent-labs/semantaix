@@ -25,6 +25,8 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main.settings, "persistence_db_path", str(tmp_path / "story.db"))
     monkeypatch.setattr(bot_main.settings, "hitl_ticket_db_path", str(tmp_path / "hitl.db"))
     monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
+    monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@semantaix-admin")
+    monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@semantaix-admin")
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
     async def _default_lookup(*, username: str):
         if username == "@ajdevy":
@@ -100,7 +102,7 @@ def test_operator_help_with_trailing_tokens_still_matches(isolated_bot):
     assert len(isolated_bot["dms"]) == 1
 
 
-def test_help_from_non_operator_falls_through_to_forward(isolated_bot, monkeypatch):
+def test_help_from_non_operator_returns_guest_help(isolated_bot, monkeypatch):
     forwarded: list[dict] = []
 
     async def fake_forward(**kwargs):
@@ -116,16 +118,14 @@ def test_help_from_non_operator_falls_through_to_forward(isolated_bot, monkeypat
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "accepted"
-    assert len(isolated_bot["dms"]) == 0
-    assert len(forwarded) == 1
-    assert forwarded[0]["text"] == "/help"
-    assert forwarded[0]["customer_username"] == "@customer"
+    assert response.json()["status"] == "help_sent"
+    assert len(isolated_bot["dms"]) == 1
+    assert "/register" in isolated_bot["dms"][0][1]
+    assert len(forwarded) == 0
 
 
 def test_help_requires_registry_operator(isolated_bot, monkeypatch):
-    """Only a sender registered in the operators registry gets the help DM;
-    an unregistered sender's /help is forwarded to the customer pipeline."""
+    """Only a sender registered in the operators registry gets the operator help DM."""
     async def registry_op_lookup(*, username: str):
         if username == "@runtime_op":
             return {"username": "@runtime_op", "chat_id": 100, "project_id": 1, "is_active": True}
@@ -147,13 +147,17 @@ def test_help_requires_registry_operator(isolated_bot, monkeypatch):
         "/telegram/webhook",
         json=_message(text="/help", username="stranger_user"),
     )
-    assert non_op_response.json()["status"] == "accepted"
-    assert len(isolated_bot["dms"]) == 0
-    assert len(forwarded) == 1
+    assert non_op_response.json()["status"] == "help_sent"
+    assert len(isolated_bot["dms"]) == 1
+    assert "Команды оператора" not in isolated_bot["dms"][0][1]
+    assert "/register" in isolated_bot["dms"][0][1]
+    assert len(forwarded) == 0
 
+    isolated_bot["dms"].clear()
     registry_op_response = client.post(
         "/telegram/webhook",
         json=_message(text="/help", username="runtime_op"),
     )
     assert registry_op_response.json()["status"] == "help_sent"
     assert len(isolated_bot["dms"]) == 1
+    assert "Команды оператора" in isolated_bot["dms"][0][1]

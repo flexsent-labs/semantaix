@@ -293,6 +293,20 @@ class TelegramBotSender:
             json_body={"short_description": short_description},
         )
 
+    async def set_my_commands(
+        self,
+        *,
+        commands: list[dict[str, str]],
+        scope: dict[str, object] | None = None,
+    ) -> dict:
+        body: dict[str, object] = {"commands": commands}
+        if scope is not None:
+            body["scope"] = scope
+        return await self._call_identity_method(
+            method="setMyCommands",
+            json_body=body,
+        )
+
 
 def _extract_file_id(
     payload: dict[str, Any], *, field: _MediaField

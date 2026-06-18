@@ -438,11 +438,7 @@ def _bootstrap_default_entities() -> None:
     operator row.  Deactivate any legacy operator rows for admin usernames.
     """
     project_repository.ensure_default_project()
-    admin_usernames = {
-        settings.admin_telegram_username,
-        settings.hitl_config_admin_username,
-    }
-    for username in admin_usernames:
+    for username in settings.platform_admin_usernames():
         existing = operator_repository.find_by_username(username)
         if existing is not None and existing.is_active:
             operator_repository.update(username=username, is_active=False)
@@ -1368,6 +1364,8 @@ def create_operator(
     request: OperatorCreateRequest,
     _principal: Annotated[str, Depends(require_admin_or_internal)],
 ) -> dict[str, object]:
+    if settings.is_platform_admin_username(request.username):
+        raise HTTPException(status_code=400, detail="platform_admin_not_operator")
     if project_repository.get(request.project_id) is None:
         raise HTTPException(status_code=400, detail="project_not_found")
     try:

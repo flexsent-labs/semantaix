@@ -126,7 +126,8 @@ def test_calendar_off_non_operator_ignored(isolated_bot, monkeypatch):
     body = response.json()
     assert body["status"] == "ignored"
     assert body["reason"] == "unauthorized_calendar"
-    assert len(isolated_bot["dms"]) == 0
+    assert len(isolated_bot["dms"]) == 1
+    assert "/register" in isolated_bot["dms"][0][1]
 
 
 # --- operator /calendar_service --------------------------------------------
