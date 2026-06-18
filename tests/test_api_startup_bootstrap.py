@@ -42,6 +42,21 @@ def test_bootstrap_deactivates_admin_operator_rows(tmp_path, monkeypatch):
     assert admin.is_active is False
 
 
+def test_create_operator_rejects_platform_admin_username(tmp_path, monkeypatch):
+    projects, _operators = _swap_singletons(monkeypatch, tmp_path)
+    default = projects.ensure_default_project()
+    monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@ajdevy")
+    monkeypatch.setattr(api_main.settings, "admin_internal_token", "secret")
+    client = TestClient(api_main.app)
+    response = client.post(
+        "/operators",
+        json={"username": "@ajdevy", "project_id": default.id, "chat_id": 1},
+        headers={"X-Internal-Token": "secret"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "platform_admin_not_operator"
+
+
 def test_api_app_has_bootstrapped_default_project_on_import(tmp_path, monkeypatch):
     projects, operators = _swap_singletons(monkeypatch, tmp_path)
     api_main._bootstrap_default_entities()

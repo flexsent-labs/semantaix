@@ -159,6 +159,18 @@ async def test_set_my_short_description_posts_setMyShortDescription_payload(monk
 
 
 @pytest.mark.asyncio
+async def test_set_my_commands_posts_setMyCommands_payload(monkeypatch):
+    client = _CapturingClient()
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="abc")
+    commands = [{"command": "start", "description": "Начать"}]
+    result = await sender.set_my_commands(commands=commands)
+    assert result == {"ok": True, "result": {"message_id": 77}}
+    assert client.calls[0][0].endswith("/botabc/setMyCommands")
+    assert client.calls[0][1] == {"commands": commands}
+
+
+@pytest.mark.asyncio
 async def test_answer_callback_query_posts_payload(monkeypatch):
     client = _CapturingClient()
     monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)

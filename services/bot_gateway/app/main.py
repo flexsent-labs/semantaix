@@ -53,11 +53,16 @@ from services.bot_gateway.app.operator_files import (
     OperatorFileRecord,
     OperatorFileRepository,
 )
+from services.bot_gateway.app.operator_onboarding_messages import (
+    GUEST_HELP_TEXT,
+    telegram_command_menu,
+)
 from services.bot_gateway.app.operator_registration_callbacks import (
     handle_operator_registration_callback,
 )
 from services.bot_gateway.app.operator_registration_commands import (
     handle_register_command,
+    handle_start_command,
 )
 from services.bot_gateway.app.operator_resolver import resolve_operator_for_sender
 from services.bot_gateway.app.operator_service_nl import (
@@ -157,19 +162,11 @@ def _redact_token(message: str) -> str:
 
 
 def _platform_admin_usernames() -> frozenset[str]:
-    return frozenset(
-        {
-            settings.admin_telegram_username,
-            settings.hitl_config_admin_username,
-        }
-    )
+    return settings.platform_admin_usernames()
 
 
 def _is_platform_admin_username(username: str | None) -> bool:
-    if not username:
-        return False
-    candidate = username if username.startswith("@") else f"@{username}"
-    return candidate in _platform_admin_usernames()
+    return settings.is_platform_admin_username(username)
 
 
 def _platform_admin_chat_id() -> int | None:
@@ -577,9 +574,8 @@ async def _handle_help_command(
 ) -> dict[str, str] | None:
     if not _HELP_TRIGGER_RE.match(normalized.text or ""):
         return None
-    if not is_operator:
-        return None
-    await _send_dm(normalized.chat_id, _HELP_TEXT)
+    text = _HELP_TEXT if is_operator else GUEST_HELP_TEXT
+    await _send_dm(normalized.chat_id, text)
     return {"status": "help_sent"}
 
 
@@ -593,7 +589,12 @@ async def _handle_whoami_command(
     if not _WHOAMI_TRIGGER_RE.match(normalized.text or ""):
         return None
     sender = normalized.username or "(без username)"
-    operator_line = "✅ зарегистрирован" if is_operator else "❌ не зарегистрирован"
+    if _is_platform_admin_username(normalized.username):
+        operator_line = "👑 администратор платформы"
+    elif is_operator:
+        operator_line = "✅ оператор"
+    else:
+        operator_line = "❌ не зарегистрирован"
     text = (
         f"🪪 username: {sender}\n"
         f"📨 chat_id: {normalized.chat_id}\n"
@@ -2350,6 +2351,18 @@ async def _start_usage_recorder_on_startup() -> None:
     usage_recorder.start()
 
 
+@app.on_event("startup")
+async def _sync_telegram_bot_commands_on_startup() -> None:
+    result = await telegram_bot_sender.set_my_commands(
+        commands=telegram_command_menu(),
+    )
+    if not result.get("ok"):
+        logger.warning(
+            "telegram_set_my_commands_failed",
+            extra={"result": result},
+        )
+
+
 @app.on_event("shutdown")
 async def _stop_usage_recorder_on_shutdown() -> None:
     await usage_recorder.aclose()
@@ -2655,10 +2668,12 @@ async def _process_telegram_update(
         api_client=api_client,
     )
     is_operator = _resolved_op is not None
+    is_platform_admin = _is_platform_admin_username(normalized.username)
 
     register_result = await handle_register_command(
         normalized=normalized,
         is_operator=is_operator,
+        is_platform_admin=is_platform_admin,
         api_client=api_client,
         send_dm=_send_dm,
     )
@@ -2666,6 +2681,18 @@ async def _process_telegram_update(
         response = {"trace_id": trace_id}
         response.update(register_result)
         _log_routed(trace_id=trace_id, result=register_result, fallback="register_command")
+        return response
+
+    start_result = await handle_start_command(
+        normalized=normalized,
+        is_operator=is_operator,
+        is_platform_admin=is_platform_admin,
+        send_dm=_send_dm,
+    )
+    if start_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(start_result)
+        _log_routed(trace_id=trace_id, result=start_result, fallback="start_command")
         return response
 
     delete_result = await _handle_file_delete_command(

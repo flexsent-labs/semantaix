@@ -40,6 +40,7 @@ from services.api.app.calendar.calendar_service_alias_hint_repository import (
     should_send_calendar_service_alias_hint,
 )
 from services.bot_gateway.app.api_client import ApiClient, ApiError
+from services.bot_gateway.app.operator_onboarding_messages import CALENDAR_REGISTER_HINT
 from services.bot_gateway.app.operator_resolver import resolve_operator_for_sender
 from services.bot_gateway.app.telegram_update import NormalizedTelegramMessage
 
@@ -381,6 +382,8 @@ async def handle_calendar_command(
                 "command": command,
             },
         )
+        if reason == "unauthorized_calendar":
+            await send_dm(normalized.chat_id, CALENDAR_REGISTER_HINT)
         return {"status": "ignored", "reason": reason}
 
     if is_connect:

@@ -120,6 +120,31 @@ async def test_api_error_for_any_sender_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_username_never_resolves(monkeypatch):
+    monkeypatch.setattr(
+        "services.bot_gateway.app.operator_resolver.get_settings",
+        lambda: type(
+            "S",
+            (),
+            {"is_platform_admin_username": lambda _self, u: u in {"@ajdevy", "ajdevy"}},
+        )(),
+    )
+    api = FakeApi()
+    api.find_operator_by_username.return_value = {
+        "username": "@ajdevy",
+        "chat_id": 100,
+        "project_id": 1,
+        "is_active": True,
+    }
+    result = await resolve_operator_for_sender(
+        username="@ajdevy",
+        api_client=api,
+    )
+    assert result is None
+    api.find_operator_by_username.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_chat_id_none_handled():
     api = FakeApi()
     api.find_operator_by_username.return_value = {

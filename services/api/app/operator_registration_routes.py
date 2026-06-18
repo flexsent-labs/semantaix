@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from platform_common.settings import get_settings
 from services.api.app.operator_registration import (
     OperatorRegistrationRepository,
     RegistrationAlreadyProcessed,
@@ -66,6 +67,8 @@ def wire_operator_registration_routes(
         existing = operator_repository.find_by_username(body.username)
         if existing is not None:
             raise HTTPException(status_code=409, detail="already_operator")
+        if get_settings().is_platform_admin_username(body.username):
+            raise HTTPException(status_code=409, detail="platform_admin_not_operator")
         try:
             request = registration_repository.create_request(
                 username=body.username,
@@ -99,6 +102,11 @@ def wire_operator_registration_routes(
     ) -> dict[str, object]:
         project_id = body.project_id or ensure_default_project_id()
         reviewed_by = principal if principal != "internal" else "internal"
+        pending = registration_repository.get(request_id)
+        if pending is None:
+            raise HTTPException(status_code=404, detail="request_not_found")
+        if get_settings().is_platform_admin_username(pending.username):
+            raise HTTPException(status_code=400, detail="platform_admin_not_operator")
         try:
             operator = registration_repository.approve(
                 request_id=request_id,

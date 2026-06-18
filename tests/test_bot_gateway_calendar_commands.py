@@ -193,7 +193,8 @@ def test_connect_calendar_non_designated_operator_ignored(
     assert body["status"] == "ignored"
     assert body["reason"] == "unauthorized_calendar"
     assert called is False
-    assert len(isolated_bot["dms"]) == 0
+    assert len(isolated_bot["dms"]) == 1
+    assert "/register" in isolated_bot["dms"][0][1]
     assert any(
         record.message == "calendar_command_unauthorized"
         for record in caplog.records
@@ -228,7 +229,8 @@ def test_connect_calendar_operator_without_project_ignored(
     body = response.json()
     assert body["status"] == "ignored"
     assert body["reason"] == "unauthorized_calendar"
-    assert len(isolated_bot["dms"]) == 0
+    assert len(isolated_bot["dms"]) == 1
+    assert "/register" in isolated_bot["dms"][0][1]
 
 
 def test_connect_calendar_api_error_dms_fallback(isolated_bot, monkeypatch):
@@ -347,7 +349,8 @@ def test_disconnect_calendar_non_designated_operator_ignored(
     assert body["status"] == "ignored"
     assert body["reason"] == "unauthorized_calendar"
     assert called is False
-    assert len(isolated_bot["dms"]) == 0
+    assert len(isolated_bot["dms"]) == 1
+    assert "/register" in isolated_bot["dms"][0][1]
 
 
 def test_disconnect_calendar_api_error_dms_fallback(isolated_bot, monkeypatch):

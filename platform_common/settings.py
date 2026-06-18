@@ -195,6 +195,20 @@ class AppSettings(BaseSettings):
     def nl_ops_admin_user_id_list(self) -> list[str]:
         return [item.strip() for item in self.nl_ops_admin_user_ids.split(",") if item.strip()]
 
+    def platform_admin_usernames(self) -> frozenset[str]:
+        return frozenset(
+            {
+                self.admin_telegram_username,
+                self.hitl_config_admin_username,
+            }
+        )
+
+    def is_platform_admin_username(self, username: str | None) -> bool:
+        if not username:
+            return False
+        candidate = username if username.startswith("@") else f"@{username}"
+        return candidate in self.platform_admin_usernames()
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
