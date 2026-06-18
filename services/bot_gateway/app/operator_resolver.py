@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 import httpx
 
-from platform_common.settings import get_settings
 from services.bot_gateway.app.api_client import ApiClient
 
 logger = logging.getLogger(__name__)
@@ -42,7 +41,9 @@ async def resolve_operator_for_sender(
     """
     if not username:
         return None
-    if get_settings().is_platform_admin_username(username):
+    from services.bot_gateway.app.main import settings
+
+    if settings.is_platform_admin_username(username):
         return None
     try:
         record = await api_client.find_operator_by_username(username=username)

@@ -121,13 +121,13 @@ async def test_api_error_for_any_sender_returns_none():
 
 @pytest.mark.asyncio
 async def test_platform_admin_username_never_resolves(monkeypatch):
+    from services.bot_gateway.app import main as bot_main
+
     monkeypatch.setattr(
-        "services.bot_gateway.app.operator_resolver.get_settings",
-        lambda: type(
-            "S",
-            (),
-            {"is_platform_admin_username": lambda _self, u: u in {"@ajdevy", "ajdevy"}},
-        )(),
+        bot_main.settings, "admin_telegram_username", "@ajdevy"
+    )
+    monkeypatch.setattr(
+        bot_main.settings, "hitl_config_admin_username", "@ajdevy"
     )
     api = FakeApi()
     api.find_operator_by_username.return_value = {

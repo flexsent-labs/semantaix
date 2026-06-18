@@ -711,6 +711,26 @@ def test_whoami_handles_missing_username(monkeypatch):
     assert "❌" in sent_text
 
 
+def test_whoami_shows_platform_admin_for_admin_sender(monkeypatch):
+    import services.bot_gateway.app.main as bot_main
+
+    monkeypatch.setattr(bot_main.settings, "admin_telegram_username", "@ajdevy")
+    monkeypatch.setattr(bot_main.settings, "hitl_config_admin_username", "@ajdevy")
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="/whoami"),
+    )
+
+    assert response.json()["status"] == "whoami_sent"
+    sent_text = send.await_args.kwargs["text"]
+    assert "👑" in sent_text
+    assert "администратор платформы" in sent_text
+
+
 def test_whoami_does_not_intercept_other_text(monkeypatch):
     """Make sure /whoami trigger only matches the slash command itself, not
     arbitrary text mentioning 'whoami'."""

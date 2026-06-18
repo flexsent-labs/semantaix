@@ -47,6 +47,26 @@ def _isolate_webhook_update_claims(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _detach_default_platform_admin_from_operator_role(monkeypatch):
+    """Keep @ajdevy usable as a test operator unless a test opts into admin.
+
+    Production defaults ``admin_telegram_username`` / ``hitl_config_admin_username``
+    to @ajdevy. The bot's operator resolver treats those usernames as non-operators,
+    which breaks the large share of bot_gateway tests that stub @ajdevy as the
+    registered operator. Point the platform-admin seam at a throwaway username for
+    every test run; platform-admin-specific tests override this explicitly."""
+    module = sys.modules.get("services.bot_gateway.app.main")
+    if module is not None:
+        monkeypatch.setattr(
+            module.settings, "admin_telegram_username", "@test-platform-admin"
+        )
+        monkeypatch.setattr(
+            module.settings, "hitl_config_admin_username", "@test-platform-admin"
+        )
+    yield
+
+
 def wire_isolated_primary_operator(tmp_path, *, username: str = "@ajdevy", chat_id: int = 999001):
     """Point operators + projects DBs at tmp_path with a single active operator.
 

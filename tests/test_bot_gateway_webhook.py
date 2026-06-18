@@ -21,6 +21,17 @@ def _fresh(payload: dict) -> dict:
 
 
 @pytest.fixture(autouse=True)
+def _restore_hitl_config_admin_username(monkeypatch):
+  """These webhook tests assert @ajdevy can run /hitl_config."""
+  import services.bot_gateway.app.main as bot_main
+
+  monkeypatch.setattr(
+      bot_main.settings, "hitl_config_admin_username", "@ajdevy"
+  )
+  yield
+
+
+@pytest.fixture(autouse=True)
 def persistence_db(tmp_path, monkeypatch) -> Path:
     """Isolate the bot_gateway persistence DB per test.
 
