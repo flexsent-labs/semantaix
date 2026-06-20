@@ -5051,19 +5051,16 @@ async def calendar_oauth_callback(
     # Re-clicking the consent URL during dev, or any other repeat consent for
     # an already-connected (project, operator), used to spam the operator
     # with the connection-confirmation message. Capture token presence BEFORE
-    # the upsert; we only DM when there was no prior token (first-time connect
-    # or post-disconnect reconnect, both of which are legitimately "just got
-    # connected" moments from the operator's point of view).
-    token_existed_before_upsert = False
-    try:
-        await asyncio.to_thread(
-            calendar_token_repository.get_refresh_token,
-            pending.project_id,
-            pending.operator,
-        )
-        token_existed_before_upsert = True
-    except TokenNotFound:
-        token_existed_before_upsert = False
+    # the upsert using get_status() (no Fernet decryption) so the guard is
+    # stable even when the encryption key changes between deploys. We only DM
+    # when there was no prior token row (first-time connect or post-disconnect
+    # reconnect, both of which are legitimately "just got connected" moments).
+    existing_status_before_upsert = await asyncio.to_thread(
+        calendar_token_repository.get_status,
+        pending.project_id,
+        pending.operator,
+    )
+    token_existed_before_upsert = existing_status_before_upsert is not None
     await asyncio.to_thread(
         calendar_token_repository.upsert,
         pending.project_id,
