@@ -1,7 +1,7 @@
 # Semantaix Bootstrap
 
 [![CI](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml/badge.svg)](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml)
-[![Coverage](https://raw.githubusercontent.com/flexsent-labs/semantaix/main/.badges/coverage.svg)](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml)
+[![Coverage](.badges/coverage.svg)](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml)
 
 <!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-41419%20lines-blue)<!-- LOC:END -->
 
