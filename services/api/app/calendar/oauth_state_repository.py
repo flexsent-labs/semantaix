@@ -90,10 +90,41 @@ class CalendarOAuthStateRepository:
 
     def consume(self, state: str, *, now: datetime) -> PendingState:
         state_hash = _sha256(state)
+        now_iso = now.isoformat()
         with _connect(self.db_path) as connection:
+            # Atomic single-use: claim the row in ONE conditional UPDATE so two
+            # concurrent callbacks presenting the same state cannot both pass an
+            # "unconsumed" check before either writes (TOCTOU). The WHERE clause
+            # enforces unconsumed + unexpired; rowcount == 1 means we won the claim.
+            claimed = connection.execute(
+                """
+                UPDATE calendar_oauth_pending_state
+                SET consumed_at = ?
+                WHERE state_hash = ?
+                  AND consumed_at IS NULL
+                  AND expires_at > ?
+                """,
+                (now_iso, state_hash, now_iso),
+            )
+            if claimed.rowcount == 1:
+                row = connection.execute(
+                    """
+                    SELECT project_id, operator, created_at, expires_at
+                    FROM calendar_oauth_pending_state
+                    WHERE state_hash = ?
+                    """,
+                    (state_hash,),
+                ).fetchone()
+                return PendingState(
+                    project_id=int(row["project_id"]),
+                    operator=str(row["operator"]),
+                    created_at=str(row["created_at"]),
+                    expires_at=str(row["expires_at"]),
+                )
+            # Claim failed — disambiguate the miss for a precise error.
             row = connection.execute(
                 """
-                SELECT project_id, operator, created_at, expires_at, consumed_at
+                SELECT expires_at, consumed_at
                 FROM calendar_oauth_pending_state
                 WHERE state_hash = ?
                 """,
@@ -103,20 +134,4 @@ class CalendarOAuthStateRepository:
                 raise InvalidOAuthState("unknown_state")
             if row["consumed_at"] is not None:
                 raise InvalidOAuthState("state_already_consumed")
-            expires_at = datetime.fromisoformat(str(row["expires_at"]))
-            if expires_at <= now:
-                raise InvalidOAuthState("state_expired")
-            connection.execute(
-                """
-                UPDATE calendar_oauth_pending_state
-                SET consumed_at = ?
-                WHERE state_hash = ?
-                """,
-                (now.isoformat(), state_hash),
-            )
-        return PendingState(
-            project_id=int(row["project_id"]),
-            operator=str(row["operator"]),
-            created_at=str(row["created_at"]),
-            expires_at=str(row["expires_at"]),
-        )
+            raise InvalidOAuthState("state_expired")

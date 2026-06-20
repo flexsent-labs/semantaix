@@ -14,6 +14,7 @@ class AppSettings(BaseSettings):
     scheduler_port: int = 8004
     user_gateway_port: int = 8005
     user_gateway_db_path: str = ".data/semantaix_user_gateway.db"
+    user_gateway_rate_limit_db_path: str = ".data/semantaix_user_gateway_rate_limits.db"
     tg_user_session_path: str = ".data/user_gateway.session"
     user_gateway_base_url: str = "http://user_gateway:8005"
     operator_sessions_dir: str = ".data/operator_sessions"

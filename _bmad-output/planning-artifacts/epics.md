@@ -225,13 +225,18 @@ Feature-sequential — only one feature epic in implementation at a time, per `e
 | 08 | Tenant Knowledge Ops + Answer Traces | Shipped | [epic-08-tenant-knowledge-ops-and-answer-traces.md](epics/epic-08-tenant-knowledge-ops-and-answer-traces.md) |
 | 09 | Operator KB Growth | Shipped | [epic-09-operator-kb-growth.md](epics/epic-09-operator-kb-growth.md) |
 | 10 | Multi-Operator Projects | Shipped | [epic-10-multi-operator-projects.md](epics/epic-10-multi-operator-projects.md) |
-| 10.5 | Operator/Project Model Refinement | Backlog (Epic 14 prerequisite) | [epic-10-5-operator-project-model-refinement.md](epics/epic-10-5-operator-project-model-refinement.md) |
+| 10.5 | Operator/Project Model Refinement | Shipped (sprint-status `epic-10-5: done`) | [epic-10-5-operator-project-model-refinement.md](epics/epic-10-5-operator-project-model-refinement.md) |
 | 11 | Calendar Availability & Scheduling | Shipped | [epic-11-calendar-availability-scheduling.md](epics/epic-11-calendar-availability-scheduling.md) |
-| 12 | Sales Conversation Persona | In progress (planning merged via PR [#82](https://github.com/flexsent-labs/semantaix/pull/82) + cap PR [#83](https://github.com/flexsent-labs/semantaix/pull/83); stories backlog) | [epic-12-sales-conversation-persona.md](epics/epic-12-sales-conversation-persona.md) |
+| 12 | Sales Conversation Persona | Shipped (sprint-status `epic-12: done`; `services/api/app/sales/`) | [epic-12-sales-conversation-persona.md](epics/epic-12-sales-conversation-persona.md) |
 | 13 | Unified Project Services Catalog | Shipped (PR [#80](https://github.com/flexsent-labs/semantaix/pull/80)) | [epic-13-unified-project-services-catalog.md](epics/epic-13-unified-project-services-catalog.md) |
-| **14** | **Usage / Token / Cost Monitoring + Cost-Spike Alerting** | **Planning (Step 2 of `bmad-create-epics-and-stories` complete; Step 3 next)** | [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md) |
-| **15** | **Telegram User Account Gateway (`user_gateway`)** | **Planning (requirements confirmed)** | [epic-15-telegram-user-gateway.md](epics/epic-15-telegram-user-gateway.md) |
+| **14** | **Usage / Token / Cost Monitoring + Cost-Spike Alerting** | **In progress (14-01…07 done, 14-08 review; 14-09 alerting + 14-10 signoff backlog)** | [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md) |
+| **15** | **Telegram User Account Gateway (`user_gateway`)** | **Core delivered via Epic 16 (16-06/16-08) — the `user_gateway` service ships. 15-04 (rate limit) + 15-05 (in-channel idempotency) addressed 2026-06-20; remaining 15-0x stories in sprint-status** | [epic-15-telegram-user-gateway.md](epics/epic-15-telegram-user-gateway.md) |
 | **16** | **Operator Self-Registration & Onboarding** | **Shipped** | [epic-16-operator-self-registration-onboarding.md](epics/epic-16-operator-self-registration-onboarding.md) |
+
+> **Status reconciliation (2026-06-20).** This table previously disagreed with
+> `implementation-artifacts/sprint-status.yaml` and the code (readiness report F-2). It is now
+> aligned to `sprint-status.yaml` — the single source of truth. Regenerate from sprint-status rather
+> than hand-maintaining both.
 
 Detailed Epic 14 design — goal, in-scope, out-of-scope, dependencies, exit criteria, and the 10-story split — is authored in [epic-14-usage-cost-monitoring.md](epics/epic-14-usage-cost-monitoring.md). This index file remains canonical for the Requirements Inventory (FR-1 — FR-36 / NFR-1 — NFR-11) and Epic List.
 

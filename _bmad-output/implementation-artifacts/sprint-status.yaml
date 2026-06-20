@@ -111,18 +111,23 @@ development_status:
   epic-13-retrospective: optional
 
   # --- Active feature epic ---
+  # Reconciliation 2026-06-20 (readiness F-4): epic-12 is `done` and the foundational
+  # work demonstrably ships (services/api/app/sales/ repositories; SalesPersonaAnswerer
+  # wired at main.py:696). The foundational story rows below were never flipped from
+  # backlog, leaving `done` stories depending on `backlog` ones. Set to `done` to match
+  # the shipped code and restore a consistent dependency graph.
   epic-12: done
-  12-01-sales-db-schema-and-repositories: backlog
-  12-02-service-commands-and-sales-state: backlog
-  12-02b-natural-language-service-management: backlog
-  12-03-sales-persona-answerer-greeting-and-intent: backlog
-  12-04-pricing-turn-kb-first-escalate-if-unknown: backlog
-  12-05-autonomous-client-materials-dispatch: backlog
-  12-05b-kb-upload-automatic-client-materials-analysis: backlog
-  12-05c-kb-upload-automatic-services-extraction: backlog
-  12-06-service-list-and-concept-explainer: backlog
-  12-07-date-proposal-turn: backlog
-  12-08-proactive-followup: backlog
+  12-01-sales-db-schema-and-repositories: done
+  12-02-service-commands-and-sales-state: done
+  12-02b-natural-language-service-management: done
+  12-03-sales-persona-answerer-greeting-and-intent: done
+  12-04-pricing-turn-kb-first-escalate-if-unknown: done
+  12-05-autonomous-client-materials-dispatch: done
+  12-05b-kb-upload-automatic-client-materials-analysis: done
+  12-05c-kb-upload-automatic-services-extraction: done
+  12-06-service-list-and-concept-explainer: done
+  12-07-date-proposal-turn: done
+  12-08-proactive-followup: done
   12-09-pipeline-wiring-and-e2e-signoff: done
   12-10-ask-for-time-when-booking-has-no-time: done
   12-11-graceful-decline-and-loop-guard-in-scoping: done
@@ -229,14 +234,19 @@ development_status:
   epic-14-retrospective: optional
 
   # --- Epic 15 (Telegram User Account Gateway; backlog after Epic 14) ---
-  # Planning story files exist in planning-artifacts/epics/stories/epic-15/.
-  # Story 15.05 is conditional — implement only if user_gateway joins shared groups.
-  epic-15: backlog
-  15-01-service-skeleton-docker: backlog
-  15-02-qr-auth-flow: backlog
-  15-03-message-routing: backlog
-  15-04-spam-filters: backlog
-  15-05-cross-channel-dedup-conditional: backlog
+  # Reconciliation 2026-06-20 (readiness F-3): the user_gateway service was delivered
+  # out-of-band via Epic 16 stories 16-06/16-08, so 15-01..15-03 effectively shipped.
+  # 15-04 (rate limit) + 15-05 (in-channel idempotency / dedup) were addressed 2026-06-20
+  # by the whole-project review fixes (platform_common.inbound_rate_limit applied to
+  # message_router; deterministic Telethon trace_id). Marked `review` pending formal
+  # Epic-15 acceptance (broader spam-content filtering and bot<->user cross-channel
+  # dedup remain open items if/when user_gateway joins shared groups).
+  epic-15: in-progress
+  15-01-service-skeleton-docker: done
+  15-02-qr-auth-flow: done
+  15-03-message-routing: done
+  15-04-spam-filters: review
+  15-05-cross-channel-dedup-conditional: review
   epic-15-retrospective: optional
 
   # --- Epic 16 (Operator Self-Registration & Onboarding; backlog after Epic 15.02) ---

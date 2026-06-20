@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from platform_common.app_factory import create_service_app
+from platform_common.inbound_rate_limit import InboundRateLimitRepository
 from platform_common.settings import get_settings
 from services.user_gateway.app.api_client import ApiClient
 from services.user_gateway.app.auth_session_repo import AuthSessionRepository
@@ -28,6 +29,9 @@ operator_auth_repo = OperatorTelegramAuthRepository(settings.user_gateway_db_pat
 api_client = ApiClient(
     base_url=settings.api_internal_base_url,
     internal_token=settings.internal_service_token or "",
+)
+rate_limit_repo = InboundRateLimitRepository(
+    db_path=settings.user_gateway_rate_limit_db_path
 )
 
 
@@ -54,6 +58,9 @@ def _router_factory(operator_id: int, linked_username: str | None) -> MessageRou
         queue=asyncio.Queue(maxsize=100),
         operator_id=operator_id,
         linked_username=linked_username,
+        rate_limiter=rate_limit_repo,
+        rate_limit_messages=settings.inbound_rate_limit_messages,
+        rate_limit_window_seconds=settings.inbound_rate_limit_window_seconds,
     )
 
 
