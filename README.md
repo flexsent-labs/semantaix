@@ -1,5 +1,8 @@
 # Semantaix Bootstrap
 
+[![CI](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml/badge.svg)](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-pytest--cov-2ea44f)](#run-tests)
+
 <!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-41354%20lines-blue)<!-- LOC:END -->
 
 Initial Docker-first skeleton for the Semantaix Option B architecture.
