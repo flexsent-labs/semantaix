@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   lint_test:
     runs-on: ubuntu-latest
@@ -29,8 +32,24 @@ jobs:
         run: ruff check .
 
       - name: Run full test suite (unit, contract, story e2e) with coverage
-        run: pytest --cov --cov-config=.coveragerc --cov-report=term-missing
+        run: pytest --cov --cov-config=.coveragerc --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Verify E2E marker subset
         run: pytest -m e2e -q --tb=short
 
+      - name: Generate coverage badge
+        if: github.ref == 'refs/heads/main'
+        run: python scripts/coverage_badge.py --xml coverage.xml --badge .badges/coverage.svg --summary .badges/coverage-summary.json
+
+      - name: Commit refreshed coverage badge if changed
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if ! git diff --quiet .badges/; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .badges/
+            git commit -m "chore: update coverage badge [skip ci]"
+            git push
+          else
+            echo "Coverage badge unchanged; nothing to commit."
+          fi
