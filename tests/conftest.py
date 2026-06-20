@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests.runtime_guard import validate_test_runtime  # noqa: E402
+
+validate_test_runtime(version_info=sys.version_info, executable=sys.executable)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_webhook_update_claims(tmp_path, monkeypatch):
