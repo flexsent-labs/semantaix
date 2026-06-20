@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from PIL import Image
-
 from scripts.coverage_badge import _coverage_percent, main
 
 
@@ -42,7 +40,7 @@ def test_main_writes_badge_and_summary(tmp_path, capsys):
         tmp_path / "coverage.xml",
         '<coverage line-rate="1.0" branch-rate="0.0"></coverage>',
     )
-    badge = tmp_path / ".badges" / "coverage.png"
+    badge = tmp_path / ".badges" / "coverage.svg"
     summary = tmp_path / ".badges" / "coverage-summary.json"
 
     assert main(
@@ -59,6 +57,4 @@ def test_main_writes_badge_and_summary(tmp_path, capsys):
     assert badge.exists()
     assert summary.exists()
     assert "100.0" in summary.read_text(encoding="utf-8")
-    with Image.open(badge) as image:
-        assert image.format == "PNG"
-        assert image.size[1] == 20
+    assert "100.0%" in badge.read_text(encoding="utf-8")
