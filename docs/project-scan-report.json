@@ -1,0 +1,36 @@
+{
+  "workflow_version": "1.2.0",
+  "timestamps": {"started": "2026-06-19", "last_updated": "2026-06-19", "completed": "2026-06-19"},
+  "mode": "initial_scan",
+  "scan_level": "deep",
+  "project_root": "/Users/aj/workspace_ai/semaintix/.claude/worktrees/romantic-stonebraker-397081",
+  "project_knowledge": "docs",
+  "repository_type": "monolith-multiservice",
+  "project_types": [{"part_id": "root", "project_type_id": "backend", "display_name": "Python FastAPI microservices"}],
+  "completed_steps": [
+    {"step": "step_1", "status": "completed", "summary": "Classified as monolith repo / multi-service backend, 1 part, Python/FastAPI"},
+    {"step": "step_2", "status": "completed", "summary": "Found existing docs: README, CLAUDE.md, AGENTS.md, planning-artifacts/{PRD,architecture,epics}, project-context.md, dialog-pipeline diagrams"},
+    {"step": "step_3", "status": "completed", "summary": "Tech stack: Python 3.11 FastAPI + httpx + SQLite + Russian NLP (pymorphy3/razdel)"},
+    {"step": "step_4", "status": "completed", "summary": "API (157 endpoints) + data models (19 SQLite stores) documented"},
+    {"step": "step_5", "status": "completed", "summary": "Source tree documented"},
+    {"step": "step_6", "status": "completed", "summary": "Dev + deployment guides written"},
+    {"step": "step_8", "status": "completed", "summary": "Architecture doc written (AI-context + as-built deltas)"},
+    {"step": "step_9", "status": "completed", "summary": "Supporting docs written"},
+    {"step": "step_10", "status": "completed", "summary": "Master index generated"},
+    {"step": "step_12", "status": "completed", "summary": "Workflow complete"}
+  ],
+  "current_step": "completed",
+  "findings": {
+    "documentation_drift": [
+      "Planning architecture.md describes single-answerer pipeline; code ships four answerers",
+      "Epics 11 (calendar) and 13 (catalog) marked planned but shipped",
+      "Planning doc lists 13 SQLite stores; code has 19",
+      "user_gateway service + README out of date"
+    ]
+  },
+  "outputs_generated": [
+    "docs/index.md", "docs/project-overview.md", "docs/architecture.md",
+    "docs/source-tree-analysis.md", "docs/data-models.md", "docs/api-contracts.md",
+    "docs/development-guide.md", "docs/deployment-guide.md", "docs/project-scan-report.json"
+  ]
+}

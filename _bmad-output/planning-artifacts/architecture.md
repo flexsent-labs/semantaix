@@ -1,5 +1,19 @@
 # Semantaix Architecture (As-Built)
 
+> **As-built correction (2026-06-20).** This document predates several shipped epics; the
+> following deltas are authoritative until the body below is rewritten (see
+> [`docs/architecture.md`](../../docs/architecture.md) for the reconciled map):
+> - **Six services, not five** — add `user_gateway` (port 8005, Telethon MTProto per-operator
+>   customer channel). `bot_gateway` is no longer a placeholder.
+> - **The answer pipeline has four answerers**, not a single `GroundedRagAnswerer`:
+>   `SalesPersonaAnswerer → CalendarAvailabilityAnswerer → GroundedRagAnswerer → ScopeGuardAnswerer`
+>   (`services/api/app/main.py:696`). Order is the routing logic; first `handled=True` wins.
+> - **Epics 11 (calendar) and 13 (services catalog) are SHIPPED**, not "(planned)" as the sections
+>   below still say. Epic 12 (sales) and Epic 16 (operator self-registration) are shipped; Epic 14
+>   (usage) is in progress (cost-spike alerting 14-09 not yet shipped).
+> - **19 SQLite stores**, not 13 — add `calendar`, `sales`, `usage`, `rate_limits`,
+>   `user_gateway_rate_limits`, `webhook_dedup`, `user_gateway`. Full list: [`docs/data-models.md`](../../docs/data-models.md).
+>
 > This document reflects the system **as implemented**. Where the original Option B
 > plan assumed PostgreSQL + Qdrant-vector retrieval, the MVP shipped on **SQLite**
 > (one DB file per concern) with **lemma-overlap retrieval**. Postgres and Qdrant

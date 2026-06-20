@@ -2,18 +2,20 @@
 
 <!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-41354%20lines-blue)<!-- LOC:END -->
 
-Initial Docker-first skeleton for the Semantaix Option B architecture.
+Docker-first Russian-first Telegram customer-conversation platform (epics 1–16 shipped).
+See [`docs/index.md`](docs/index.md) for the as-built architecture map.
 
 ## Services
 
-- `api`: FastAPI backend
+- `api`: FastAPI backend — core business logic for all epics
 - `web_ui`: FastAPI admin shell
-- `bot_gateway`: Telegram webhook ingress placeholder
+- `bot_gateway`: Telegram webhook ingress + operator slash commands
+- `user_gateway`: per-operator Telegram **user** account (Telethon MTProto) customer channel
 - `ingest_worker`: worker heartbeat service
 - `scheduler`: scheduler heartbeat service
 - `nginx`: reverse proxy (`/api`, `/admin`, `/telegram/webhook`)
-- `qdrant`: vector store
-- `postgres`: optional profile service (`--profile with-postgres`)
+- `qdrant`: vector store (provisioned; retrieval is lemma-overlap, not yet vector)
+- `postgres`: optional profile service (`--profile with-postgres`; not on the runtime path)
 
 ## Quick Start
 
