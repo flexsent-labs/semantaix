@@ -1,4 +1,6 @@
 {
-  "coverage": 100.0,
-  "badge": ".badges/coverage.svg"
+  "schemaVersion": 1,
+  "label": "coverage",
+  "message": "100.0%",
+  "color": "brightgreen"
 }

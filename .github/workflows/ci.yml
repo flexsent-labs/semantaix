@@ -39,7 +39,7 @@ jobs:
 
       - name: Generate coverage badge
         if: github.ref == 'refs/heads/main'
-        run: python scripts/coverage_badge.py --xml coverage.xml --badge .badges/coverage.svg --summary .badges/coverage-summary.json
+        run: python scripts/coverage_badge.py --xml coverage.xml --summary .badges/coverage-summary.json
 
       - name: Commit refreshed coverage badge if changed
         if: github.ref == 'refs/heads/main'
