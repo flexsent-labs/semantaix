@@ -1,6 +1,6 @@
 # Semantaix Bootstrap
 
-<!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-41354%20lines-blue)<!-- LOC:END -->
+<!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-41419%20lines-blue)<!-- LOC:END -->
 
 Docker-first Russian-first Telegram customer-conversation platform (epics 1–16 shipped).
 See [`docs/index.md`](docs/index.md) for the as-built architecture map.
