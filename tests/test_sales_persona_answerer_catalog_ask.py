@@ -84,6 +84,13 @@ class _FakeOpenRouter:
         return self.queue.pop(0)
 
 
+class _FakeRag:
+    def retrieve(
+        self, *, query: str, limit: int = 3, project_id: int | None = None
+    ) -> list[Any]:
+        return []
+
+
 _FIXED_NOW = datetime(2026, 5, 1, 13, 33, tzinfo=UTC)
 
 
@@ -121,6 +128,7 @@ def _seed_scoping_state(
 
 def _build(
     services: list[_FakeService] | None = None,
+    rag_retriever: _FakeRag | None = None,
 ) -> tuple[SalesPersonaAnswerer, _FakeStateRepo, _FakeOpenRouter, _FakeServicesRepo]:
     state_repo = _FakeStateRepo()
     openrouter = _FakeOpenRouter()
@@ -132,6 +140,7 @@ def _build(
         normalizer=get_russian_normalizer(),
         clock=_clock,
         bot_persona_getter=lambda: "Николай",
+        rag_retriever=rag_retriever,
     )
     return answerer, state_repo, openrouter, services_repo
 
@@ -160,6 +169,37 @@ async def test_catalog_ask_lists_active_service_names() -> None:
     assert openrouter.calls == [], "LLM must not be called for catalog asks"
     # Metadata records the turn kind for downstream auditing.
     assert result.metadata.get("sales_turn_kind") == "catalog"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question", ["Услуги", "Варианты"])
+async def test_first_turn_short_catalog_request_lists_active_service_names(
+    question: str,
+) -> None:
+    """Short answers to the neutral greeting must enter the catalog path."""
+    services = [_FakeService(name="Каньонинг"), _FakeService(name="Багги")]
+    answerer, state_repo, openrouter, _ = _build(services=services)
+
+    result = await answerer.try_answer(question=question, ctx=_ctx())
+
+    assert result.handled is True
+    assert "Каньонинг" in (result.text or "")
+    assert "Багги" in (result.text or "")
+    assert result.metadata.get("sales_turn_kind") == "catalog"
+    assert state_repo.rows == {}
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_structured_catalog_defers_to_rag_when_available() -> None:
+    """Uploaded RAG knowledge must outrank the empty structured-catalog reply."""
+    answerer, state_repo, _, _ = _build(services=[], rag_retriever=_FakeRag())
+    _seed_scoping_state(state_repo)
+
+    result = await answerer.try_answer(question="Услуги", ctx=_ctx())
+
+    assert result.handled is False
+    assert result.metadata["skip_reason"] == "catalog_empty_defer_to_rag"
 
 
 @pytest.mark.asyncio

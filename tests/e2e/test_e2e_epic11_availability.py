@@ -191,6 +191,30 @@ def test_e2e_available_slot_returns_russian_available(env) -> None:
     assert body["answerer"] == "calendar_availability"
 
 
+def test_e2e_customer_can_compare_two_bookable_slots_before_commitment(env) -> None:
+    """A customer can ask when to book and compare another slot in the same chat."""
+    env["install"]()
+    first = _inbound(
+        env["client"],
+        text="Подскажите, когда можно записаться на маникюр в субботу в 15:00?",
+        trace_id="t-compare-1",
+    )
+    second = _inbound(
+        env["client"],
+        text="А на маникюр в субботу в 16:00 можно записаться?",
+        trace_id="t-compare-2",
+    )
+
+    assert first["response_mode"] == "calendar_availability"
+    assert first["escalated"] is False
+    assert "свободно" in first["answer_text"]
+    assert second["response_mode"] == "calendar_availability"
+    assert second["escalated"] is False
+    assert "свободно" in second["answer_text"]
+    env["freebusy_client"].query_busy.assert_awaited()
+    assert env["freebusy_client"].query_busy.await_count == 2
+
+
 def test_e2e_busy_slot_returns_not_available(env) -> None:
     # Busy 15:00–16:00 MSK on Saturday == 12:00–13:00 UTC.
     busy = BusyInterval(

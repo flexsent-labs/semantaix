@@ -2,8 +2,9 @@
 
 Activation gate (always-on, cheap, first):
   1. Existing non-dormant state → resume in that stage.
-  2. No state + sales intent → enter the greeting stage.
-  3. Otherwise → `_skip("not_sales_intent")` and fall through.
+  2. Standalone catalog ask → list structured services or defer to grounded RAG.
+  3. No state + sales intent → enter the greeting stage.
+  4. Otherwise → `_skip("not_sales_intent")` and fall through.
 
 Stages implemented:
   * `new` → greeting → transition to `scoping` (Story 12.03).
@@ -262,10 +263,16 @@ COUNT_MISMATCH_CLARIFY_LINE_EN = (
 # booking-handoff line.
 GRATITUDE_ACK_LINE = "Пожалуйста! Обращайтесь, если будут вопросы."
 GRATITUDE_ACK_LINE_EN = "You're welcome! Feel free to reach out anytime."
-# Story 12.92 (round-26 R26-3) — a bare greeting gets a courteous greeting +
-# booking prompt, never a booking-completion handoff.
-GREETING_SMALLTALK_LINE = "Здравствуйте! На какую дату хотите записаться?"
-GREETING_SMALLTALK_LINE_EN = "Hello! What date would you like to book?"
+# Story 12.92 (round-26 R26-3) — a bare greeting gets a courteous, neutral
+# discovery prompt. A greeting alone is not evidence that the customer wants
+# to book; invite them to choose between services, options, and booking.
+GREETING_SMALLTALK_LINE = (
+    "Здравствуйте! Подскажите, пожалуйста, что вас интересует: "
+    "услуги, варианты поездок или запись?"
+)
+GREETING_SMALLTALK_LINE_EN = (
+    "Hello! What can I help you with: services, trip options, or booking?"
+)
 # Story 12.59 (round-14) - "сколько багги нужно / понадобится / вместит" is a
 # capacity question, NOT a price ask ("сколько стоит") or a headcount answer.
 _CAPACITY_QUESTION_RE = re.compile(
@@ -386,6 +393,27 @@ _BOOKING_COMMIT_RE = re.compile(
     r"запиш\w*|записа\w*|забронир\w*|бронир\w*|оформ\w*|брон[ьи]\b",
     re.IGNORECASE | re.UNICODE,
 )
+
+
+def _catalog_question_has_booking_context(
+    *, question: str, ctx: AnswerContext
+) -> bool:
+    """Keep a mixed booking + catalog opener in the booking funnel.
+
+    A standalone ``Услуги``/``Варианты`` reply should list the catalog, but a
+    message such as ``1 мая хочу тур, какие варианты есть?`` still carries a
+    booking date and must go through the sales greeting/scoping path.
+    """
+    if _BOOKING_COMMIT_RE.search(question) or extract_all_clocks(question):
+        return True
+    return (
+        extract_requested_date(
+            text=question,
+            now=ctx.now,
+            project_tz=ZoneInfo(ctx.timezone),
+        )
+        is not None
+    )
 
 
 def is_availability_inquiry(question: str) -> bool:
@@ -1514,11 +1542,27 @@ class SalesPersonaAnswerer:
             return self._handle_gratitude(ctx=ctx)
 
         # Story 12.92 (round-26 R26-3) — a bare greeting («Здравствуйте!») gets a
-        # courteous greeting + booking prompt, never a booking handoff. Fires in
+        # courteous neutral service-discovery prompt, never a booking handoff. Fires in
         # any state. ``is_pure_greeting`` already excludes «здравствуйте, хочу
         # багги» (booking content remains), so it books normally.
         if is_pure_greeting(question):
             return self._handle_greeting_smalltalk(ctx=ctx)
+
+        # Story 12.06 / regression: a neutral greeting invites "услуги" or
+        # "варианты" as a service-discovery answer. Route a standalone catalog
+        # ask directly even when there is no sales state yet; otherwise the bare
+        # "Услуги" falls through to ScopeGuard and "Варианты" starts the
+        # booking/scoping LLM. Keep mixed/date-bearing openers in the funnel.
+        turn_intent = classify_turn(question, normalizer=self._normalizer)
+        if (
+            turn_intent.kind == "catalog_ask"
+            and not _catalog_question_has_booking_context(question=question, ctx=ctx)
+        ):
+            return await self._handle_catalog_ask(
+                question=question,
+                ctx=ctx,
+                state=state or {},
+            )
 
         # Story 16 (round-16 R16-3) — an eligibility/policy question («можно с
         # ребёнком?») is answered as a QUESTION: RAG-grounded if the catalog has
@@ -2130,7 +2174,7 @@ class SalesPersonaAnswerer:
         )
 
     def _handle_greeting_smalltalk(self, *, ctx: AnswerContext) -> AnswerResult:
-        """Story 12.92 (round-26 R26-3) — courteous greeting + booking prompt for a
+        """Story 12.92 (round-26 R26-3) — neutral service-discovery prompt for a
         bare greeting; never a handoff. No ``_persist`` (funnel left intact)."""
         logger.info(
             "sales_answerer_handled",
@@ -4225,6 +4269,20 @@ class SalesPersonaAnswerer:
         ]
         current_stage = str(state.get("current_stage") or "")
         if not active_names:
+            # A project may have operator-uploaded knowledge without the
+            # structured ``project_services`` rows. Let the downstream grounded
+            # RAG catalog path answer from those documents instead of saying
+            # "no services" or triggering ScopeGuard. Projects with neither a
+            # structured catalog nor RAG keep the honest escalation below.
+            if self._rag is not None:
+                logger.info(
+                    "sales_catalog_ask_deferred_to_rag",
+                    extra={
+                        "trace_id": ctx.trace_id,
+                        "project_id": project_id,
+                    },
+                )
+                return _skip("catalog_empty_defer_to_rag")
             logger.info(
                 "sales_catalog_ask_empty",
                 extra={

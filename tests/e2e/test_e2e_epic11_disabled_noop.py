@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app import main as api_main
+from services.api.app.answerers.scope_guard import ScopeGuardAnswerer
 from services.api.app.calendar.settings_repository import CalendarSettingsRepository
 from services.api.app.main import app as api_app
 from services.api.app.main import (
@@ -90,7 +91,10 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
         AnswerPipeline([
             calendar,
             next(a for a in api_main.answer_pipeline.answerers if a.name == "grounded_rag"),
-            next(a for a in api_main.answer_pipeline.answerers if a.name == "scope_guard"),
+            ScopeGuardAnswerer(
+                phrases_getter=api_main._effective_scope_decline_messages,
+                project_does_bookings=settings_repo.is_enabled,
+            ),
         ]),
     )
     client = TestClient(api_app)

@@ -133,6 +133,26 @@ def _build_answerer(
 
 
 @pytest.mark.asyncio
+async def test_bare_greeting_starts_with_neutral_service_discovery(tmp_path) -> None:
+    """A greeting must not assume that the customer wants to book immediately."""
+    answerer, _services_repo, openrouter, _rag = _build_answerer(tmp_path)
+
+    result = await answerer.try_answer(
+        question="Привет", ctx=_ctx(chat_id=9, project_id=41)
+    )
+
+    assert result.handled is True
+    assert result.text == (
+        "Здравствуйте! Подскажите, пожалуйста, что вас интересует: "
+        "услуги, варианты поездок или запись?"
+    )
+    assert "дат" not in result.text.lower()
+    assert "записаться" not in result.text.lower()
+    assert result.metadata.get("sales_turn_kind") == "greeting"
+    assert openrouter.calls == []
+
+
+@pytest.mark.asyncio
 async def test_catalog_lists_seeded_service_names(tmp_path) -> None:
     answerer, services_repo, openrouter, _ = _build_answerer(tmp_path)
     project_id = 42
@@ -168,6 +188,34 @@ async def test_catalog_lists_seeded_service_names(tmp_path) -> None:
     assert "Медовеевка Лайт" in (result.text or "")
     assert "Каньонинг" in (result.text or "")
     assert result.metadata.get("sales_turn_kind") == "catalog"
+
+
+@pytest.mark.asyncio
+async def test_first_turn_short_catalog_requests_list_seeded_service_names(tmp_path) -> None:
+    """The neutral greeting's ``Услуги``/``Варианты`` replies must list the catalog."""
+    answerer, services_repo, openrouter, _rag = _build_answerer(tmp_path)
+    project_id = 45
+    services_repo.upsert(
+        project_id=project_id,
+        name="Каньонинг",
+        description="Спуск по верёвке вдоль водопадов.",
+    )
+    services_repo.upsert(
+        project_id=project_id,
+        name="Багги",
+        description="Поездка по маршруту.",
+    )
+
+    for question in ("Услуги", "Варианты"):
+        result = await answerer.try_answer(
+            question=question, ctx=_ctx(chat_id=45, project_id=project_id)
+        )
+
+        assert result.handled is True
+        assert "Каньонинг" in (result.text or "")
+        assert "Багги" in (result.text or "")
+        assert result.metadata.get("sales_turn_kind") == "catalog"
+        assert openrouter.calls == []
 
 
 @pytest.mark.asyncio

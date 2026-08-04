@@ -2858,8 +2858,8 @@ def test_is_pure_greeting() -> None:
 
 @pytest.mark.asyncio
 async def test_pure_greeting_in_pitching_greets_not_handoff() -> None:
-    # The live R26-3: «Здравствуйте!» parked in pitching must greet + prompt,
-    # never the booking-completion handoff.
+    # A bare «Здравствуйте!» parked in pitching must ask what the customer needs,
+    # never assume a booking or emit the booking-completion handoff.
     state = {
         "chat_id": _CHAT_ID,
         "project_id": _PROJECT_ID,
@@ -2869,6 +2869,12 @@ async def test_pure_greeting_in_pitching_greets_not_handoff() -> None:
     }
     answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
     result = await answerer.try_answer(question="Здравствуйте!", ctx=_ctx())
+    assert result.text == (
+        "Здравствуйте! Подскажите, пожалуйста, что вас интересует: "
+        "услуги, варианты поездок или запись?"
+    )
+    assert "дат" not in result.text.lower()
+    assert "записаться" not in result.text.lower()
     assert result.text == GREETING_SMALLTALK_LINE
     assert "Передам детали коллегам" not in (result.text or "")  # not a handoff
     assert result.metadata.get("escalate") is not True

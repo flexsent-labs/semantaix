@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
@@ -31,6 +32,52 @@ _SENTINEL = "ESCALATE_TO_HUMAN"
 _ANSWER_SNIPPET_MAX = 200
 
 logger = logging.getLogger(__name__)
+
+_CATALOG_FALLBACK_LIMIT = 8
+_CATALOG_FALLBACK_MAX_ITEMS = 8
+_CATALOG_FALLBACK_ITEM_CHARS = 360
+
+
+def _render_catalog_fallback(chunks: list[RagChunk]) -> str | None:
+    """Render a small factual catalog answer when the LLM transport is down.
+
+    Catalog questions are already constrained to knowledge-base chunks. When
+    OpenRouter is unavailable, returning a bounded excerpt is preferable to
+    leaving the customer with only the interim acknowledgement. This is not a
+    replacement for the normal grounded answer: it deliberately preserves the
+    source wording and never invents prices, dates, or availability.
+    """
+    items: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        if chunk.is_confidential:
+            continue
+        # Keep abbreviations such as ``р. Псахо`` together; source chunks are
+        # already line/bullet split by ingestion, so sentence splitting would
+        # create misleading fragments in the transport-fallback answer.
+        parts = re.split(r"\n+|•\s*", chunk.chunk_text)
+        for part in parts:
+            item = " ".join(part.split()).strip("-• ")
+            if len(item) < 8:
+                continue
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(item) > _CATALOG_FALLBACK_ITEM_CHARS:
+                item = item[: _CATALOG_FALLBACK_ITEM_CHARS - 1].rstrip() + "…"
+            items.append(item)
+            if len(items) >= _CATALOG_FALLBACK_MAX_ITEMS:
+                break
+        if len(items) >= _CATALOG_FALLBACK_MAX_ITEMS:
+            break
+    if not items:
+        return None
+    return (
+        "По материалам компании нашёл такие варианты:\n"
+        + "\n".join(f"• {item}" for item in items)
+        + "\n\nЕсли хотите, уточните маршрут, длительность или дополнительные услуги."
+    )
 
 
 class _RagReader(Protocol):
@@ -88,6 +135,7 @@ class GroundedRagAnswerer:
         catalog_query = is_service_catalog_query(
             text=question, normalizer=normalizer
         )
+        catalog_fallback_chunks: list[RagChunk] = []
         if catalog_query:
             # Aggregate questions ("что ещё есть?") need the whole offerings set,
             # not a few lemma-overlapping lines. Story 13.06 (FR-25): read the
@@ -103,9 +151,24 @@ class GroundedRagAnswerer:
                     self._project_services_reader.list_for_project,
                     project_id=ctx.project_id,
                 )
-            digest = await self._catalog_digest.get_digest(
-                project_id=ctx.project_id
-            )
+            try:
+                digest = await self._catalog_digest.get_digest(
+                    project_id=ctx.project_id
+                )
+            except Exception as exc:
+                # A catalog digest is an optimisation over the source RAG
+                # chunks. A billing/transport outage in its summarizer must not
+                # turn a simple "Услуги" question into customer silence.
+                logger.warning(
+                    "catalog_digest_unavailable_using_rag",
+                    extra={"trace_id": ctx.trace_id, "error": repr(exc)},
+                )
+                catalog_fallback_chunks = self._rag.retrieve(
+                    query=question,
+                    limit=_CATALOG_FALLBACK_LIMIT,
+                    project_id=ctx.project_id,
+                )
+                digest = ""
             merged_chunk, source_id_suffix = merge_structured_with_digest(
                 structured_rows=structured_rows,
                 digest_text=digest,
@@ -114,20 +177,29 @@ class GroundedRagAnswerer:
                 project_id=ctx.project_id,
             )
             if source_id_suffix == "empty" or not merged_chunk.strip():
-                return self._skip(
-                    reason="catalog_empty",
-                    ctx=ctx,
-                    question=question,
-                    chunks=[],
-                )
-            chunks = [
-                RagChunk(
-                    id=0,
-                    source_id=f"{source_id_suffix}:{ctx.project_id}",
-                    chunk_text=merged_chunk,
-                    score=1.0,
-                )
-            ]
+                if not catalog_fallback_chunks:
+                    catalog_fallback_chunks = self._rag.retrieve(
+                        query=question,
+                        limit=_CATALOG_FALLBACK_LIMIT,
+                        project_id=ctx.project_id,
+                    )
+                chunks = catalog_fallback_chunks
+                if not chunks:
+                    return self._skip(
+                        reason="catalog_empty",
+                        ctx=ctx,
+                        question=question,
+                        chunks=[],
+                    )
+            else:
+                chunks = [
+                    RagChunk(
+                        id=0,
+                        source_id=f"{source_id_suffix}:{ctx.project_id}",
+                        chunk_text=merged_chunk,
+                        score=1.0,
+                    )
+                ]
         else:
             chunks = self._rag.retrieve(
                 query=question, limit=3, project_id=ctx.project_id
@@ -204,6 +276,31 @@ class GroundedRagAnswerer:
             )
         except Exception as exc:
             # Error row is fired from inside _chat; answerer does not double-write.
+            if catalog_query:
+                if not catalog_fallback_chunks:
+                    catalog_fallback_chunks = self._rag.retrieve(
+                        query=question,
+                        limit=_CATALOG_FALLBACK_LIMIT,
+                        project_id=ctx.project_id,
+                    )
+                fallback_text = _render_catalog_fallback(catalog_fallback_chunks)
+                if fallback_text is not None:
+                    logger.warning(
+                        "catalog_llm_unavailable_using_rag_excerpt",
+                        extra={"trace_id": ctx.trace_id, "error": repr(exc)},
+                    )
+                    return AnswerResult(
+                        handled=True,
+                        text=fallback_text,
+                        response_mode="grounded_rag_fallback",
+                        metadata={
+                            "retrieval": [
+                                _render_chunk_metadata(chunk)
+                                for chunk in catalog_fallback_chunks
+                            ],
+                            "fallback_reason": "llm_generator_error",
+                        },
+                    )
             return self._skip(
                 reason="llm_generator_error",
                 ctx=ctx,

@@ -46,6 +46,16 @@ _AUTH_CODE = "e2e-auth-code-secret"
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
     api_main._calendar_oauth_hits.clear()
+    from services.bot_gateway.app import main as bot_main
+    from services.bot_gateway.app.webhook_dedup import WebhookUpdateClaimRepository
+
+    # Keep this E2E independent from the developer's persistent local webhook
+    # dedup DB; update_id=9001 is intentionally stable in the scenario.
+    monkeypatch.setattr(
+        bot_main,
+        "webhook_update_claim_repository",
+        WebhookUpdateClaimRepository(str(tmp_path / "webhook_dedup.sqlite3")),
+    )
     calendar_db = str(tmp_path / "calendar.sqlite3")
     settings_repo = CalendarSettingsRepository(db_path=calendar_db)
     state_repo = CalendarOAuthStateRepository(db_path=calendar_db)
@@ -91,10 +101,10 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     revoke = AsyncMock()
     monkeypatch.setattr(oauth_client, "revoke", revoke)
 
-    settings_repo.enable(_PROJECT_ID, calendar_operator=_OPERATOR)
-
     # FR-18 R2: record the connect-confirmation DM so the happy path can
-    # assert it was sent (in addition to the HTML success page).
+    # assert it was sent on the first successful connection (in addition to
+    # the HTML success page). The project intentionally starts disabled here;
+    # the callback is the action that enables it.
     sent_dms: list[tuple[int, str]] = []
 
     async def record_send_message(*, chat_id: int, text: str) -> None:
@@ -172,6 +182,37 @@ def test_epic11_oauth_connect_full_flow(env, caplog):
     for secret in (_REFRESH_TOKEN, _AUTH_CODE):
         assert secret not in bodies
         assert secret not in app_logs
+
+
+def test_epic11_oauth_reconnect_does_not_repeat_confirmation(env):
+    """A second successful OAuth callback updates the token silently.
+
+    The confirmation belongs to the connection event, not to every callback
+    or api restart.  This drives two complete initiate → callback cycles while
+    keeping the project enabled between them.
+    """
+    client = env["client"]
+
+    def connect_once(*, auth_code: str) -> None:
+        initiate = client.post(
+            "/calendar/connect/initiate",
+            json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+            headers=_AUTH,
+        )
+        assert initiate.status_code == 200
+        state = parse_qs(urlparse(initiate.json()["consent_url"]).query)["state"][0]
+        callback = client.get(
+            "/calendar/oauth/callback",
+            params={"state": state, "code": auth_code},
+        )
+        assert callback.status_code == 200
+
+    connect_once(auth_code="first-auth-code")
+    first_connection_dm_count = len(env["sent_dms"])
+    assert first_connection_dm_count == 1
+
+    connect_once(auth_code="second-auth-code")
+    assert len(env["sent_dms"]) == first_connection_dm_count
 
 
 @pytest.mark.story("11-03")

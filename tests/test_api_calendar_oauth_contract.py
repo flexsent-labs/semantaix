@@ -475,6 +475,44 @@ def test_callback_success_skips_dm_when_already_connected(env, monkeypatch, capl
     )
 
 
+def test_callback_success_skips_dm_when_project_already_enabled(
+    env, monkeypatch, caplog
+):
+    """An enabled project must not DM on operator handover/re-consent.
+
+    The incoming operator can have no token row of their own, so checking only
+    ``(project_id, operator)`` would still send the startup/re-consent message.
+    """
+    _enable_project(env["settings_repo"], "@previous-operator")
+    _stub_exchange(monkeypatch, refresh_token="new-refresh-secret")
+    state = _mint_state(env)
+
+    record = SimpleNamespace(chat_id=12345)
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=record),
+    )
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_not_awaited()
+    assert (
+        env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR)
+        == "new-refresh-secret"
+    )
+    assert any(
+        "calendar_connect_dm_skipped_already_connected" in record.message
+        for record in caplog.records
+    )
+
+
 def test_callback_success_skips_dm_when_no_chat_id(env, monkeypatch, caplog):
     """Operator NOT in registry AND effective operator chat_id returns None
     → send_message is NOT called; calendar_connect_dm_no_chat_id is logged;

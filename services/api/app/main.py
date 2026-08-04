@@ -5049,18 +5049,27 @@ async def calendar_oauth_callback(
     # FR-18 DM guard (post-R2 bugfix): the "✅ Календарь подключён" DM should
     # only fire on a *fresh* connect, not on every successful callback.
     # Re-clicking the consent URL during dev, or any other repeat consent for
-    # an already-connected (project, operator), used to spam the operator
-    # with the connection-confirmation message. Capture token presence BEFORE
-    # the upsert using get_status() (no Fernet decryption) so the guard is
-    # stable even when the encryption key changes between deploys. We only DM
-    # when there was no prior token row (first-time connect or post-disconnect
-    # reconnect, both of which are legitimately "just got connected" moments).
+    # an already-connected project, used to spam the operator with the
+    # connection-confirmation message. Capture both signals BEFORE the upsert:
+    # the token row uses get_status() (no Fernet decryption), while the project
+    # setting covers operator handover where the new operator has no token row
+    # yet. We only DM when the project was not connected before this callback.
     existing_status_before_upsert = await asyncio.to_thread(
         calendar_token_repository.get_status,
         pending.project_id,
         pending.operator,
     )
     token_existed_before_upsert = existing_status_before_upsert is not None
+    existing_settings_before_upsert = await asyncio.to_thread(
+        calendar_settings_repository.get, pending.project_id
+    )
+    project_was_enabled_before_upsert = bool(
+        existing_settings_before_upsert is not None
+        and existing_settings_before_upsert.enabled
+    )
+    already_connected_before_upsert = (
+        token_existed_before_upsert or project_was_enabled_before_upsert
+    )
     await asyncio.to_thread(
         calendar_token_repository.upsert,
         pending.project_id,
@@ -5075,9 +5084,7 @@ async def calendar_oauth_callback(
     # operator. There is no separate /calendar_on path — re-enable after
     # /calendar_off means the operator re-runs /connect_calendar.
     try:
-        existing = await asyncio.to_thread(
-            calendar_settings_repository.get, pending.project_id
-        )
+        existing = existing_settings_before_upsert
         enable_kwargs: dict[str, object] = {
             "calendar_operator": pending.operator,
         }
@@ -5109,18 +5116,18 @@ async def calendar_oauth_callback(
     # FR-18: Russian Telegram DM to the operator confirming the connection
     # (in addition to the HTML success page). DM failures MUST NOT corrupt
     # the OAuth success signal to Google or to the browser — log + swallow.
-    # Fresh-connect-only guard: skip the DM when the operator was already
-    # connected to this project (re-consent / token refresh on the same
-    # registration). Without this guard, every successful callback for an
-    # already-connected operator spams the "Календарь подключён" message —
-    # which the operator complained about during dev (the consent URL gets
-    # re-clicked across api restarts and each click DMs again).
-    if token_existed_before_upsert:
+    # Fresh-connect-only guard: skip the DM when the project was already
+    # connected before this callback, regardless of which operator initiated a
+    # re-consent. A disabled project with a retained token is allowed to DM on
+    # reconnect because that callback is the actual re-enable action.
+    if already_connected_before_upsert:
         logger.info(
             "calendar_connect_dm_skipped_already_connected",
             extra={
                 "project_id": pending.project_id,
                 "operator": pending.operator,
+                "project_was_enabled": project_was_enabled_before_upsert,
+                "token_existed": token_existed_before_upsert,
             },
         )
         return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)

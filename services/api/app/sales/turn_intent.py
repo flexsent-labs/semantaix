@@ -49,6 +49,8 @@ _CATALOG_PHRASES: tuple[tuple[str, ...], ...] = tuple(
     tuple(phrase.split())
     for phrase in (
         "что у вас есть",
+        "услуги",
+        "опции",
         "какие туры",
         "какие у вас туры",
         "что вы предлагаете",

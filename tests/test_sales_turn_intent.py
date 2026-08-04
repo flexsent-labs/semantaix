@@ -46,6 +46,16 @@ def test_catalog_ask_варианты(normalizer) -> None:
     assert result.kind == "catalog_ask"
 
 
+def test_catalog_ask_bare_услуги(normalizer) -> None:
+    result = classify_turn("Услуги", normalizer=normalizer)
+    assert result.kind == "catalog_ask"
+
+
+def test_catalog_ask_bare_опции(normalizer) -> None:
+    result = classify_turn("Опции", normalizer=normalizer)
+    assert result.kind == "catalog_ask"
+
+
 def test_catalog_ask_список(normalizer) -> None:
     result = classify_turn(
         "Можно список ваших услуг?", normalizer=normalizer

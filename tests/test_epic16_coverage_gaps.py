@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import services.api.app.main as api_main
 import services.api.app.operator_registration as op_reg_module
+import services.api.app.operator_registration_routes as op_reg_routes
 from services.api.app.answerers import AnswerResult
 from services.api.app.calendar.availability_answerer import RESPONSE_MODE_ESCALATION
 from services.api.app.main import (
@@ -58,6 +59,11 @@ def _registration_wire(tmp_path) -> tuple[str, str]:
     project_repository.init_schema()
     project_repository.ensure_default_project()
     return internal, admin
+
+
+def _use_api_settings_for_registration_routes(monkeypatch) -> None:
+    """Keep route settings aligned after another test clears the settings cache."""
+    monkeypatch.setattr(op_reg_routes, "get_settings", lambda: api_main.settings)
 
 
 @pytest.mark.asyncio
@@ -550,6 +556,7 @@ def test_approve_operator_username_conflict_via_api(tmp_path, monkeypatch):
 
 def test_register_request_rejects_platform_admin_username(tmp_path, monkeypatch):
     internal, _ = _registration_wire(tmp_path)
+    _use_api_settings_for_registration_routes(monkeypatch)
     monkeypatch.setattr(api_main.settings, "internal_service_token", internal)
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@ajdevy")
     monkeypatch.setattr(api_main.settings, "hitl_config_admin_username", "@ajdevy")
@@ -565,6 +572,7 @@ def test_register_request_rejects_platform_admin_username(tmp_path, monkeypatch)
 
 def test_approve_rejects_platform_admin_username(tmp_path, monkeypatch):
     internal, admin = _registration_wire(tmp_path)
+    _use_api_settings_for_registration_routes(monkeypatch)
     monkeypatch.setattr(api_main.settings, "internal_service_token", internal)
     monkeypatch.setattr(api_main.settings, "admin_internal_token", admin)
     monkeypatch.setattr(api_main.settings, "admin_telegram_username", "@ajdevy")

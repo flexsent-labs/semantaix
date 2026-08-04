@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from services.api.app.answerers import AnswerContext
-from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
+from services.api.app.answerers.grounded_rag import (
+    GroundedRagAnswerer,
+    _render_catalog_fallback,
+)
 from services.api.app.openrouter_client import GroundingVerdict
 from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.rag import RagChunk
@@ -84,6 +87,11 @@ class _FakeCatalogDigest:
     async def get_digest(self, *, project_id: int | None) -> str:
         self.calls.append(project_id)
         return self._digest
+
+
+class _BrokenCatalogDigest:
+    async def get_digest(self, *, project_id: int | None) -> str:
+        raise RuntimeError("OpenRouter unavailable")
 
 
 def _assert_skip_log(
@@ -383,6 +391,73 @@ async def test_llm_generator_exception_falls_through(caplog, prompts):
         top_score=0.9,
     )
     assert "boom" in record.error
+
+
+@pytest.mark.asyncio
+async def test_catalog_llm_failure_returns_bounded_rag_excerpt(prompts):
+    """A simple catalog question still gets factual content during an LLM outage."""
+    raw_chunks = [
+        RagChunk(
+            id=1,
+            source_id="uploaded:services",
+            chunk_text="Багги-туры\n• Квадроциклы\n• Дополнительные услуги: пикник",
+            score=1.0,
+        )
+    ]
+    rag = _FakeRag(raw_chunks)
+    llm = _fake_llm()
+    llm.answer_grounded = AsyncMock(side_effect=RuntimeError("402 Payment Required"))
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=_BrokenCatalogDigest(),
+    )
+
+    result = await answerer.try_answer(question="Услуги", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.response_mode == "grounded_rag_fallback"
+    assert "Багги-туры" in result.text
+    assert "Квадроциклы" in result.text
+    assert "Дополнительные услуги" in result.text
+    assert result.metadata["fallback_reason"] == "llm_generator_error"
+    assert rag.calls == ["Услуги"]
+    llm.verify_grounding.assert_not_awaited()
+
+
+def test_catalog_fallback_filters_confidential_duplicates_and_bounds_items():
+    long_item = "Очень подробное предложение " + ("слово " * 80)
+    chunks = [
+        RagChunk(
+            id=1,
+            source_id="secret",
+            chunk_text="Секретная услуга",
+            score=1.0,
+            is_confidential=True,
+        ),
+        RagChunk(
+            id=2,
+            source_id="public",
+            chunk_text=(
+                "Альфа-услуга\nАльфа-услуга\n"
+                + long_item
+                + "\n"
+                + "\n".join(f"Услуга {index}" for index in range(10))
+            ),
+            score=1.0,
+        ),
+    ]
+
+    result = _render_catalog_fallback(chunks)
+
+    assert result is not None
+    assert "Секретная услуга" not in result
+    assert result.count("Альфа-услуга") == 1
+    assert "…" in result
+    assert result.count("• ") == 8
+    assert _render_catalog_fallback(chunks[:1]) is None
 
 
 @pytest.mark.asyncio
