@@ -191,3 +191,60 @@ calendar confirmation send. If a message still arrives without a local
 
 - The active local Telegram webhook is `https://lustiness-apron-unmade.ngrok-free.dev/telegram/webhook`; Telegram reports zero pending updates but a stale 404 webhook error.
 - The local pending-forward outbox contains unrelated test messages and no calendar confirmation text.
+
+## Follow-up: 2026-08-06
+
+### New Evidence
+
+- The local running API and bot gateway use `/Users/aj/workspace_ai/semaintix` as
+  their working directory and have been restarted with the follow-up code from
+  local `main`.
+- `.data/semantaix_calendar.db` contains project `1` enabled for
+  `@flexsentlabs` and a token row with status `connected`; the durable
+  `calendar_connect_notifications` table was empty because this connection
+  predates the claim migration.
+- The exact connected message still has one producer in
+  `services/api/app/main.py:4942` and is only sent from the OAuth callback
+  block; API and bot startup handlers do not reference it.
+
+### Additional Findings
+
+#### Finding 4: Legacy connected rows were not backfilled into the durable claim
+
+**Evidence:** Before this follow-up, `calendar_oauth_callback` returned early
+when `token_existed_before_upsert` or `project_was_enabled_before_upsert` was
+true, before calling `claim_connection_notification` at
+`services/api/app/main.py:5135`. The local database had the connected token but
+no claim row.
+
+**Detail:** Normal current code already suppresses the DM from a connected token
+or enabled project. However, an older token-recovery process that deleted the
+token could make a later callback look fresh again. The durable claim was not
+recorded for legacy callbacks that were already suppressed.
+
+### Updated Hypotheses
+
+#### Hypothesis 1: Legacy state drift can re-arm the confirmation DM
+
+**Status:** Confirmed as a residual local correctness gap; the exact remote
+restart trigger remains unverified.
+
+**Resolution:** The callback now claims the durable one-time marker before all
+early-return guards. A legacy connected callback therefore backfills the claim
+without sending a message; a later token deletion/restart cannot re-arm that
+confirmation path unless the operator explicitly disconnects the calendar.
+
+### Backlog Changes
+
+- Added a regression assertion that an already-connected callback creates the
+  durable claim while still sending no Telegram DM.
+- Focused calendar verification: `53 passed`.
+- Full repository verification: `4152 passed`, `100.00%` coverage, and `ruff`
+  clean.
+
+### Updated Conclusion
+
+**Confidence:** High for the local residual fix; Medium for the original remote
+trigger. Startup itself still has no producer for the exact message. The local
+callback now persists the one-time marker even for legacy connected state, and
+the operator DM remains limited to a genuinely unclaimed connection callback.

@@ -6,11 +6,12 @@ request (performance rule). Refresh is **single-flight**: a per-key
 ``asyncio.Lock`` (from an injected factory) serialises concurrent inbound
 messages so they neither double-mint nor race the SQLite write.
 
-When the refresh token itself is dead (``TokenRefreshFailed``) the cache moves
-the operator to ``reconnect_needed``, deletes the poison row, emits an incident,
-notifies the operator over Telegram to re-run ``/connect_calendar``, and raises
+When the refresh token itself is dead (``TokenRefreshFailed``) the cache marks
+the token row ``reconnect_needed``, emits an incident, notifies the operator
+over Telegram to re-run ``/connect_calendar``, and raises
 ``CalendarReconnectNeeded`` to the caller (11.07 translates it to an
-escalation). Tokens never reach a log line or an incident summary.
+escalation). Keeping the row preserves reconnect deduplication across API
+restarts; tokens never reach a log line or an incident summary.
 """
 
 from __future__ import annotations

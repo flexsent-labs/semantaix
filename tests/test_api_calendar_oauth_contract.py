@@ -468,6 +468,12 @@ def test_callback_success_skips_dm_when_already_connected(env, monkeypatch, capl
         env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR)
         == "new-refresh-secret"
     )
+    # Backfill the durable claim for legacy connected rows so a later token
+    # recovery/restart cannot make this old connection look fresh again.
+    assert (
+        env["token_repo"].claim_connection_notification(_PROJECT_ID, _OPERATOR)
+        is False
+    )
     # The skip is observable via the structured log.
     assert any(
         "calendar_connect_dm_skipped_already_connected" in record.message

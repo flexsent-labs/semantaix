@@ -5113,6 +5113,16 @@ async def calendar_oauth_callback(
         "calendar_oauth_connected",
         extra={"project_id": pending.project_id, "operator": pending.operator},
     )
+    # Claim the durable one-time marker even when an older token/settings row
+    # already proves that this project was connected.  Legacy installations
+    # may predate ``calendar_connect_notifications``; recording the marker on
+    # the next callback prevents an old token-recovery process that deletes the
+    # token row from re-arming this DM after a restart.
+    should_send_connection_dm = await asyncio.to_thread(
+        calendar_token_repository.claim_connection_notification,
+        pending.project_id,
+        pending.operator,
+    )
     # FR-18: Russian Telegram DM to the operator confirming the connection
     # (in addition to the HTML success page). DM failures MUST NOT corrupt
     # the OAuth success signal to Google or to the browser — log + swallow.
@@ -5131,11 +5141,6 @@ async def calendar_oauth_callback(
             },
         )
         return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
-    should_send_connection_dm = await asyncio.to_thread(
-        calendar_token_repository.claim_connection_notification,
-        pending.project_id,
-        pending.operator,
-    )
     if not should_send_connection_dm:
         logger.info(
             "calendar_connect_dm_skipped_claimed",
