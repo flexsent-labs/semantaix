@@ -271,13 +271,13 @@ COUNT_MISMATCH_CLARIFY_LINE_EN = (
 GRATITUDE_ACK_LINE = "Пожалуйста! Обращайтесь, если будут вопросы."
 GRATITUDE_ACK_LINE_EN = "You're welcome! Feel free to reach out anytime."
 # Story 12.92 (round-26 R26-3) — a bare greeting gets a courteous, neutral
-# discovery prompt. A greeting alone is not evidence that the customer wants
-# to book; invite them to choose between services, options, and booking.
+# discovery prompt. Keep it domain-neutral: domain wording belongs in the
+# project knowledge base, because this bot is reusable across service domains.
 GREETING_SMALLTALK_LINE = (
-    "Здравствуйте! Рады помочь. Что хотите узнать о поездках?"
+    "Чем могу помочь?"
 )
 GREETING_SMALLTALK_LINE_EN = (
-    "Hello! Happy to help. What would you like to know about the trips?"
+    "Hello! Happy to help. How can I help?"
 )
 SERVICE_SELECTION_DATE_LINE = "Отлично. На какую дату планируете поездку?"
 SERVICE_SELECTION_DATE_LINE_EN = "Great. What date are you planning the trip for?"

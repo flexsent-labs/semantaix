@@ -2872,6 +2872,7 @@ async def test_pure_greeting_in_pitching_greets_not_handoff() -> None:
     assert result.text == GREETING_SMALLTALK_LINE
     assert "дат" not in result.text.lower()
     assert "записаться" not in result.text.lower()
+    assert "поезд" not in result.text.lower()
     assert result.text == GREETING_SMALLTALK_LINE
     assert "Передам детали коллегам" not in (result.text or "")  # not a handoff
     assert result.metadata.get("escalate") is not True

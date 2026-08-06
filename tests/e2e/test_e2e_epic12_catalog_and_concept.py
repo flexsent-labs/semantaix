@@ -148,6 +148,7 @@ async def test_bare_greeting_starts_with_neutral_service_discovery(tmp_path) -> 
     assert result.text == GREETING_SMALLTALK_LINE
     assert "дат" not in result.text.lower()
     assert "записаться" not in result.text.lower()
+    assert "поезд" not in result.text.lower()
     assert result.metadata.get("sales_turn_kind") == "greeting"
     assert openrouter.calls == []
 
