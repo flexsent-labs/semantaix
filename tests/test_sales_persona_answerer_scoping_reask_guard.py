@@ -45,6 +45,9 @@ class _FakeStateRepo:
 
     def upsert(self, **kwargs: Any) -> None:
         self.upserts.append(kwargs)
+        for key in ("current_stage", "collected_intent", "last_proposal"):
+            if key in kwargs:
+                self._state[key] = kwargs[key]
 
 
 class _NoOpServicesRepo:
@@ -141,19 +144,24 @@ async def test_headcount_is_captured_even_when_openrouter_is_unavailable() -> No
 
 
 @pytest.mark.asyncio
-async def test_motorcycle_selection_then_headcount_stays_in_scoping() -> None:
-    """The exact ``Мотоциклы`` → ``3`` customer path must stay in the funnel."""
-    answerer, repo = _build(Intent(dates="завтра"), _FailingOpenRouter())
+async def test_motorcycle_selection_restarts_with_date_then_collects_party_size() -> None:
+    """A fresh ``Мотоциклы`` booking asks for date before party size."""
+    answerer, repo = _build(Intent(), _FailingOpenRouter())
 
     greeting = await answerer.try_answer(question="Привет", ctx=_ctx())
     selection = await answerer.try_answer(question="Мотоциклы", ctx=_ctx())
+    date = await answerer.try_answer(question="завтра", ctx=_ctx())
     count = await answerer.try_answer(question="3", ctx=_ctx())
 
     assert greeting.handled is True
     assert selection.metadata["sales_turn_kind"] == "service_selection"
-    assert "человек" in (selection.text or "").casefold()
+    assert "дат" in (selection.text or "").casefold()
+    assert date.handled is True
+    assert date.metadata["sales_turn_kind"] == "temporal_reply"
+    assert "человек" in (date.text or "").casefold()
     assert count.handled is True
-    assert count.text == "Сколько багги нужно?"
+    assert count.metadata["sales_turn_kind"] == "deterministic_numeric_reply"
+    assert "сколько" in (count.text or "").casefold()
     assert repo.upserts[-1]["collected_intent"]["headcount"] == 3
 
 
@@ -223,7 +231,7 @@ async def test_deterministic_numeric_reply_unknown_schema_question_skips() -> No
 
 
 @pytest.mark.asyncio
-async def test_service_selection_skips_when_state_is_complete() -> None:
+async def test_service_selection_starts_fresh_when_state_is_complete() -> None:
     answerer, _repo = _build(Intent(), _FailingOpenRouter())
     complete_state = {
         "current_stage": "scoping",
@@ -238,6 +246,50 @@ async def test_service_selection_skips_when_state_is_complete() -> None:
 
     result = await answerer._handle_service_selection(
         question="Багги", ctx=_ctx(), state=complete_state
+    )
+
+    assert result.handled is True
+    assert "дат" in (result.text or "").casefold()
+    assert _repo.upserts[-1]["collected_intent"] == Intent(
+        extra={"service": "багги"}
+    ).to_dict()
+
+
+@pytest.mark.asyncio
+async def test_service_selection_restarts_from_pitching_state() -> None:
+    answerer, repo = _build(Intent(dates="завтра", headcount=3), _FailingOpenRouter())
+    repo._state["current_stage"] = "pitching"
+
+    result = await answerer.try_answer(question="квадро", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.metadata["sales_turn_kind"] == "service_selection"
+    assert "дат" in (result.text or "").casefold()
+    assert repo.upserts[-1]["collected_intent"] == Intent(
+        extra={"service": "квадроцикл"}
+    ).to_dict()
+
+
+@pytest.mark.asyncio
+async def test_service_selection_uses_existing_intent_without_service_match(monkeypatch) -> None:
+    answerer, _repo = _build(Intent(), _FailingOpenRouter())
+    complete_state = _state(
+        Intent(
+            dates="завтра",
+            headcount=2,
+            vehicle_count=1,
+            difficulty="лёгкий",
+            drivers=1,
+        )
+    )
+    monkeypatch.setattr(
+        sales_module,
+        "_single_service_context",
+        lambda **_kwargs: None,
+    )
+
+    result = await answerer._handle_service_selection(
+        question="что-то непонятное", ctx=_ctx(), state=complete_state
     )
 
     assert result.handled is False

@@ -1727,10 +1727,7 @@ class SalesPersonaAnswerer:
         # an LLM turn or fall into the generic gibberish wording.
         if _is_standalone_service_selection(
             question, normalizer=self._normalizer
-        ) and current_stage in {
-            STAGE_NEW,
-            STAGE_SCOPING,
-        }:
+        ):
             return await self._handle_service_selection(
                 question=question, ctx=ctx, state=state
             )
@@ -2285,12 +2282,16 @@ class SalesPersonaAnswerer:
         obvious next question.
         """
         stage_before = str(state.get("current_stage") if state else STAGE_NEW)
-        intent = Intent.from_dict((state or {}).get("collected_intent") or {})
         service_context = _single_service_context(
             question=question, normalizer=self._normalizer
         )
         if service_context is not None:
-            intent = intent.with_field("service", service_context)
+            # A standalone service name starts a fresh booking for that service.
+            # Keeping the old Intent would make a previous date/headcount satisfy
+            # the new questionnaire and can trigger an early operator handoff.
+            intent = Intent(extra={"service": service_context})
+        else:
+            intent = Intent.from_dict((state or {}).get("collected_intent") or {})
         schema = self._resolve_schema(ctx)
         missing = intent.missing_fields(schema.required_keys())
         if not missing:

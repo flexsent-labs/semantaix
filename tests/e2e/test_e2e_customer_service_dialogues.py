@@ -23,6 +23,7 @@ from services.api.app.calendar.project_services_repository import (
 from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.intent import Intent
 from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
 from services.api.app.sales.state_repository import StateRepository
 
@@ -242,6 +243,42 @@ async def test_customer_can_select_a_service_with_common_typos(tmp_path) -> None
     assert date_reply.metadata.get("sales_turn_kind") == "temporal_reply"
     assert "человек" in (date_reply.text or "").casefold()
     assert state_repo.get(conversation.chat_id)["collected_intent"]["dates"] == "завтра"
+
+
+@pytest.mark.asyncio
+async def test_new_service_selection_drops_previous_booking_fields(tmp_path) -> None:
+    """A new service must collect date and party size again.
+
+    This mirrors the live regression: a prior booking had already stored date
+    and headcount, then the customer selected another service after a greeting.
+    The new questionnaire must not inherit those values.
+    """
+    conversation, state_repo, _openrouter, _services_repo = _build_sales_environment(
+        tmp_path, project_id=1206
+    )
+    state_repo.upsert(
+        chat_id=conversation.chat_id,
+        project_id=conversation.project_id,
+        current_stage="scoping",
+        collected_intent=Intent(
+            dates="завтра",
+            headcount=3,
+            vehicle_count=2,
+            extra={"service": "багги"},
+        ).to_dict(),
+        now=_NOW,
+    )
+
+    greeting = await conversation.say("Здравствуйте")
+    selected = await conversation.say("квадро")
+
+    assert greeting.handled is True
+    assert selected.handled is True
+    assert selected.metadata["sales_turn_kind"] == "service_selection"
+    assert "дат" in (selected.text or "").casefold()
+    assert state_repo.get(conversation.chat_id)["collected_intent"] == Intent(
+        extra={"service": "квадроцикл"}
+    ).to_dict()
 
 
 @pytest.mark.asyncio
