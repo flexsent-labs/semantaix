@@ -104,6 +104,18 @@ def test_connection_notification_claim_is_persistent_and_reset_on_delete(tmp_pat
     assert restarted_repo.claim_connection_notification(1, "@op") is True
 
 
+def test_backfill_connection_notification_claims_marks_connected_rows(tmp_path):
+    repo = _repo(tmp_path)
+    repo.upsert(1, "@connected", "token-1")
+    repo.upsert(2, "@reconnect", "token-2")
+    repo.set_status(2, "@reconnect", STATUS_RECONNECT_NEEDED)
+
+    assert repo.backfill_connection_notification_claims() == 1
+    assert repo.backfill_connection_notification_claims() == 0
+    assert repo.claim_connection_notification(1, "@connected") is False
+    assert repo.claim_connection_notification(2, "@reconnect") is True
+
+
 def test_get_status_returns_none_for_missing_row(tmp_path):
     path = str(tmp_path / "calendar.sqlite3")
     repo = CalendarTokenRepository(db_path=path, fernet=Fernet(Fernet.generate_key()))

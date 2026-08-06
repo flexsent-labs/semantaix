@@ -178,3 +178,24 @@ class CalendarTokenRepository:
                 (project_id, operator, now),
             )
             return claimed.rowcount == 1
+
+    def backfill_connection_notification_claims(self) -> int:
+        """Mark existing connected tokens as already-notified without sending.
+
+        This is a restart-safe migration for token rows created before the
+        durable notification table existed.  Only the OAuth callback sends a
+        Telegram DM; startup merely reserves the marker for existing state.
+        """
+        now = _now()
+        with _connect(self.db_path) as connection:
+            claimed = connection.execute(
+                """
+                INSERT OR IGNORE INTO calendar_connect_notifications
+                    (project_id, operator, claimed_at)
+                SELECT project_id, operator, ?
+                FROM calendar_operator_tokens
+                WHERE status = ?
+                """,
+                (now, STATUS_CONNECTED),
+            )
+            return claimed.rowcount

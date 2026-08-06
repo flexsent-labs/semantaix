@@ -62,6 +62,31 @@ def test_build_token_provider_returns_none_without_oauth(monkeypatch) -> None:
     assert api_main._build_calendar_token_provider() is None
 
 
+@pytest.mark.asyncio
+async def test_startup_backfills_calendar_claims_without_sending_dm(
+    monkeypatch, tmp_path: Path
+) -> None:
+    token_repo = CalendarTokenRepository(
+        db_path=str(tmp_path / "calendar.sqlite3"),
+        fernet=Fernet(Fernet.generate_key()),
+    )
+    token_repo.upsert(1, "@op", "token")
+    monkeypatch.setattr(api_main, "calendar_token_repository", token_repo)
+
+    await api_main.backfill_calendar_connection_notification_claims_on_startup()
+
+    assert token_repo.claim_connection_notification(1, "@op") is False
+
+
+@pytest.mark.asyncio
+async def test_startup_calendar_claim_backfill_skips_when_not_configured(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(api_main, "calendar_token_repository", None)
+
+    await api_main.backfill_calendar_connection_notification_claims_on_startup()
+
+
 def test_build_token_provider_constructs_when_configured(
     monkeypatch, tmp_path: Path
 ) -> None:

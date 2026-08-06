@@ -230,21 +230,26 @@ recorded for legacy callbacks that were already suppressed.
 restart trigger remains unverified.
 
 **Resolution:** The callback now claims the durable one-time marker before all
-early-return guards. A legacy connected callback therefore backfills the claim
-without sending a message; a later token deletion/restart cannot re-arm that
-confirmation path unless the operator explicitly disconnects the calendar.
+early-return guards. In addition, API startup backfills claims for existing
+connected token rows without sending Telegram messages. A legacy connected
+callback or restart therefore cannot re-arm that confirmation path unless the
+operator explicitly disconnects the calendar.
 
 ### Backlog Changes
 
 - Added a regression assertion that an already-connected callback creates the
   durable claim while still sending no Telegram DM.
-- Focused calendar verification: `53 passed`.
-- Full repository verification: `4152 passed`, `100.00%` coverage, and `ruff`
+- Added a startup migration regression test proving existing connected rows are
+  claimed without a Telegram send, and that an unconfigured repository is
+  skipped.
+- Focused calendar verification: `62 passed`.
+- Full repository verification: `4155 passed`, `100.00%` coverage, and `ruff`
   clean.
 
 ### Updated Conclusion
 
 **Confidence:** High for the local residual fix; Medium for the original remote
-trigger. Startup itself still has no producer for the exact message. The local
-callback now persists the one-time marker even for legacy connected state, and
-the operator DM remains limited to a genuinely unclaimed connection callback.
+trigger. Startup itself has no producer for the exact message: it only claims
+legacy connected rows. The local callback now persists the one-time marker even
+for legacy connected state, and the operator DM remains limited to a genuinely
+unclaimed connection callback.

@@ -3943,6 +3943,21 @@ def _calendar_oauth_production_status() -> tuple[bool, dict[str, object]]:
 
 
 @app.on_event("startup")
+async def backfill_calendar_connection_notification_claims_on_startup() -> None:
+    """Migrate connected calendar rows without sending a Telegram message."""
+    if calendar_token_repository is None:
+        return
+    claimed = await asyncio.to_thread(
+        calendar_token_repository.backfill_connection_notification_claims
+    )
+    if claimed:
+        logger.info(
+            "calendar_connect_notification_claims_backfilled",
+            extra={"claimed": claimed},
+        )
+
+
+@app.on_event("startup")
 async def validate_calendar_oauth_production_on_startup() -> None:
     """Epic 11 prod — block silent dev redirect URIs on production deploys."""
     ok, detail = _calendar_oauth_production_status()
