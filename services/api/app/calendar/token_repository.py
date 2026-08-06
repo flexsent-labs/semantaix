@@ -55,6 +55,16 @@ def init_token_schema(db_path: str) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calendar_connect_notifications (
+                project_id INTEGER NOT NULL,
+                operator TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, operator)
+            )
+            """
+        )
 
 
 class CalendarTokenRepository:
@@ -140,3 +150,31 @@ class CalendarTokenRepository:
                 """,
                 (project_id, operator),
             )
+            connection.execute(
+                """
+                DELETE FROM calendar_connect_notifications
+                WHERE project_id = ? AND operator = ?
+                """,
+                (project_id, operator),
+            )
+
+    def claim_connection_notification(self, project_id: int, operator: str) -> bool:
+        """Atomically reserve the one-time fresh-connect confirmation DM.
+
+        The claim is deliberately persisted beside the token. A restart or a
+        second OAuth callback therefore cannot turn a completed connection
+        into another notification, and two concurrent callbacks cannot both
+        pass a read-before-write check. The claim is reset by ``delete`` only
+        when the operator explicitly disconnects the calendar.
+        """
+        now = _now()
+        with _connect(self.db_path) as connection:
+            claimed = connection.execute(
+                """
+                INSERT OR IGNORE INTO calendar_connect_notifications
+                    (project_id, operator, claimed_at)
+                VALUES (?, ?, ?)
+                """,
+                (project_id, operator, now),
+            )
+            return claimed.rowcount == 1

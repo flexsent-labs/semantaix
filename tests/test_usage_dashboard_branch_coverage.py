@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from services.api.app.usage.migrations import bootstrap_usage_db
+from services.api.app.usage.repositories import UsageDailySummaryRow
 from services.web_ui.app.main import app
 
 
@@ -61,6 +62,36 @@ def _insert_summary(db: str, *, day: str, tracker: str, **kwargs) -> None:
             "  :hitl_replied_count, :hitl_resolved_count)",
             {"day": day, "tracker_type": tracker, **defaults},
         )
+
+
+def test_aggregate_tiles_includes_llm_totals() -> None:
+    from services.web_ui.app.usage_dashboard import _aggregate_tiles
+
+    row = UsageDailySummaryRow(
+        project_id=1,
+        day_utc="2026-05-25",
+        tracker_type="llm",
+        model_name="test-model",
+        prompt_tokens_total=100,
+        completion_tokens_total=25,
+        cost_usd_total=0.12345,
+        wasted_cost_usd=0.01,
+        call_count=1,
+        in_count=None,
+        out_count=None,
+        hitl_created_count=None,
+        hitl_assigned_count=None,
+        hitl_replied_count=None,
+        hitl_resolved_count=None,
+    )
+
+    assert _aggregate_tiles([row]) == {
+        "llm_cost": 0.1235,
+        "llm_tokens": 125,
+        "llm_wasted": 0.01,
+        "msg_count": 0,
+        "hitl_count": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

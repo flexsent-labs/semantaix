@@ -187,3 +187,26 @@ def test_retrieve_project_id_filter_scopes_results(tmp_path):
     assert {item.source_id for item in only_b} == {"kb-b", "kb-null"}
     unscoped = repository.retrieve(query="багги тур", limit=10)
     assert {item.source_id for item in unscoped} == {"kb-a", "kb-b", "kb-null"}
+
+
+def test_list_for_catalog_returns_public_chunks_in_project_scope(tmp_path):
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(source_id="kb-a", text="Багги", project_id=1)
+    repository.ingest(source_id="kb-global", text="Трансфер")
+    repository.ingest(
+        source_id="kb-private", text="Секрет", project_id=1, is_confidential=True
+    )
+    repository.ingest(source_id="kb-b", text="Квадроциклы", project_id=2)
+
+    items = repository.list_for_catalog(project_id=1, limit=10)
+
+    assert [item.source_id for item in items] == ["kb-a", "kb-global"]
+    assert all(item.is_confidential is False for item in items)
+    assert all(item.score == 1.0 for item in items)
+
+    unscoped = repository.list_for_catalog(limit=10)
+    assert [item.source_id for item in unscoped] == [
+        "kb-a",
+        "kb-global",
+        "kb-b",
+    ]

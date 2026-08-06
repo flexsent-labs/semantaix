@@ -2869,10 +2869,7 @@ async def test_pure_greeting_in_pitching_greets_not_handoff() -> None:
     }
     answerer, _s, openrouter, _ = _build(state=state, cal_settings=_FakeCalSettings())
     result = await answerer.try_answer(question="Здравствуйте!", ctx=_ctx())
-    assert result.text == (
-        "Здравствуйте! Подскажите, пожалуйста, что вас интересует: "
-        "услуги, варианты поездок или запись?"
-    )
+    assert result.text == GREETING_SMALLTALK_LINE
     assert "дат" not in result.text.lower()
     assert "записаться" not in result.text.lower()
     assert result.text == GREETING_SMALLTALK_LINE

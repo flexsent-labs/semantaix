@@ -56,8 +56,10 @@ from services.api.app.calendar.service_resolver import (
     extract_time_bound,
     names_invalid_date,
     names_past_date,
+    normalize_temporal_typos,
 )
 from services.api.app.rag import RagChunk
+from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.russian_text.normalizer import RussianNormalizer
 from services.api.app.sales.acceptance import is_acceptance
 from services.api.app.sales.cancel_intent import is_cancellation
@@ -89,6 +91,10 @@ from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.scoping_schema import (
     TRANSFER_SCHEMA,
     ScopingSchema,
+)
+from services.api.app.sales.service_aliases import (
+    contains_offered_service,
+    matched_service_groups,
 )
 from services.api.app.sales.turn_intent import classify_turn
 
@@ -267,12 +273,13 @@ GRATITUDE_ACK_LINE_EN = "You're welcome! Feel free to reach out anytime."
 # discovery prompt. A greeting alone is not evidence that the customer wants
 # to book; invite them to choose between services, options, and booking.
 GREETING_SMALLTALK_LINE = (
-    "Здравствуйте! Подскажите, пожалуйста, что вас интересует: "
-    "услуги, варианты поездок или запись?"
+    "Здравствуйте! Рады помочь. Что хотите узнать о поездках?"
 )
 GREETING_SMALLTALK_LINE_EN = (
-    "Hello! What can I help you with: services, trip options, or booking?"
+    "Hello! Happy to help. What would you like to know about the trips?"
 )
+SERVICE_SELECTION_DATE_LINE = "Отлично. На какую дату планируете поездку?"
+SERVICE_SELECTION_DATE_LINE_EN = "Great. What date are you planning the trip for?"
 # Story 12.59 (round-14) - "сколько багги нужно / понадобится / вместит" is a
 # capacity question, NOT a price ask ("сколько стоит") or a headcount answer.
 _CAPACITY_QUESTION_RE = re.compile(
@@ -489,6 +496,9 @@ def is_eligibility_question(question: str) -> bool:
 # typo-heavy-but-real booking is never mistaken for gibberish.
 _CYRILLIC_PRESENT_RE = re.compile(r"[а-яё]", re.IGNORECASE | re.UNICODE)
 _WORD_TOKEN_RE = re.compile(r"[a-zа-яё]{2,}", re.IGNORECASE | re.UNICODE)
+_WORD_OR_NUMBER_TOKEN_RE = re.compile(
+    r"[a-zа-яё0-9]+", re.IGNORECASE | re.UNICODE
+)
 
 
 def is_gibberish(question: str, *, normalizer: RussianNormalizer) -> bool:
@@ -499,6 +509,47 @@ def is_gibberish(question: str, *, normalizer: RussianNormalizer) -> bool:
     if not tokens:
         return False  # no word-like tokens (pure digits/punctuation)
     return not any(normalizer.is_known_word(token) for token in tokens)
+
+
+def _is_short_temporal_reply(
+    question: str, *, ctx: AnswerContext, normalizer: RussianNormalizer
+) -> bool:
+    """Recognise a terse answer to the funnel's date/time question.
+
+    These replies are intentionally handled without the LLM.  A one-word
+    answer such as ``завтра`` is a valid field value, not a standalone sales
+    intent; depending on the LLM for it lets a transient model error fall into
+    the generic scope-decline response.  Longer booking messages stay on the
+    normal extraction path so service names and passenger counts are not lost.
+    """
+    normalized = normalize_temporal_typos(question)
+    if not normalized.strip():
+        return False
+    if _BOOKING_COMMIT_RE.search(normalized):
+        return False
+    if _mentions_offered_service(normalized, normalizer=normalizer):
+        return False
+    if re.search(
+        r"\bнас\b|\bчеловек\w*\b|\bлюд\w*\b|\bгост\w*\b|"
+        r"\b(?:двое|трое|четверо|пятеро|шестеро|семеро|вдво[её]м|"
+        r"втро[её]м|вчетвером|впятером)\b",
+        normalized,
+        re.IGNORECASE | re.UNICODE,
+    ):
+        return False
+    if _parse_headcount(normalized) is not None and not extract_all_clocks(
+        normalized
+    ):
+        return False
+    if len(_WORD_OR_NUMBER_TOKEN_RE.findall(normalized)) > 5:
+        return False
+    tz = ZoneInfo(ctx.timezone)
+    return bool(
+        extract_requested_date(text=normalized, now=ctx.now, project_tz=tz)
+        or extract_requested_start(text=normalized, now=ctx.now, project_tz=tz)
+        or extract_all_clocks(normalized)
+        or detect_vague_window(normalized)
+    )
 
 
 # Story 12.80/12.81 (round-20 R20-1/R20-2) — FAQ intents (working hours, trip
@@ -705,7 +756,7 @@ def is_human_request(question: str) -> bool:
 # one message so a mixed-service request is handled one at a time, not collapsed.
 _VEHICLE_TYPE_GROUPS: tuple[tuple[str, ...], ...] = (
     ("багг",),
-    ("квадроцикл", "квадрик", "квадро"),
+    ("квадроцикл", "квадрацикл", "квадрик", "квадро"),
     ("эндуро",),
     ("мотоцикл", "мотик", "мопед"),
     ("скутер",),
@@ -713,16 +764,23 @@ _VEHICLE_TYPE_GROUPS: tuple[tuple[str, ...], ...] = (
     ("вездеход",),
     ("сигвей", "гироскутер", "segway"),
 )
+_VEHICLE_SERVICE_NAMES = frozenset(
+    {"багги", "квадроцикл", "эндуро", "мопед", "скутер", "питбайк", "вездеход", "сигвей"}
+)
 
 
-def is_mixed_service_request(question: str) -> bool:
-    """True when ``question`` names two or more distinct vehicle/service types."""
-    low = question.lower()
-    hit = sum(any(stem in low for stem in group) for group in _VEHICLE_TYPE_GROUPS)
-    return hit >= 2
+def is_mixed_service_request(
+    question: str, *, normalizer: _Normalizer | None = None
+) -> bool:
+    """True when ``question`` names two or more distinct service families."""
+    active_normalizer = normalizer or get_russian_normalizer()
+    matched = matched_service_groups(question, normalizer=active_normalizer)
+    return len(matched & _VEHICLE_SERVICE_NAMES) >= 2
 
 
-def _mentions_offered_service(question: str) -> bool:
+def _mentions_offered_service(
+    question: str, *, normalizer: _Normalizer | None = None
+) -> bool:
     """True when ``question`` explicitly names at least one offered vehicle/service.
 
     Story 12.98 (round-28 D1) — used to gate the out-of-scope decline so that
@@ -730,8 +788,23 @@ def _mentions_offered_service(question: str) -> bool:
     while «хочу багги» (багги IS offered) stays in the funnel.  Shares the same
     stem list as ``_VEHICLE_TYPE_GROUPS`` to keep them in sync.
     """
-    low = question.lower()
-    return any(any(stem in low for stem in group) for group in _VEHICLE_TYPE_GROUPS)
+    active_normalizer = normalizer or get_russian_normalizer()
+    return contains_offered_service(question, normalizer=active_normalizer)
+
+
+def _is_standalone_service_selection(
+    question: str, *, normalizer: _Normalizer
+) -> bool:
+    """Recognise a bare offered vehicle as a service-selection turn.
+
+    A customer often answers a broad catalog question with one word (including
+    a typo such as ``квадрациклы``). It is neither gibberish nor a complete
+    booking, so the funnel should ask for the next booking detail.
+    """
+    return (
+        len(_WORD_OR_NUMBER_TOKEN_RE.findall(question or "")) == 1
+        and _mentions_offered_service(question, normalizer=normalizer)
+    )
 
 
 def _format_working_hours(working_hours: Any) -> tuple[str, str] | None:
@@ -1445,7 +1518,7 @@ class SalesPersonaAnswerer:
             and result.text
             and is_out_of_scope(question, normalizer=self._normalizer)
             and is_sales_intent(question, normalizer=self._normalizer)
-            and _mentions_offered_service(question)
+            and _mentions_offered_service(question, normalizer=self._normalizer)
         ):
             result = replace(
                 result,
@@ -1508,7 +1581,7 @@ class SalesPersonaAnswerer:
         # answer like «нас двое человек» is also excluded (is_out_of_scope=False).
         if is_out_of_scope(
             question, normalizer=self._normalizer
-        ) and not _mentions_offered_service(question):
+        ) and not _mentions_offered_service(question, normalizer=self._normalizer):
             return self._handle_out_of_scope(ctx=ctx)
 
         # Story 12.59 (round-14) - a capacity question ("сколько багги нужно?")
@@ -1572,6 +1645,49 @@ class SalesPersonaAnswerer:
                 term=question,
                 ctx=ctx,
                 current_stage=str(state.get("current_stage") if state else STAGE_NEW),
+            )
+
+        current_stage = str(state.get("current_stage") if state else STAGE_NEW)
+
+        # A one-word vehicle reply ("Багги", including the common typo
+        # "Квадрациклы") is a service selection, not keyboard mash. Keep the
+        # next question deterministic so a short customer reply does not spend
+        # an LLM turn or fall into the generic gibberish wording.
+        if _is_standalone_service_selection(
+            question, normalizer=self._normalizer
+        ) and current_stage in {
+            STAGE_NEW,
+            STAGE_SCOPING,
+        }:
+            return await self._handle_service_selection(
+                ctx=ctx, state=state
+            )
+
+        # A short date/time answer is a field value, not a new sales intent.
+        # Handle it before the gibberish guard and before the scoping LLM so
+        # ``завтра`` (or a typo such as ``завтро``) cannot fall through to the
+        # random ScopeGuard phrase when OpenRouter is unavailable.
+        short_temporal = (
+            state is not None
+            and current_stage in {STAGE_SCOPING, STAGE_AWAITING_TIME}
+            and _is_short_temporal_reply(
+                question, ctx=ctx, normalizer=self._normalizer
+            )
+        )
+        normalized_temporal = normalize_temporal_typos(question)
+        date_only = (
+            extract_requested_date(
+                text=normalized_temporal,
+                now=ctx.now,
+                project_tz=ZoneInfo(ctx.timezone),
+            )
+            is not None
+            and not extract_all_clocks(normalized_temporal)
+            and detect_vague_window(normalized_temporal) is None
+        )
+        if short_temporal and (is_gibberish(question, normalizer=self._normalizer) or date_only):
+            return await self._handle_temporal_reply(
+                question=question, ctx=ctx, state=state
             )
 
         # Story 12.74 (round-18 R18-6) — unintelligible keyboard-mash gets a
@@ -1686,7 +1802,9 @@ class SalesPersonaAnswerer:
             )
 
         if current_stage == STAGE_NEW:
-            return await self._handle_greeting(question=question, ctx=ctx)
+            return await self._handle_greeting(
+                question=question, ctx=ctx, returning=True
+            )
 
         # Unknown / future stage value — defer to downstream answerers.
         return _skip("stage_not_implemented_yet")
@@ -1751,7 +1869,11 @@ class SalesPersonaAnswerer:
         # / an intent switch) the bot shouldn't open with "Здравствуйте" - UNLESS
         # the customer greeted first, in which case greeting back is natural.
         suppress_greeting = (
-            returning and _LEADING_GREETING_RE.match(question) is None
+            (returning and _LEADING_GREETING_RE.match(question) is None)
+            or (
+                _mentions_offered_service(question, normalizer=self._normalizer)
+                and _LEADING_GREETING_RE.match(question) is None
+            )
         )
         if suppress_greeting:
             system += _RETURNING_NO_GREETING_DIRECTIVE
@@ -1809,7 +1931,7 @@ class SalesPersonaAnswerer:
             return two_bookings
         # Story 12.85 (round-21 R21-1) — a message naming two services («багги и
         # квадроциклы») is handled one at a time, not collapsed into one verdict.
-        if is_mixed_service_request(question):
+        if is_mixed_service_request(question, normalizer=self._normalizer):
             return self._handle_mixed_service(ctx=ctx)
         # Story 12.89 (round-25 R25-1) — more buggies than people is implausible;
         # clarify before confirming, instead of silently saying «свободно».
@@ -2030,6 +2152,152 @@ class SalesPersonaAnswerer:
                 "sales_turn_kind": "gibberish",
                 "suppress_followup": True,
             },
+        )
+
+    async def _handle_service_selection(
+        self,
+        *,
+        ctx: AnswerContext,
+        state: dict[str, Any] | None,
+    ) -> AnswerResult:
+        """Start or continue scoping after a bare service-name reply.
+
+        A short answer such as ``Квадрациклы`` carries the selected service but
+        no booking details.  It must therefore advance the same funnel as a
+        complete sentence, while avoiding an unnecessary LLM call for the
+        obvious next question.
+        """
+        stage_before = str(state.get("current_stage") if state else STAGE_NEW)
+        intent = Intent.from_dict((state or {}).get("collected_intent") or {})
+        schema = self._resolve_schema(ctx)
+        missing = intent.missing_fields(schema.required_keys())
+        if not missing:
+            return _skip("service_selection_state_complete")
+
+        first_missing = missing[0]
+        text = schema.question_for(first_missing)
+        if first_missing == "dates":
+            text = localize(
+                SERVICE_SELECTION_DATE_LINE,
+                SERVICE_SELECTION_DATE_LINE_EN,
+                language=ctx.language,
+            )
+        if not text:
+            return _skip("service_selection_unknown_field")
+        stage_after = STAGE_SCOPING
+        await self._persist(ctx=ctx, current_stage=stage_after, intent=intent)
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": stage_before,
+                "stage_after": stage_after,
+                "sales_turn_kind": "service_selection",
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "stage_before": stage_before,
+                "stage_after": stage_after,
+                "sales_turn_kind": "service_selection",
+            },
+        )
+
+    async def _handle_temporal_reply(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> AnswerResult:
+        """Persist a short date/time answer without an LLM round-trip.
+
+        This is the deterministic counterpart to ``_handle_scoping`` for a
+        terse field reply.  It preserves an already collected date when the
+        customer answers with only a time, and preserves an already collected
+        time when the customer answers with only a date.
+        """
+        stage_before = str(state.get("current_stage") or STAGE_SCOPING)
+        existing = Intent.from_dict(state.get("collected_intent") or {})
+        normalized = normalize_temporal_typos(question).strip()
+        tz = ZoneInfo(ctx.timezone)
+        has_date = (
+            extract_requested_date(text=normalized, now=ctx.now, project_tz=tz)
+            is not None
+            or extract_requested_start(text=normalized, now=ctx.now, project_tz=tz)
+            is not None
+        )
+        merged = (
+            replace(existing, dates=normalized)
+            if has_date
+            else self._fold_raw_time_into_intent(
+                intent=existing, question=normalized
+            )
+        )
+        merged = self._preserve_prior_date(merged=merged, state=state, ctx=ctx)
+
+        # A bare clock without a date must remain a date question.  Persist the
+        # clock in ``_ask_for_date`` so a later date reply can combine with it.
+        merged_dates = merged.dates if isinstance(merged.dates, str) else None
+        if (
+            extract_all_clocks(normalized)
+            and (
+                not merged_dates
+                or extract_requested_date(
+                    text=merged_dates, now=ctx.now, project_tz=tz
+                )
+                is None
+            )
+        ):
+            return await self._ask_for_date(
+                ctx=ctx,
+                intent=merged,
+                stage_before=stage_before,
+                base_metadata={"sales_turn_kind": "temporal_reply"},
+                dispatch_fallback=False,
+            )
+
+        schema = self._resolve_schema(ctx)
+        if not merged.is_complete(schema.required_keys()):
+            vague = await self._maybe_answer_vague_window(
+                question=normalized,
+                ctx=ctx,
+                merged_intent=merged,
+                stage_before=stage_before,
+            )
+            if vague is not None:
+                return vague
+            missing = merged.missing_fields(schema.required_keys())
+            next_question = schema.question_for(missing[0]) if missing else None
+            if not next_question:
+                return _skip("temporal_reply_unknown_field")
+            await self._persist(
+                ctx=ctx, current_stage=STAGE_SCOPING, intent=merged
+            )
+            return AnswerResult(
+                handled=True,
+                text=next_question,
+                metadata={
+                    "answerer": NAME,
+                    "stage_before": stage_before,
+                    "stage_after": STAGE_SCOPING,
+                    "sales_turn_kind": "temporal_reply",
+                },
+            )
+
+        media_metadata, dispatch_fallback = await self._fire_media_moment(
+            ctx=ctx, intent=merged, purpose="tour_preview"
+        )
+        return await self._complete_booking(
+            ctx=ctx,
+            intent=merged,
+            stage_before=stage_before,
+            base_metadata={"sales_turn_kind": "temporal_reply", **media_metadata},
+            dispatch_fallback=dispatch_fallback,
+            question=normalized,
         )
 
     async def _handle_working_hours_question(
@@ -2467,6 +2735,27 @@ class SalesPersonaAnswerer:
         existing = Intent.from_dict(state.get("collected_intent") or {})
         pre_missing = existing.missing_fields(required)
         pending_field = pre_missing[0] if pre_missing else None
+        # A standalone count is an unambiguous answer to a numeric question.
+        # Capture it before the LLM call: terse replies are especially likely
+        # to hit a transient transport/schema failure, and falling through to
+        # ScopeGuard then incorrectly says "С этим не помогу".
+        if (
+            pending_field is not None
+            and pending_field in schema.numeric_keys()
+            and not is_decline(question, normalizer=self._normalizer)
+        ):
+            count = _parse_count(question)
+            if count is not None:
+                return await self._handle_deterministic_numeric_reply(
+                    question=question,
+                    ctx=ctx,
+                    existing=existing,
+                    pending_field=pending_field,
+                    count=count,
+                    required=required,
+                    schema=schema,
+                    stage_before=STAGE_SCOPING,
+                )
         outcome = await self._extract_and_merge(
             question=question,
             ctx=ctx,
@@ -2475,6 +2764,12 @@ class SalesPersonaAnswerer:
             schema=schema,
         )
         if isinstance(outcome, AnswerResult):
+            if _is_short_temporal_reply(
+                question, ctx=ctx, normalizer=self._normalizer
+            ):
+                return await self._handle_temporal_reply(
+                    question=question, ctx=ctx, state=state
+                )
             return outcome
         merged, next_question, extracted = outcome
         # Story 12.11 - the customer declined the field just asked ("не нужно",
@@ -2528,7 +2823,7 @@ class SalesPersonaAnswerer:
                 return two_bookings
             # Story 12.85 (round-21 R21-1) — two services named mid-scoping →
             # clarify one at a time.
-            if is_mixed_service_request(question):
+            if is_mixed_service_request(question, normalizer=self._normalizer):
                 return self._handle_mixed_service(ctx=ctx)
             # Story 12.89 (round-25 R25-1) — flag more buggies than people.
             if is_count_inconsistent(merged):
@@ -2606,6 +2901,67 @@ class SalesPersonaAnswerer:
             question=question,
         )
 
+    async def _handle_deterministic_numeric_reply(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        existing: Intent,
+        pending_field: str,
+        count: int,
+        required: tuple[str, ...],
+        schema: ScopingSchema,
+        stage_before: str,
+    ) -> AnswerResult:
+        """Advance scoping for a numeric answer without depending on the LLM."""
+        merged = existing.with_field(pending_field, count)
+        missing = merged.missing_fields(required)
+        if missing:
+            next_question = schema.question_for(missing[0])
+            if not next_question:
+                return _skip("numeric_reply_unknown_field")
+            await self._persist(
+                ctx=ctx, current_stage=STAGE_SCOPING, intent=merged
+            )
+            logger.info(
+                "sales_answerer_handled",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "stage_before": stage_before,
+                    "stage_after": STAGE_SCOPING,
+                    "sales_turn_kind": "deterministic_numeric_reply",
+                    "field": pending_field,
+                },
+            )
+            return AnswerResult(
+                handled=True,
+                text=next_question,
+                metadata={
+                    "answerer": NAME,
+                    "stage_before": stage_before,
+                    "stage_after": STAGE_SCOPING,
+                    "sales_turn_kind": "deterministic_numeric_reply",
+                    "field": pending_field,
+                },
+            )
+
+        media_metadata, dispatch_fallback = await self._fire_media_moment(
+            ctx=ctx,
+            intent=merged,
+            purpose="tour_preview",
+        )
+        return await self._complete_booking(
+            ctx=ctx,
+            intent=merged,
+            stage_before=stage_before,
+            base_metadata={
+                "sales_turn_kind": "deterministic_numeric_reply",
+                **media_metadata,
+            },
+            dispatch_fallback=dispatch_fallback,
+            question=question,
+        )
+
     async def _handle_awaiting_time(
         self,
         *,
@@ -2629,6 +2985,12 @@ class SalesPersonaAnswerer:
             schema=self._resolve_schema(ctx),
         )
         if isinstance(outcome, AnswerResult):
+            if _is_short_temporal_reply(
+                question, ctx=ctx, normalizer=self._normalizer
+            ):
+                return await self._handle_temporal_reply(
+                    question=question, ctx=ctx, state=state
+                )
             return outcome
         merged, _next_question, _extracted = outcome
         # Story 12.62 (round-15) — when we asked only for the time (date already
@@ -2665,7 +3027,7 @@ class SalesPersonaAnswerer:
 
         # (pre-a) Story R30-1: a mixed-service message in pitching must produce the
         # one-at-a-time clarify line, not fall through to the generic handoff.
-        if is_mixed_service_request(question):
+        if is_mixed_service_request(question, normalizer=self._normalizer):
             return self._handle_mixed_service(ctx=ctx)
 
         # (a) Counter-offer — a new parseable date overrides the stale one.
@@ -4882,9 +5244,19 @@ class SalesPersonaAnswerer:
         check; also accept a date the deterministic ``extract_requested_start``
         can parse (which covers numeric/ISO/slash forms).
         """
-        if parse_russian_date_span(
-            question, now=now.date()
-        ) is None and not self._question_carries_concrete_start(question, now):
+        parsed_date = parse_russian_date_span(question, now=now.date())
+        parsed_by_resolver = (
+            now.tzinfo is not None
+            and extract_requested_date(
+                text=question, now=now, project_tz=now.tzinfo
+            )
+            is not None
+        )
+        if (
+            parsed_date is None
+            and not parsed_by_resolver
+            and not self._question_carries_concrete_start(question, now)
+        ):
             return existing_intent
         return replace(existing_intent, dates=question.strip())
 

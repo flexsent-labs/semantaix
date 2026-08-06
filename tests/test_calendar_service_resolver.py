@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import services.api.app.calendar.service_resolver as service_resolver
 from services.api.app.calendar.service_resolver import (
     CLARIFY_AMBIGUOUS,
     CLARIFY_NO_MATCH,
@@ -25,6 +26,7 @@ from services.api.app.calendar.service_resolver import (
     extract_time_bound,
     names_invalid_date,
     names_past_date,
+    normalize_temporal_typos,
     resolve_service,
 )
 from services.api.app.calendar.settings_repository import ServiceRule
@@ -594,6 +596,36 @@ def test_extract_requested_date_none_when_no_date() -> None:
     assert extract_requested_date(
         text="во второй половине дня", now=_NOW, project_tz=MOSCOW
     ) is None
+
+
+def test_temporal_typos_are_corrected_conservatively() -> None:
+    assert normalize_temporal_typos("") == ""
+    assert normalize_temporal_typos("Завтро") == "завтра"
+    assert normalize_temporal_typos("севодня") == "сегодня"
+    assert normalize_temporal_typos("субота") == "суббота"
+    assert normalize_temporal_typos("средний") == "средний"
+
+
+def test_ambiguous_temporal_typo_is_left_unchanged(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_resolver, "_TEMPORAL_CANONICAL_WORDS", ("завтра", "завтро")
+    )
+    assert normalize_temporal_typos("завтр") == "завтр"
+
+
+def test_temporal_typos_resolve_as_relative_dates() -> None:
+    assert extract_requested_date(
+        text="завтро", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 6)
+    assert extract_requested_start(
+        text="завтре в 14:00", now=_NOW, project_tz=MOSCOW
+    ) == datetime(2026, 6, 6, 14, 0, tzinfo=MOSCOW)
+
+
+def test_weekday_typo_resolves_as_next_weekday() -> None:
+    assert extract_requested_date(
+        text="в субота", now=_NOW, project_tz=MOSCOW
+    ) == date(2026, 6, 6)
 
 
 def test_sunday_weekday_resolves() -> None:

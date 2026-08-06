@@ -69,6 +69,8 @@ def _lookup(chunks: list[RagChunk]) -> tuple[PriceLookup, _FakeRagRetriever]:
         "Стоимость 15000 руб с человека",
         "Прокат 5 000 р. за час",
         "Итого 15000 RUB",
+        "Багги — 20 000 Р",
+        "Багги — 75000P",
     ],
 )
 def test_price_regex_matches_all_currency_forms(snippet: str) -> None:
@@ -84,6 +86,27 @@ def test_price_regex_handles_non_breaking_space_in_thousands() -> None:
 
 def test_non_price_chunk_is_not_matched() -> None:
     assert not extract_price_tokens("Тур длится 6 часов и включает обед.")
+
+
+@pytest.mark.asyncio
+async def test_motorcycle_question_matches_enduro_price_wording() -> None:
+    chunk = RagChunk(
+        id=43,
+        source_id="kb:enduro",
+        chunk_text="Эндуро (мото) — аренда от 4 000₽ / час.",
+        score=0.9,
+        project_id=1,
+    )
+    lookup, _retriever_instance = _lookup([chunk])
+
+    result = await lookup.lookup(
+        project_id=1,
+        intent=Intent(),
+        question="Сколько стоит мотоциклы?",
+    )
+
+    assert isinstance(result, PriceFound)
+    assert "4 000₽" in result.snippet
 
 
 @pytest.mark.asyncio

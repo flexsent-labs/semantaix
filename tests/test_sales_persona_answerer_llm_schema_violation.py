@@ -153,7 +153,7 @@ async def test_scoping_transport_error_falls_through_to_pipeline(caplog) -> None
         bot_persona_getter=lambda: "Николай",
     )
     with caplog.at_level("WARNING"):
-        result = await answerer.try_answer(question="нас 6", ctx=_ctx())
+        result = await answerer.try_answer(question="нас шестеро", ctx=_ctx())
     assert result.handled is False
     assert result.metadata.get("skip_reason") == "llm_transport_error"
     assert any(
@@ -191,7 +191,7 @@ async def test_scoping_schema_violation_returns_skip(caplog) -> None:
         bot_persona_getter=lambda: "Николай",
     )
     with caplog.at_level("WARNING"):
-        result = await answerer.try_answer(question="нас 6", ctx=_ctx())
+        result = await answerer.try_answer(question="нас шестеро", ctx=_ctx())
     assert result.handled is False
     assert result.metadata.get("skip_reason") == "llm_schema_violation"
     assert state_repo.upsert_calls == []

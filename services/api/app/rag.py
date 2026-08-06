@@ -128,6 +128,50 @@ class RagRepository:
             )
             return int(cursor.rowcount or 0)
 
+    def list_for_catalog(
+        self, *, project_id: int | None = None, limit: int = 8
+    ) -> list[RagChunk]:
+        """Return bounded public chunks for a whole-catalog question.
+
+        A generic question such as ``«Какие услуги есть?»`` has no distinctive
+        lemma to retrieve.  The catalog digest normally supplies the aggregate
+        answer, but when that digest is unavailable the fallback must enumerate
+        source chunks rather than run a zero-result keyword search.
+        """
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            if project_id is None:
+                rows = connection.execute(
+                    "SELECT id, source_id, chunk_text, is_confidential, "
+                    "project_id FROM rag_chunks "
+                    "WHERE is_confidential = 0 ORDER BY id LIMIT ?",
+                    (max(0, int(limit)),),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, source_id, chunk_text, is_confidential, "
+                    "project_id FROM rag_chunks "
+                    "WHERE is_confidential = 0 "
+                    "AND (project_id = ? OR project_id IS NULL) "
+                    "ORDER BY id LIMIT ?",
+                    (int(project_id), max(0, int(limit))),
+                ).fetchall()
+        return [
+            RagChunk(
+                id=int(row["id"]),
+                source_id=str(row["source_id"]),
+                chunk_text=str(row["chunk_text"]),
+                score=1.0,
+                is_confidential=False,
+                project_id=(
+                    int(row["project_id"])
+                    if row["project_id"] is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+
     def retrieve(
         self,
         *,

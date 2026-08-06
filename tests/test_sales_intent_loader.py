@@ -98,7 +98,7 @@ def test_skips_phrases_that_lemmatize_to_nothing(
     """A phrase that is pure punctuation lemmatizes to an empty list — the
     matcher must continue and try the next phrase, not crash."""
     file = tmp_path / "phrases.txt"
-    file.write_text("...\nтур\n", encoding="utf-8")
+    file.write_text("...\nцена\n", encoding="utf-8")
     assert is_sales_intent(
-        "Хочу тур", normalizer=normalizer, phrases_path=str(file)
+        "интересует цена", normalizer=normalizer, phrases_path=str(file)
     ) is True

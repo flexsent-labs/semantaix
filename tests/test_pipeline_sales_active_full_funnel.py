@@ -236,25 +236,17 @@ async def test_full_funnel_greeting_to_closing(tmp_path) -> None:
     assert "Медовеевка Лайт" in (r2.text or "")
     assert "Каньонинг" in (r2.text or "")
 
-    # Turns 3-6: drive the four remaining scoping fields.
-    openrouter.queue_response(
-        {
-            "extracted_fields": {"headcount": 4},
-            "next_question": "Сколько квадроциклов брать?",
-        }
-    )
+    # Turns 3-6: drive the four remaining scoping fields. Numeric replies are
+    # deliberately handled without an LLM round-trip, so a transport failure
+    # cannot turn a valid answer such as ``Нас 4`` into a scope decline.
     r3 = await pipeline.run(question="Нас 4", ctx=_ctx(trace_id="trace-3"))
     assert r3.handled is True
     assert r3.metadata.get("stage_after") == STAGE_SCOPING
+    assert r3.metadata.get("field") == "headcount"
 
-    openrouter.queue_response(
-        {
-            "extracted_fields": {"vehicle_count": 2},
-            "next_question": "Какой уровень сложности?",
-        }
-    )
     r4 = await pipeline.run(question="2 квадра", ctx=_ctx(trace_id="trace-4"))
     assert r4.handled is True
+    assert r4.metadata.get("field") == "vehicle_count"
 
     openrouter.queue_response(
         {
@@ -267,14 +259,12 @@ async def test_full_funnel_greeting_to_closing(tmp_path) -> None:
     )
     assert r5.handled is True
 
-    openrouter.queue_response(
-        {
-            "extracted_fields": {"drivers": 1},
-            "next_question": "Принято!",
-        }
-    )
     r6 = await pipeline.run(question="1 водитель", ctx=_ctx(trace_id="trace-6"))
     assert r6.handled is True
+    assert r6.metadata.get("sales_turn_kind") in {
+        "deterministic_numeric_reply",
+        "scoping_complete",
+    }
     # All 5 intent fields are now captured.
     state = state_repo.get(_CHAT_ID)
     assert state is not None

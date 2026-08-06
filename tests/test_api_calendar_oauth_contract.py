@@ -475,6 +475,29 @@ def test_callback_success_skips_dm_when_already_connected(env, monkeypatch, capl
     )
 
 
+def test_callback_success_skips_dm_when_notification_claim_already_exists(
+    env, monkeypatch, caplog
+):
+    """A durable claim suppresses a repeat even if connection state is stale."""
+    assert env["token_repo"].claim_connection_notification(_PROJECT_ID, _OPERATOR) is True
+    _stub_exchange(monkeypatch, refresh_token="new-refresh-secret")
+    state = _mint_state(env)
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_not_awaited()
+    assert any(
+        "calendar_connect_dm_skipped_claimed" in record.message
+        for record in caplog.records
+    )
+
+
 def test_callback_success_skips_dm_when_project_already_enabled(
     env, monkeypatch, caplog
 ):

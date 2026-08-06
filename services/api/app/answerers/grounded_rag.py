@@ -89,6 +89,10 @@ class _RagReader(Protocol):
         project_id: int | None = None,
     ) -> list[RagChunk]: ...
 
+    def list_for_catalog(
+        self, *, project_id: int | None = None, limit: int = 8
+    ) -> list[RagChunk]: ...
+
 
 class _CatalogDigestProvider(Protocol):
     async def get_digest(self, *, project_id: int | None) -> str: ...
@@ -163,10 +167,8 @@ class GroundedRagAnswerer:
                     "catalog_digest_unavailable_using_rag",
                     extra={"trace_id": ctx.trace_id, "error": repr(exc)},
                 )
-                catalog_fallback_chunks = self._rag.retrieve(
-                    query=question,
-                    limit=_CATALOG_FALLBACK_LIMIT,
-                    project_id=ctx.project_id,
+                catalog_fallback_chunks = self._catalog_fallback_chunks(
+                    question=question, ctx=ctx
                 )
                 digest = ""
             merged_chunk, source_id_suffix = merge_structured_with_digest(
@@ -178,10 +180,8 @@ class GroundedRagAnswerer:
             )
             if source_id_suffix == "empty" or not merged_chunk.strip():
                 if not catalog_fallback_chunks:
-                    catalog_fallback_chunks = self._rag.retrieve(
-                        query=question,
-                        limit=_CATALOG_FALLBACK_LIMIT,
-                        project_id=ctx.project_id,
+                    catalog_fallback_chunks = self._catalog_fallback_chunks(
+                        question=question, ctx=ctx
                     )
                 chunks = catalog_fallback_chunks
                 if not chunks:
@@ -278,10 +278,8 @@ class GroundedRagAnswerer:
             # Error row is fired from inside _chat; answerer does not double-write.
             if catalog_query:
                 if not catalog_fallback_chunks:
-                    catalog_fallback_chunks = self._rag.retrieve(
-                        query=question,
-                        limit=_CATALOG_FALLBACK_LIMIT,
-                        project_id=ctx.project_id,
+                    catalog_fallback_chunks = self._catalog_fallback_chunks(
+                        question=question, ctx=ctx
                     )
                 fallback_text = _render_catalog_fallback(catalog_fallback_chunks)
                 if fallback_text is not None:
@@ -434,6 +432,24 @@ class GroundedRagAnswerer:
                 "verifier": verdict.reason,
                 "guardrail_score": decision.score,
             },
+        )
+
+    def _catalog_fallback_chunks(
+        self, *, question: str, ctx: AnswerContext
+    ) -> list[RagChunk]:
+        """Read a bounded public catalog excerpt when the digest is missing."""
+        list_for_catalog = getattr(self._rag, "list_for_catalog", None)
+        if callable(list_for_catalog):
+            return list_for_catalog(
+                project_id=ctx.project_id,
+                limit=_CATALOG_FALLBACK_LIMIT,
+            )
+        # Keep compatibility with lightweight retriever implementations used by
+        # integrations and older test doubles.
+        return self._rag.retrieve(
+            query=question,
+            limit=_CATALOG_FALLBACK_LIMIT,
+            project_id=ctx.project_id,
         )
 
     def _record_llm_row(

@@ -136,10 +136,10 @@ async def test_full_scoping_run_then_completion_handoff() -> None:
 
     questions = [
         "1 мая хочу тур",
-        "нас 6",
-        "3 квадрика",
-        "средний",
-        "мужчины 30+",
+        "Нас будет шестеро, едем компанией.",
+        "Думаю, трёх квадриков нам хватит.",
+        "Хотим маршрут средней сложности, без экстремальных участков.",
+        "За рулём будут мужчины старше тридцати, опыт есть.",
     ]
     for question in questions:
         result = await answerer.try_answer(question=question, ctx=_ctx())

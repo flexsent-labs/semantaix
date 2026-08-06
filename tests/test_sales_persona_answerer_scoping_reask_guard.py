@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+import services.api.app.sales.sales_persona_answerer as sales_module
 from services.api.app.answerers import AnswerContext
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
@@ -26,6 +27,7 @@ from services.api.app.sales.sales_persona_answerer import (
     _format_pending_instruction,
     _parse_count,
 )
+from services.api.app.sales.scoping_schema import ScopingField, ScopingSchema
 
 _NOW = datetime(2026, 5, 30, 9, 0, tzinfo=UTC)
 _CHAT_ID = 7
@@ -66,6 +68,11 @@ class _RecordingOpenRouter:
     async def complete_json(self, *, system, user, model=None, **_kw: Any) -> dict[str, Any]:
         self.systems.append(system)
         return self._responses.pop(0)
+
+
+class _FailingOpenRouter:
+    async def complete_json(self, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("temporary OpenRouter outage")
 
 
 def _ctx() -> AnswerContext:
@@ -121,6 +128,141 @@ async def test_bare_numeric_answer_is_captured_not_reasked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_headcount_is_captured_even_when_openrouter_is_unavailable() -> None:
+    """The reported dialog must not turn a valid ``2`` into a scope decline."""
+    answerer, repo = _build(Intent(dates="завтра"), _FailingOpenRouter())
+
+    result = await answerer.try_answer(question="2", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.metadata["sales_turn_kind"] == "deterministic_numeric_reply"
+    assert result.text == "Сколько багги нужно?"
+    assert repo.upserts[-1]["collected_intent"]["headcount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_motorcycle_selection_then_headcount_stays_in_scoping() -> None:
+    """The exact ``Мотоциклы`` → ``3`` customer path must stay in the funnel."""
+    answerer, repo = _build(Intent(dates="завтра"), _FailingOpenRouter())
+
+    greeting = await answerer.try_answer(question="Привет", ctx=_ctx())
+    selection = await answerer.try_answer(question="Мотоциклы", ctx=_ctx())
+    count = await answerer.try_answer(question="3", ctx=_ctx())
+
+    assert greeting.handled is True
+    assert selection.metadata["sales_turn_kind"] == "service_selection"
+    assert "человек" in (selection.text or "").casefold()
+    assert count.handled is True
+    assert count.text == "Сколько багги нужно?"
+    assert repo.upserts[-1]["collected_intent"]["headcount"] == 3
+
+
+@pytest.mark.asyncio
+async def test_deterministic_numeric_reply_can_finish_scoping() -> None:
+    intent = Intent(
+        dates="завтра",
+        headcount=2,
+        vehicle_count=1,
+        difficulty="лёгкая",
+    )
+    answerer, repo = _build(intent, _FailingOpenRouter())
+
+    result = await answerer.try_answer(question="1", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.response_mode == "sales_escalation"
+    assert result.metadata["sales_turn_kind"] == "deterministic_numeric_reply"
+    assert result.metadata["hitl_reason"] == "sales_scoping_complete"
+    assert repo.upserts[-1]["current_stage"] == "pitching"
+    assert repo.upserts[-1]["collected_intent"]["drivers"] == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_numeric_fallback_after_llm_merge(monkeypatch) -> None:
+    """Keep the post-LLM numeric guard covered for non-standard callers."""
+    answerer, repo = _build(
+        Intent(dates="завтра"),
+        _RecordingOpenRouter({"extracted_fields": {}, "next_question": "Дальше?"}),
+    )
+    counts = iter((None, 1))
+    monkeypatch.setattr(sales_module, "_parse_count", lambda _text: next(counts))
+
+    result = await answerer._handle_scoping(
+        question="один",
+        ctx=_ctx(),
+        state=_state(Intent(dates="завтра")),
+    )
+
+    assert result.handled is True
+    assert repo.upserts[-1]["collected_intent"]["headcount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_deterministic_numeric_reply_unknown_schema_question_skips() -> None:
+    answerer, _repo = _build(Intent(dates="завтра"), _FailingOpenRouter())
+    schema = ScopingSchema(
+        (
+            ScopingField("custom_count", None, kind="number"),
+            ScopingField("other_required", None, kind="text"),
+        )
+    )
+
+    result = await answerer._handle_deterministic_numeric_reply(
+        question="1",
+        ctx=_ctx(),
+        existing=Intent(dates="завтра"),
+        pending_field="custom_count",
+        count=1,
+        required=("custom_count", "other_required"),
+        schema=schema,
+        stage_before="scoping",
+    )
+
+    assert result.handled is False
+    assert result.metadata["skip_reason"] == "numeric_reply_unknown_field"
+
+
+@pytest.mark.asyncio
+async def test_service_selection_skips_when_state_is_complete() -> None:
+    answerer, _repo = _build(Intent(), _FailingOpenRouter())
+    complete_state = {
+        "current_stage": "scoping",
+        "collected_intent": Intent(
+            dates="завтра",
+            headcount=2,
+            vehicle_count=1,
+            difficulty="лёгкий",
+            drivers=1,
+        ).to_dict(),
+    }
+
+    result = await answerer._handle_service_selection(
+        ctx=_ctx(), state=complete_state
+    )
+
+    assert result.handled is False
+    assert result.metadata["skip_reason"] == "service_selection_state_complete"
+
+
+@pytest.mark.asyncio
+async def test_service_selection_skips_when_schema_has_no_question(monkeypatch) -> None:
+    answerer, _repo = _build(Intent(), _FailingOpenRouter())
+    monkeypatch.setattr(
+        answerer,
+        "_schema_getter",
+        lambda _ctx: ScopingSchema((ScopingField("custom", None),)),
+    )
+
+    result = await answerer._handle_service_selection(
+        ctx=_ctx(),
+        state={"current_stage": "new", "collected_intent": Intent().to_dict()},
+    )
+
+    assert result.handled is False
+    assert result.metadata["skip_reason"] == "service_selection_unknown_field"
+
+
+@pytest.mark.asyncio
 async def test_scoping_prompt_tells_llm_which_field_is_pending() -> None:
     # Layer A: the extractor must explicitly name the field being answered, so a
     # bare reply is bound. (The plain missing-list bullet is not enough.)
@@ -130,7 +272,7 @@ async def test_scoping_prompt_tells_llm_which_field_is_pending() -> None:
     )
     answerer, _repo = _build(intent, openrouter)
 
-    await answerer.try_answer(question="1", ctx=_ctx())
+    await answerer.try_answer(question="один", ctx=_ctx())
 
     assert any(
         "отвечает на вопрос" in system and "vehicle_count" in system

@@ -14,10 +14,16 @@ from typing import Any
 
 import pytest
 
-from services.api.app.answerers import AnswerContext
+from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
-from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.sales_persona_answerer import (
+    ASK_FOR_DATE_LINE,
+    STAGE_SCOPING,
+    SalesPersonaAnswerer,
+    _is_short_temporal_reply,
+)
+from services.api.app.sales.scoping_schema import ScopingField, ScopingSchema
 
 
 class _FakeStateRepo:
@@ -157,6 +163,176 @@ async def test_existing_non_dormant_state_resumes_regardless_of_intent() -> None
     result = await answerer.try_answer(question="нас будет 6", ctx=_ctx())
 
     assert result.handled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ["Завтра", "завтро", "завтре"])
+async def test_active_scoping_accepts_date_reply_without_llm(reply: str) -> None:
+    """A date answer must not fall through to ScopeGuard on an LLM failure."""
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": STAGE_SCOPING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer = _build_answerer(state_repo=state_repo)
+
+    result = await answerer.try_answer(question=reply, ctx=_ctx())
+
+    assert result.handled is True
+    assert result.metadata["sales_turn_kind"] == "temporal_reply"
+    assert result.text == "Сколько человек поедет?"
+    assert state_repo.rows[7]["collected_intent"]["dates"] == "завтра"
+
+
+@pytest.mark.asyncio
+async def test_active_scoping_time_reply_asks_for_missing_date() -> None:
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": STAGE_SCOPING,
+        "collected_intent": Intent(headcount=2).to_dict(),
+        "last_proposal": None,
+    }
+    answerer = _build_answerer(state_repo=state_repo)
+
+    result = await answerer.try_answer(question="в 14:00", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.text == ASK_FOR_DATE_LINE
+    assert state_repo.rows[7]["collected_intent"]["dates"] == "в 14:00"
+
+
+def test_temporal_reply_detector_rejects_empty_and_booking_text() -> None:
+    ctx = _ctx()
+    normalizer = get_russian_normalizer()
+    assert _is_short_temporal_reply("", ctx=ctx, normalizer=normalizer) is False
+    assert (
+        _is_short_temporal_reply(
+            "Запишите на завтра", ctx=ctx, normalizer=normalizer
+        )
+        is False
+    )
+    assert (
+        _is_short_temporal_reply(
+            "завтра на квадроциклах", ctx=ctx, normalizer=normalizer
+        )
+        is False
+    )
+    assert (
+        _is_short_temporal_reply(
+            "завтра, нас двое", ctx=ctx, normalizer=normalizer
+        )
+        is False
+    )
+    assert _is_short_temporal_reply("завтра 2", ctx=ctx, normalizer=normalizer) is False
+    assert (
+        _is_short_temporal_reply(
+            "завтра во второй половине дня пожалуйста", ctx=ctx, normalizer=normalizer
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_temporal_reply_delegates_vague_window_result(monkeypatch) -> None:
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": STAGE_SCOPING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer = _build_answerer(state_repo=state_repo)
+
+    async def _fake_vague(**_kwargs: Any) -> AnswerResult:
+        return AnswerResult(handled=True, text="slot")
+
+    monkeypatch.setattr(answerer, "_maybe_answer_vague_window", _fake_vague)
+    result = await answerer._handle_temporal_reply(
+        question="завтра вечером", ctx=_ctx(), state=state_repo.rows[7]
+    )
+
+    assert result.text == "slot"
+
+
+@pytest.mark.asyncio
+async def test_temporal_reply_unknown_schema_field_skips(monkeypatch) -> None:
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": STAGE_SCOPING,
+        "collected_intent": Intent().to_dict(),
+        "last_proposal": None,
+    }
+    answerer = _build_answerer(state_repo=state_repo)
+    monkeypatch.setattr(
+        answerer,
+        "_schema_getter",
+        lambda _ctx: ScopingSchema((ScopingField("custom", None),)),
+    )
+
+    result = await answerer._handle_temporal_reply(
+        question="завтра", ctx=_ctx(), state=state_repo.rows[7]
+    )
+
+    assert result.handled is False
+    assert result.metadata["skip_reason"] == "temporal_reply_unknown_field"
+
+
+@pytest.mark.asyncio
+async def test_temporal_reply_with_complete_intent_finishes_booking() -> None:
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": STAGE_SCOPING,
+        "collected_intent": Intent(
+            dates="1 мая",
+            headcount=2,
+            vehicle_count=1,
+            difficulty="начальный",
+            drivers=1,
+        ).to_dict(),
+        "last_proposal": None,
+    }
+    answerer = _build_answerer(state_repo=state_repo)
+
+    result = await answerer._handle_temporal_reply(
+        question="завтра", ctx=_ctx(), state=state_repo.rows[7]
+    )
+
+    assert result.handled is True
+    assert result.metadata["sales_turn_kind"] == "temporal_reply"
+
+
+@pytest.mark.asyncio
+async def test_awaiting_time_temporal_fallback_handles_llm_failure() -> None:
+    class _BrokenOpenRouter:
+        async def complete_json(self, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("temporary")
+
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": "awaiting_time",
+        "collected_intent": Intent(headcount=2, vehicle_count=1).to_dict(),
+        "last_proposal": None,
+    }
+    answerer = _build_answerer(
+        state_repo=state_repo, openrouter=_BrokenOpenRouter()
+    )
+
+    result = await answerer.try_answer(question="завтра вечером", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.metadata["sales_turn_kind"] == "temporal_reply"
 
 
 @pytest.mark.asyncio

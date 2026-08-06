@@ -206,6 +206,45 @@ async def test_customer_dialogue_collects_booking_details_before_asking_for_time
 
 
 @pytest.mark.asyncio
+async def test_customer_can_select_a_service_with_common_typos(tmp_path) -> None:
+    """A typo in a service name still advances the booking conversation."""
+    conversation, state_repo, openrouter, _services_repo = _build_sales_environment(
+        tmp_path, project_id=1205
+    )
+
+    greeting = await conversation.say("Привет")
+    assert greeting.handled is True
+    catalog = await conversation.say("Услуги")
+    assert catalog.handled is True
+
+    openrouter.queue_response(
+        {
+            "extracted_fields": {},
+            "next_question": "Здравствуйте! На какую дату планируете поездку?",
+        }
+    )
+    started = await conversation.say("Хочу поездить на квадрацыклах")
+    assert started.handled is True
+    assert started.metadata.get("stage_after") == "scoping"
+    assert "здравствуйте" not in (started.text or "").casefold()
+
+    selected = await conversation.say("квадрациклы")
+    assert selected.handled is True
+    assert selected.metadata.get("sales_turn_kind") == "service_selection"
+    assert selected.metadata.get("stage_after") == "scoping"
+    assert "дат" in (selected.text or "").casefold()
+    assert state_repo.get(conversation.chat_id)["current_stage"] == "scoping"
+
+    # A customer can answer the date question with a short typo-heavy reply;
+    # this must continue the funnel even when no LLM response is available.
+    date_reply = await conversation.say("завтро")
+    assert date_reply.handled is True
+    assert date_reply.metadata.get("sales_turn_kind") == "temporal_reply"
+    assert "человек" in (date_reply.text or "").casefold()
+    assert state_repo.get(conversation.chat_id)["collected_intent"]["dates"] == "завтра"
+
+
+@pytest.mark.asyncio
 async def test_unknown_service_question_is_not_invented_during_booking_dialogue(
     tmp_path,
 ) -> None:

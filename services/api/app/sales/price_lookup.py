@@ -30,7 +30,7 @@ from services.api.app.rag import RagChunk
 from services.api.app.sales.intent import Intent
 
 _PRICE_TOKEN_RE = re.compile(
-    r"\d[\d\s]*(?:₽|руб(?:\.|лей|ля|ль)?|р\.|RUB)",
+    r"\d[\d\s]*(?:₽|руб(?:\.|лей|ля|ль)?|р\.?|RUB|P)(?![A-Za-zА-Яа-я])",
     flags=re.IGNORECASE,
 )
 
@@ -63,6 +63,15 @@ _PRICE_GENERIC_LEMMAS: frozenset[str] = frozenset(
 )
 
 _SNIPPET_RADIUS = 60
+
+# The customer-facing catalog calls enduro rentals "мотоциклы", while the
+# approved brochures use "эндуро" or "мото".  Expand only this narrow vehicle
+# family so a motorcycle price question can reach the same grounded chunk.
+_PRICE_SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
+    "мотоцикл": ("эндуро", "мото", "мопед"),
+    "мопед": ("эндуро", "мотоцикл"),
+    "эндуро": ("мотоцикл", "мопед"),
+}
 
 
 class _Normalizer(Protocol):
@@ -173,6 +182,13 @@ def _subject_lemmas(text: str, normalizer: _Normalizer) -> set[str]:
     }
 
 
+def _expand_price_subject(subject: set[str]) -> set[str]:
+    expanded = set(subject)
+    for lemma in tuple(subject):
+        expanded.update(_PRICE_SUBJECT_ALIASES.get(lemma, ()))
+    return expanded
+
+
 class PriceLookup:
     """Resolve a customer's price ask against the RAG knowledge base.
 
@@ -199,7 +215,13 @@ class PriceLookup:
         question: str,
         service_names: Sequence[str] = (),
     ) -> PriceFound | PriceMissing:
-        query = _build_query(question)
+        subject = _subject_lemmas(question, self._normalizer)
+        aliases = {
+            alias
+            for lemma in subject
+            for alias in _PRICE_SUBJECT_ALIASES.get(lemma, ())
+        }
+        query = _build_query(" ".join((question, *sorted(aliases))))
         chunks = await asyncio.to_thread(
             self._rag.retrieve,
             query=query,
@@ -216,7 +238,7 @@ class PriceLookup:
         # when the customer names a subject ("… багги?"), the winning chunk must
         # mention it, else escalate — never quote an off-subject («квадроцикл»)
         # price. A generic ask names no subject → first-price-chunk behaviour.
-        subject = _subject_lemmas(question, self._normalizer)
+        subject = _expand_price_subject(subject)
         for chunk in chunks:
             if not _has_price_token(chunk.chunk_text):
                 continue

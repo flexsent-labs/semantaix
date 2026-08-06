@@ -172,6 +172,23 @@ async def test_catalog_ask_lists_active_service_names() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catalog_ask_mid_funnel_uses_aside_dispatcher() -> None:
+    services = [_FakeService(name="Багги")]
+    answerer, state_repo, _, _ = _build(services=services)
+    _seed_scoping_state(state_repo)
+
+    result = await answerer._maybe_handle_aside(
+        question="Что у вас есть?",
+        ctx=_ctx(),
+        state=state_repo.rows[7],
+    )
+
+    assert result is not None
+    assert result.handled is True
+    assert "Багги" in (result.text or "")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("question", ["Услуги", "Варианты"])
 async def test_first_turn_short_catalog_request_lists_active_service_names(
     question: str,

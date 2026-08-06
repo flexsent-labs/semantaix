@@ -25,7 +25,10 @@ from services.api.app.calendar.project_services_repository import (
 )
 from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
-from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.sales_persona_answerer import (
+    GREETING_SMALLTALK_LINE,
+    SalesPersonaAnswerer,
+)
 from services.api.app.sales.state_repository import StateRepository
 
 pytestmark = [
@@ -142,10 +145,7 @@ async def test_bare_greeting_starts_with_neutral_service_discovery(tmp_path) -> 
     )
 
     assert result.handled is True
-    assert result.text == (
-        "Здравствуйте! Подскажите, пожалуйста, что вас интересует: "
-        "услуги, варианты поездок или запись?"
-    )
+    assert result.text == GREETING_SMALLTALK_LINE
     assert "дат" not in result.text.lower()
     assert "записаться" not in result.text.lower()
     assert result.metadata.get("sales_turn_kind") == "greeting"

@@ -16,7 +16,10 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
-from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.sales_persona_answerer import (
+    SalesPersonaAnswerer,
+    _catalog_question_has_booking_context,
+)
 
 
 class _FakeStateRepo:
@@ -95,6 +98,27 @@ def _build_answerer(
     return answerer, state_repo, openrouter
 
 
+def test_catalog_question_with_date_stays_in_booking_context() -> None:
+    assert _catalog_question_has_booking_context(
+        question="1 мая хочу тур, какие варианты есть?",
+        ctx=_ctx(),
+    ) is True
+
+
+def test_catalog_question_with_date_only_stays_in_booking_context() -> None:
+    assert _catalog_question_has_booking_context(
+        question="На 1 мая, какие варианты есть?",
+        ctx=_ctx(),
+    ) is True
+
+
+def test_catalog_question_with_booking_word_stays_in_booking_context() -> None:
+    assert _catalog_question_has_booking_context(
+        question="Хочу записаться, какие варианты есть?",
+        ctx=_ctx(),
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_greeting_returns_handled_with_llm_text() -> None:
     answerer, _, openrouter = _build_answerer()
@@ -108,7 +132,7 @@ async def test_greeting_returns_handled_with_llm_text() -> None:
         question="Хочу прокат квадроциклов", ctx=_ctx()
     )
     assert result.handled is True
-    assert result.text == "Здравствуйте! Какие даты вас интересуют?"
+    assert result.text == "Какие даты вас интересуют?"
     assert result.metadata.get("answerer") in (None, "sales_persona")
     assert result.metadata.get("stage_before") == "new"
     assert result.metadata.get("stage_after") == "scoping"

@@ -34,6 +34,7 @@ def test_init_schema_creates_table(tmp_path):
             ).fetchall()
         }
     assert "calendar_operator_tokens" in names
+    assert "calendar_connect_notifications" in names
 
 
 def test_init_token_schema_without_key(tmp_path):
@@ -86,6 +87,21 @@ def test_set_status_and_delete(tmp_path):
     repo.delete(1, "@op")
     with pytest.raises(TokenNotFound):
         repo.get_refresh_token(1, "@op")
+
+
+def test_connection_notification_claim_is_persistent_and_reset_on_delete(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    key = Fernet.generate_key()
+    repo = CalendarTokenRepository(db_path=path, fernet=Fernet(key))
+
+    assert repo.claim_connection_notification(1, "@op") is True
+    assert repo.claim_connection_notification(1, "@op") is False
+
+    restarted_repo = CalendarTokenRepository(db_path=path, fernet=Fernet(key))
+    assert restarted_repo.claim_connection_notification(1, "@op") is False
+
+    restarted_repo.delete(1, "@op")
+    assert restarted_repo.claim_connection_notification(1, "@op") is True
 
 
 def test_get_status_returns_none_for_missing_row(tmp_path):

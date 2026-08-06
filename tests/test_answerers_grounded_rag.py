@@ -461,6 +461,38 @@ def test_catalog_fallback_filters_confidential_duplicates_and_bounds_items():
 
 
 @pytest.mark.asyncio
+async def test_catalog_llm_failure_reads_fallback_chunks_after_digest(
+    prompts,
+):
+    rag = _FakeRag(
+        [
+            RagChunk(
+                id=7,
+                source_id="kb:catalog",
+                chunk_text="Багги-туры и квадроциклы",
+                score=1.0,
+            )
+        ]
+    )
+    llm = _fake_llm()
+    llm.answer_grounded = AsyncMock(side_effect=RuntimeError("transport down"))
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(digest="Сводка услуг"),
+    )
+
+    result = await answerer.try_answer(question="Услуги", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.response_mode == "grounded_rag_fallback"
+    assert "Багги-туры" in (result.text or "")
+    assert rag.calls == ["Услуги"]
+
+
+@pytest.mark.asyncio
 async def test_llm_verifier_exception_falls_through(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()

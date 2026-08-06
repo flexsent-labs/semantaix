@@ -221,10 +221,26 @@ async def test_full_danil_dialog_runs_greeting_scoping_pricing_proposal_closing(
     # next scoping question each time; the test only validates that the
     # answerer is handling + persisting state.
     for trace_id, extracted, customer in [
-        ("danil-4", {"headcount": 4}, "Нас 4 человека."),
-        ("danil-5", {"vehicle_count": 2}, "2 квадрика хватит."),
-        ("danil-6", {"difficulty": "начальный"}, "Начинающие."),
-        ("danil-7", {"drivers": 1}, "Один водитель."),
+        (
+            "danil-4",
+            {"headcount": 4},
+            "Нас будет четверо, едем компанией, если это важно.",
+        ),
+        (
+            "danil-5",
+            {"vehicle_count": 2},
+            "Думаю, двух квадриков нам будет достаточно.",
+        ),
+        (
+            "danil-6",
+            {"difficulty": "начальный"},
+            "Мы начинающие, поэтому без сложных участков, пожалуйста.",
+        ),
+        (
+            "danil-7",
+            {"drivers": 1},
+            "За рулём будет один человек, остальные поедут пассажирами.",
+        ),
     ]:
         openrouter.queue_response(
             {"extracted_fields": extracted, "next_question": "Принято."}

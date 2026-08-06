@@ -12,6 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
+from services.api.app.sales.service_aliases import contains_offered_service
+
 
 class _Normalizer(Protocol):
     def lemmas(self, text: str) -> list[str]: ...
@@ -49,11 +51,16 @@ def is_sales_intent(
     if not text or not text.strip():
         return False
     phrases = load_sales_intent_phrases(phrases_path)
-    if not phrases:
-        return False
     lemmas = set(normalizer.lemmas(text))
     if not lemmas:
         return False
+    # Keep an explicit empty custom phrase file as an opt-out (used by tests
+    # and local projects), while the default seed file gains typo-tolerant
+    # recognition for offered services such as ``квадрациклы``.
+    if not phrases:
+        return False
+    if contains_offered_service(text, normalizer=normalizer):
+        return True
     for phrase in phrases:
         phrase_lemmas = normalizer.lemmas(phrase)
         if not phrase_lemmas:

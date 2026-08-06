@@ -5131,6 +5131,20 @@ async def calendar_oauth_callback(
             },
         )
         return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
+    should_send_connection_dm = await asyncio.to_thread(
+        calendar_token_repository.claim_connection_notification,
+        pending.project_id,
+        pending.operator,
+    )
+    if not should_send_connection_dm:
+        logger.info(
+            "calendar_connect_dm_skipped_claimed",
+            extra={
+                "project_id": pending.project_id,
+                "operator": pending.operator,
+            },
+        )
+        return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
     operator_chat_id: int | None = None
     try:
         record = await asyncio.to_thread(

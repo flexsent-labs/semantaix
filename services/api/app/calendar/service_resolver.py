@@ -131,6 +131,76 @@ _WEEKDAYS: dict[str, int] = {
     "воскресение": 6,
 }
 
+# A customer often answers a date question with one short, misspelled word
+# (``завтро``, ``завтре``, ``субота``).  Keep this correction layer deliberately
+# narrow: only relative days and weekdays are eligible, and the edit distance
+# is bounded by the length of the temporal word.  This must not become a
+# general-purpose spell checker that turns an unrelated message into a date.
+_TEMPORAL_CANONICAL_WORDS: tuple[str, ...] = tuple(
+    dict.fromkeys((*_RELATIVE_DAYS, *_WEEKDAYS))
+)
+_CYRILLIC_WORD_RE = re.compile(r"[а-яё]+", re.IGNORECASE | re.UNICODE)
+
+
+def _temporal_typo_budget(word: str) -> int:
+    return 2 if len(word) >= 9 else 1
+
+
+def _temporal_edit_distance(left: str, right: str, *, limit: int) -> int:
+    """Levenshtein distance with an early exit for the temporal typo budget."""
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+    previous = list(range(len(right) + 1))
+    for row, left_char in enumerate(left, start=1):
+        current = [row]
+        for column, right_char in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left_char != right_char),
+                )
+            )
+        if min(current) > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+def normalize_temporal_typos(text: str) -> str:
+    """Correct only conservative Russian day/date-anchor typos in ``text``.
+
+    The returned text keeps its punctuation and spacing.  Exact words are
+    unchanged; a fuzzy replacement is made only when there is one clear
+    closest temporal word within its length-based edit budget.
+    """
+    if not text or not text.strip():
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0).lower()
+        if token in _TEMPORAL_CANONICAL_WORDS:
+            return token
+        candidates: list[tuple[int, str]] = []
+        for canonical in _TEMPORAL_CANONICAL_WORDS:
+            # Do not collapse a longer, valid time-of-day word such as
+            # ``вечера`` into the shorter relative day ``вчера``.
+            if len(token) > len(canonical):
+                continue
+            limit = _temporal_typo_budget(canonical)
+            distance = _temporal_edit_distance(token, canonical, limit=limit)
+            if distance <= limit:
+                candidates.append((distance, canonical))
+        if not candidates:
+            return token
+        candidates.sort()
+        best_distance, best_word = candidates[0]
+        if len(candidates) > 1 and candidates[1][0] == best_distance:
+            return token
+        return best_word
+
+    return _CYRILLIC_WORD_RE.sub(replace, text)
+
 # Story 12.50 (round-11 R11-2) — English day anchors. The Russian normalizer
 # can't lemmatize English, so these are matched on the raw lowercased text by
 # word boundary. "day after tomorrow" is checked before "tomorrow" (substring).
@@ -941,6 +1011,7 @@ def extract_requested_start(
     parallel tokenizer); the clock is matched on the raw text since the
     lemmatizer drops the ``:`` separator.
     """
+    text = normalize_temporal_typos(text)
     local_now = now.astimezone(project_tz)
 
     # Story 12.78 (round-19 R19-3) — an open-ended bound («после 15:00», «до
@@ -1019,6 +1090,7 @@ def extract_requested_date(
     a date but no concrete clock, so the bot checks that day's window instead of
     declining or asking blindly.
     """
+    text = normalize_temporal_typos(text)
     local_now = now.astimezone(project_tz)
     lemmas = get_russian_normalizer().lemmas(text)
     offset = _extract_day_offset(lemmas, text, local_now.weekday())
