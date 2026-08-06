@@ -102,6 +102,14 @@ def _llm_script() -> list[dict[str, Any]]:
             "next_question": "Сколько человек поедет?",
         },
         {
+            "extracted_fields": {},
+            "next_question": "Сколько техники нужно?",
+        },
+        {
+            "extracted_fields": {},
+            "next_question": "Какой сложности маршрут предпочитаете?",
+        },
+        {
             "extracted_fields": {"difficulty": "средний"},
             "next_question": "Сколько нужно водителей?",
         },

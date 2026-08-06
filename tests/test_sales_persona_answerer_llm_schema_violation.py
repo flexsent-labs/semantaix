@@ -129,8 +129,7 @@ class _ScriptedOpenRouter:
 
 @pytest.mark.asyncio
 async def test_scoping_transport_error_falls_through_to_pipeline(caplog) -> None:
-    """Same defensive contract as greeting: scoping must not crash the
-    pipeline when the LLM transport is briefly unavailable."""
+    """A numeric scoping reply remains useful during an LLM outage."""
     from services.api.app.sales.intent import Intent
 
     state_repo = _FakeStateRepo()
@@ -154,19 +153,19 @@ async def test_scoping_transport_error_falls_through_to_pipeline(caplog) -> None
     )
     with caplog.at_level("WARNING"):
         result = await answerer.try_answer(question="нас шестеро", ctx=_ctx())
-    assert result.handled is False
-    assert result.metadata.get("skip_reason") == "llm_transport_error"
+    assert result.handled is True
+    assert result.text == "Сколько багги нужно?"
     assert any(
         getattr(r, "stage", None) == "scoping"
         and r.message == "sales_llm_transport_error"
         for r in caplog.records
     )
-    assert state_repo.upsert_calls == []
+    assert state_repo.upsert_calls[-1]["collected_intent"]["headcount"] == 6
 
 
 @pytest.mark.asyncio
 async def test_scoping_schema_violation_returns_skip(caplog) -> None:
-    """Schema violation hit from the scoping stage (already in state)."""
+    """A numeric scoping reply remains useful after malformed JSON."""
     from services.api.app.sales.intent import Intent
 
     state_repo = _FakeStateRepo()
@@ -192,8 +191,40 @@ async def test_scoping_schema_violation_returns_skip(caplog) -> None:
     )
     with caplog.at_level("WARNING"):
         result = await answerer.try_answer(question="нас шестеро", ctx=_ctx())
+    assert result.handled is True
+    assert result.text == "Сколько багги нужно?"
+    assert state_repo.upsert_calls[-1]["collected_intent"]["headcount"] == 6
+
+
+@pytest.mark.asyncio
+async def test_non_numeric_scoping_transport_error_returns_skip(caplog) -> None:
+    """A non-field reply still falls through when the scoping LLM is down."""
+    from services.api.app.sales.intent import Intent
+
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": "scoping",
+        "collected_intent": Intent(dates="1 мая").to_dict(),
+        "last_proposal": None,
+        "last_customer_msg_at": None,
+        "last_bot_msg_at": None,
+    }
+    answerer = SalesPersonaAnswerer(
+        state_repo=state_repo,
+        services_repo=_FakeServicesRepo(),
+        openrouter=_RaisingOpenRouter(exc=RuntimeError("boom-scoping")),
+        normalizer=get_russian_normalizer(),
+        clock=_clock,
+        bot_persona_getter=lambda: "Николай",
+    )
+
+    with caplog.at_level("WARNING"):
+        result = await answerer.try_answer(question="Пока не решил", ctx=_ctx())
+
     assert result.handled is False
-    assert result.metadata.get("skip_reason") == "llm_schema_violation"
+    assert result.metadata["skip_reason"] == "llm_transport_error"
     assert state_repo.upsert_calls == []
 
 

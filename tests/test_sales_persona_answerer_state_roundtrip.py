@@ -87,7 +87,9 @@ async def test_round_trip_first_greets_second_resumes(tmp_path: Path) -> None:
     state = state_repo.get(7)
     assert state is not None
     assert state["current_stage"] == "scoping"
-    assert state["collected_intent"] == Intent(dates="1 мая").to_dict()
+    assert state["collected_intent"] == Intent(
+        dates="1 мая", extra={"service": "квадроцикл"}
+    ).to_dict()
 
     # Turn 2 — resume from persisted state.
     second = await answerer.try_answer(question="нас 6", ctx=_ctx())
@@ -95,7 +97,9 @@ async def test_round_trip_first_greets_second_resumes(tmp_path: Path) -> None:
     state = state_repo.get(7)
     assert state is not None
     assert state["collected_intent"] == Intent(
-        dates="1 мая", headcount=6
+        dates="1 мая",
+        headcount=6,
+        extra={"service": "квадроцикл"},
     ).to_dict()
     # Still in scoping — three more fields to collect.
     assert state["current_stage"] == "scoping"

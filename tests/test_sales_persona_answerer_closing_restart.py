@@ -146,7 +146,9 @@ async def test_closing_with_new_booking_intent_restarts_funnel() -> None:
     # stale offered slot cleared so pitching cannot resurrect it.
     upsert = state_repo.upsert_calls[-1]
     assert upsert["current_stage"] == STAGE_SCOPING
-    assert upsert["collected_intent"] == Intent(dates="завтра в 14:00").to_dict()
+    assert upsert["collected_intent"] == Intent(
+        dates="завтра в 14:00", extra={"service": "багги"}
+    ).to_dict()
     assert upsert["last_proposal"] is None
 
 

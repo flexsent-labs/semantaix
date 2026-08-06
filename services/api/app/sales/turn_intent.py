@@ -78,6 +78,10 @@ _PRICE_PHRASES: tuple[tuple[str, ...], ...] = tuple(
 
 # Sentence terminators / dashes that bound the concept-term span.
 _TERM_BOUNDARY_RE = re.compile(r"[?!\.…\n—–]")
+_CONCEPT_TRAILING_FILLER_RE = re.compile(
+    r"(?:,?\s+(?:кстати|пожалуйста|если\s+можно|если\s+не\s+сложно))+$",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 def _lemmas_contain_phrase(
@@ -135,6 +139,10 @@ def _extract_concept_term(text: str) -> tuple[str | None, bool]:
     boundary = _TERM_BOUNDARY_RE.search(tail)
     span = tail[: boundary.start()] if boundary is not None else tail
     span = span.strip(" \t,;:")
+    # Telegram questions often add a polite/discourse tail after the subject:
+    # "что такое эндуро, кстати?".  Keep the retrieval term focused on the
+    # concept so the extra words cannot dilute an otherwise grounded RAG hit.
+    span = _CONCEPT_TRAILING_FILLER_RE.sub("", span).strip(" \t,;:")
     if not span:
         return None, True
     # An all-punctuation span (e.g. trailing "...") leaves nothing useful.

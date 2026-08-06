@@ -184,7 +184,7 @@ async def test_legacy_numeric_fallback_after_llm_merge(monkeypatch) -> None:
         Intent(dates="завтра"),
         _RecordingOpenRouter({"extracted_fields": {}, "next_question": "Дальше?"}),
     )
-    counts = iter((None, 1))
+    counts = iter((1,))
     monkeypatch.setattr(sales_module, "_parse_count", lambda _text: next(counts))
 
     result = await answerer._handle_scoping(
@@ -237,7 +237,7 @@ async def test_service_selection_skips_when_state_is_complete() -> None:
     }
 
     result = await answerer._handle_service_selection(
-        ctx=_ctx(), state=complete_state
+        question="Багги", ctx=_ctx(), state=complete_state
     )
 
     assert result.handled is False
@@ -254,6 +254,7 @@ async def test_service_selection_skips_when_schema_has_no_question(monkeypatch) 
     )
 
     result = await answerer._handle_service_selection(
+        question="Багги",
         ctx=_ctx(),
         state={"current_stage": "new", "collected_intent": Intent().to_dict()},
     )
@@ -272,7 +273,9 @@ async def test_scoping_prompt_tells_llm_which_field_is_pending() -> None:
     )
     answerer, _repo = _build(intent, openrouter)
 
-    await answerer.try_answer(question="один", ctx=_ctx())
+    # Two alternatives are intentionally ambiguous, so this remains on the
+    # extractor path and verifies that the pending field is named in the prompt.
+    await answerer.try_answer(question="один или два", ctx=_ctx())
 
     assert any(
         "отвечает на вопрос" in system and "vehicle_count" in system
@@ -299,7 +302,9 @@ async def test_numeric_capture_does_not_apply_to_a_text_field() -> None:
 def test_parse_count_extracts_first_integer() -> None:
     assert _parse_count("1") == 1
     assert _parse_count("нужно 2 машины") == 2
-    assert _parse_count("троих") is None
+    assert _parse_count("троих") == 3
+    assert _parse_count("одна багги") == 1
+    assert _parse_count("нас двое, но 5 багги") is None
 
 
 def test_pending_instruction_is_empty_when_nothing_missing() -> None:

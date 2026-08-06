@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -314,11 +315,15 @@ def is_capacity_question(question: str) -> bool:
 # Russian numerals/collectives; seats-per-buggy parsed BUGGY-specifically from
 # the RAG so a quadbike figure («2 чел. на квадрике») never leaks in.
 _RU_HEADCOUNT_WORDS: dict[str, int] = {
-    "один": 1, "одного": 1,
-    "два": 2, "две": 2, "двое": 2, "двоих": 2, "вдвоём": 2, "вдвоем": 2,
+    "один": 1, "одна": 1, "одно": 1, "одного": 1, "одной": 1, "одну": 1,
+    "два": 2, "две": 2, "двое": 2, "двоих": 2, "двух": 2,
+    "вдвоём": 2, "вдвоем": 2,
     "три": 3, "трое": 3, "троих": 3, "втроём": 3, "втроем": 3,
+    "трёх": 3, "трех": 3,
     "четыре": 4, "четверо": 4, "четверых": 4, "вчетвером": 4,
+    "четырёх": 4, "четырех": 4,
     "пять": 5, "пятеро": 5, "пятерых": 5, "впятером": 5,
+    "пяти": 5,
     "шесть": 6, "шестеро": 6, "семь": 7, "семеро": 7,
     "восемь": 8, "восьмеро": 8, "девять": 9, "десять": 10,
     "одиннадцать": 11, "двенадцать": 12,
@@ -792,6 +797,28 @@ def _mentions_offered_service(
     return contains_offered_service(question, normalizer=active_normalizer)
 
 
+def _single_service_context(
+    question: str, *, normalizer: _Normalizer
+) -> str | None:
+    """Return a canonical service family when the turn names exactly one."""
+    groups = matched_service_groups(question, normalizer=normalizer)
+    # Generic "тур" / "услуга" mentions are not useful booking context.  Keep
+    # only concrete rental families so a broad opener does not pollute state.
+    rental_groups = groups & frozenset(
+        {
+            "багги",
+            "квадроцикл",
+            "эндуро",
+            "мопед",
+            "скутер",
+            "питбайк",
+            "вездеход",
+            "сигвей",
+        }
+    )
+    return next(iter(rental_groups)) if len(rental_groups) == 1 else None
+
+
 def _is_standalone_service_selection(
     question: str, *, normalizer: _Normalizer
 ) -> bool:
@@ -1207,6 +1234,8 @@ class _PriceLookup(Protocol):
         project_id: int | None,
         intent: Intent,
         question: str,
+        service_names: Sequence[str] = (),
+        service_hint: str | None = None,
     ) -> PriceFound | PriceMissing: ...
 
 
@@ -1256,13 +1285,40 @@ def _format_known_fields(intent: Intent) -> str:
     return "\n".join(items) if items else "(пока ничего)"
 
 
+_SERVICE_VEHICLE_COUNT_LABELS: dict[str, str] = {
+    "багги": "багги",
+    "квадроцикл": "квадроциклов",
+    "эндуро": "эндуро",
+    "мопед": "мотоциклов",
+    "скутер": "скутеров",
+    "питбайк": "питбайков",
+    "вездеход": "вездеходов",
+    "сигвей": "сигвеев",
+}
+
+
+def _scoping_question(
+    *, intent: Intent, schema: ScopingSchema, key: str
+) -> str | None:
+    """Render a fallback question using the selected service family."""
+    question = schema.question_for(key)
+    if key != "vehicle_count":
+        return question
+    service = intent.get("service")
+    label = _SERVICE_VEHICLE_COUNT_LABELS.get(str(service))
+    return f"Сколько {label} нужно?" if label else question
+
+
 def _format_missing_fields(intent: Intent, schema: ScopingSchema) -> str:
     """Missing required fields, each annotated with its question so the LLM
     knows what a bare key like ``topic`` means for a custom anketa."""
     missing = intent.missing_fields(schema.required_keys())
     if not missing:
         return "(все собраны)"
-    return "\n".join(f"- {key}: {schema.question_for(key)}" for key in missing)
+    return "\n".join(
+        f"- {key}: {_scoping_question(intent=intent, schema=schema, key=key)}"
+        for key in missing
+    )
 
 
 def _format_intent_summary(intent: Intent) -> str:
@@ -1365,14 +1421,30 @@ def _strip_leading_greeting(text: str) -> str:
 
 
 def _parse_count(text: str) -> int | None:
-    """Story 12.14 - the count in a terse reply ("1" → 1, "троих" → None).
+    """Read one unambiguous count from a short customer reply.
 
-    Only digits are bound here; "0" is caught upstream by the decline path, and
-    word-numerals stay the LLM's job (Layer A). Returns ``None`` when the reply
-    carries no digit so the caller leaves the field unbound.
+    Telegram customers commonly answer a numeric question with ``двое`` or
+    ``одна`` rather than a digit.  Only one numeric token is accepted: a richer
+    turn such as ``нас двое, но 5 багги`` must stay on the LLM extraction path
+    so the headcount and vehicle count cannot be swapped by taking the first
+    number. ``0`` is still handled by the decline path upstream.
     """
-    match = re.search(r"\d+", text)
-    return int(match.group()) if match else None
+    digit_matches = list(re.finditer(r"\d+", text))
+    word_pattern = re.compile(
+        r"\b(?:"
+        + "|".join(
+            re.escape(word)
+            for word in sorted(_RU_HEADCOUNT_WORDS, key=len, reverse=True)
+        )
+        + r")\b",
+        re.IGNORECASE | re.UNICODE,
+    )
+    word_matches = list(word_pattern.finditer(text.lower()))
+    if len(digit_matches) + len(word_matches) != 1:
+        return None
+    if digit_matches:
+        return int(digit_matches[0].group())
+    return _RU_HEADCOUNT_WORDS[word_matches[0].group().lower()]
 
 
 def _format_pending_instruction(
@@ -1660,7 +1732,7 @@ class SalesPersonaAnswerer:
             STAGE_SCOPING,
         }:
             return await self._handle_service_selection(
-                ctx=ctx, state=state
+                question=question, ctx=ctx, state=state
             )
 
         # A short date/time answer is a field value, not a new sales intent.
@@ -1754,6 +1826,21 @@ class SalesPersonaAnswerer:
             # turn is handled on its own merits — never answered with a stale price
             # line. A price follow-up ("ну так сколько в итоге?") stays in pricing.
             # (Cancellation / out-of-scope were already routed above.)
+            if (
+                current_stage == STAGE_PRICING
+                and self._is_pricing_funnel_continuation(
+                    question=question, ctx=ctx, state=state
+                )
+            ):
+                if _is_short_temporal_reply(
+                    question, ctx=ctx, normalizer=self._normalizer
+                ):
+                    return await self._handle_temporal_reply(
+                        question=question, ctx=ctx, state=state
+                    )
+                return await self._handle_scoping(
+                    question=question, ctx=ctx, state=state
+                )
             if self._has_moved_on_from_pricing(question=question, ctx=ctx):
                 return await self._handle_greeting(
                     question=question, ctx=ctx, returning=True
@@ -1828,6 +1915,30 @@ class SalesPersonaAnswerer:
             and now.tzinfo is not None
             and extract_requested_start(text=question, now=now, project_tz=tz)
             is not None
+        )
+
+    def _is_pricing_funnel_continuation(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> bool:
+        """Recognise a field reply after a successful mid-funnel price aside.
+
+        A price hit parks the state in ``pricing`` so a follow-up price question
+        can be answered again.  A customer who then says ``нас двое`` or
+        ``одна багги`` is not asking for another quote; it is the next booking
+        field.  Keep this narrow so catalog/price/concept questions remain
+        asides and a standalone price chat is not turned into a booking.
+        """
+        intent = Intent.from_dict(state.get("collected_intent") or {})
+        if not any(value is not None for value in intent.to_dict().values()):
+            return False
+        if classify_turn(question, normalizer=self._normalizer).kind != "other":
+            return False
+        return _parse_count(question) is not None or _is_short_temporal_reply(
+            question, ctx=ctx, normalizer=self._normalizer
         )
 
     async def _enqueue_followup(self, *, ctx: AnswerContext) -> None:
@@ -1908,6 +2019,11 @@ class SalesPersonaAnswerer:
             return _skip("llm_transport_error")
 
         merged = intent_merge(Intent(), extracted)
+        service_context = _single_service_context(
+            question, normalizer=self._normalizer
+        )
+        if service_context is not None:
+            merged = merged.with_field("service", service_context)
         # Story 12.43 (round-8 N1) — the greeting LLM sometimes stores a numeric
         # date WITHOUT its co-located time ("03.06"), which extract_requested_start
         # can't parse, so the busy check below silently skipped and the slot was
@@ -2157,6 +2273,7 @@ class SalesPersonaAnswerer:
     async def _handle_service_selection(
         self,
         *,
+        question: str,
         ctx: AnswerContext,
         state: dict[str, Any] | None,
     ) -> AnswerResult:
@@ -2169,13 +2286,18 @@ class SalesPersonaAnswerer:
         """
         stage_before = str(state.get("current_stage") if state else STAGE_NEW)
         intent = Intent.from_dict((state or {}).get("collected_intent") or {})
+        service_context = _single_service_context(
+            question=question, normalizer=self._normalizer
+        )
+        if service_context is not None:
+            intent = intent.with_field("service", service_context)
         schema = self._resolve_schema(ctx)
         missing = intent.missing_fields(schema.required_keys())
         if not missing:
             return _skip("service_selection_state_complete")
 
         first_missing = missing[0]
-        text = schema.question_for(first_missing)
+        text = _scoping_question(intent=intent, schema=schema, key=first_missing)
         if first_missing == "dates":
             text = localize(
                 SERVICE_SELECTION_DATE_LINE,
@@ -2271,7 +2393,11 @@ class SalesPersonaAnswerer:
             if vague is not None:
                 return vague
             missing = merged.missing_fields(schema.required_keys())
-            next_question = schema.question_for(missing[0]) if missing else None
+            next_question = (
+                _scoping_question(intent=merged, schema=schema, key=missing[0])
+                if missing
+                else None
+            )
             if not next_question:
                 return _skip("temporal_reply_unknown_field")
             await self._persist(
@@ -2735,27 +2861,6 @@ class SalesPersonaAnswerer:
         existing = Intent.from_dict(state.get("collected_intent") or {})
         pre_missing = existing.missing_fields(required)
         pending_field = pre_missing[0] if pre_missing else None
-        # A standalone count is an unambiguous answer to a numeric question.
-        # Capture it before the LLM call: terse replies are especially likely
-        # to hit a transient transport/schema failure, and falling through to
-        # ScopeGuard then incorrectly says "С этим не помогу".
-        if (
-            pending_field is not None
-            and pending_field in schema.numeric_keys()
-            and not is_decline(question, normalizer=self._normalizer)
-        ):
-            count = _parse_count(question)
-            if count is not None:
-                return await self._handle_deterministic_numeric_reply(
-                    question=question,
-                    ctx=ctx,
-                    existing=existing,
-                    pending_field=pending_field,
-                    count=count,
-                    required=required,
-                    schema=schema,
-                    stage_before=STAGE_SCOPING,
-                )
         outcome = await self._extract_and_merge(
             question=question,
             ctx=ctx,
@@ -2764,6 +2869,27 @@ class SalesPersonaAnswerer:
             schema=schema,
         )
         if isinstance(outcome, AnswerResult):
+            # A numeric reply must remain useful even when OpenRouter is
+            # unavailable or returns malformed JSON.  Try the normal extractor
+            # first so rich replies keep their configured LLM wording; only
+            # then use the deterministic field-aware fallback.
+            if (
+                pending_field is not None
+                and pending_field in schema.numeric_keys()
+                and not is_decline(question, normalizer=self._normalizer)
+            ):
+                count = _parse_count(question)
+                if count is not None:
+                    return await self._handle_deterministic_numeric_reply(
+                        question=question,
+                        ctx=ctx,
+                        existing=existing,
+                        pending_field=pending_field,
+                        count=count,
+                        required=required,
+                        schema=schema,
+                        stage_before=STAGE_SCOPING,
+                    )
             if _is_short_temporal_reply(
                 question, ctx=ctx, normalizer=self._normalizer
             ):
@@ -2784,8 +2910,10 @@ class SalesPersonaAnswerer:
             declined_field = merged.missing_fields(required)[0]
             merged = merged.with_field(declined_field, SCOPING_DECLINED_SENTINEL)
             if not merged.is_complete(required):
-                next_question = schema.question_for(
-                    merged.missing_fields(required)[0]
+                next_question = _scoping_question(
+                    intent=merged,
+                    schema=schema,
+                    key=merged.missing_fields(required)[0],
                 )
         # Story 12.14 - the LLM still didn't bind the customer's reply to the
         # field we just asked. For a numeric field, capture a plain count
@@ -2802,8 +2930,10 @@ class SalesPersonaAnswerer:
             if count is not None:
                 merged = merged.with_field(pending_field, count)
                 if not merged.is_complete(required):
-                    next_question = schema.question_for(
-                        merged.missing_fields(required)[0]
+                    next_question = _scoping_question(
+                        intent=merged,
+                        schema=schema,
+                        key=merged.missing_fields(required)[0],
                     )
         # Not complete → keep scoping: forward the next-field question.
         if not merged.is_complete(required):
@@ -2917,7 +3047,9 @@ class SalesPersonaAnswerer:
         merged = existing.with_field(pending_field, count)
         missing = merged.missing_fields(required)
         if missing:
-            next_question = schema.question_for(missing[0])
+            next_question = _scoping_question(
+                intent=merged, schema=schema, key=missing[0]
+            )
             if not next_question:
                 return _skip("numeric_reply_unknown_field")
             await self._persist(
@@ -3321,6 +3453,8 @@ class SalesPersonaAnswerer:
             off with the generic completion line (a human picks up).
         """
         base_metadata = base_metadata or {}
+        if is_count_inconsistent(intent):
+            return self._handle_count_mismatch(ctx=ctx, intent=intent)
         # Story 12.61 (round-15) — a COMPLETE booking with a VAGUE time
         # ("во второй половине дня") proposes a concrete slot in that window,
         # same as the greeting/scoping hook — instead of falling to the generic
@@ -4785,7 +4919,11 @@ class SalesPersonaAnswerer:
         if self._rag is not None:
             chunks = await asyncio.to_thread(
                 self._rag.retrieve,
-                query=f"{term} определение",
+                # The term itself is the strongest grounding signal.  Adding a
+                # generic "определение" lemma dilutes one-word service queries
+                # below the RAG threshold (for example, эндуро scores 0.5
+                # instead of 1.0) even when the catalogue contains it.
+                query=term,
                 limit=3,
                 project_id=ctx.project_id,
             )
@@ -4951,6 +5089,11 @@ class SalesPersonaAnswerer:
                 intent=existing_intent,
                 question=question,
                 service_names=service_names,
+                service_hint=(
+                    str(existing_intent.get("service"))
+                    if existing_intent.get("service") is not None
+                    else None
+                ),
             )
         except Exception as exc:  # defensive — RAG transport / sqlite error
             logger.warning(

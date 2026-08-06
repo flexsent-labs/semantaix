@@ -27,6 +27,14 @@ def test_dev_tick_endpoint_returns_404_in_non_dev_env(monkeypatch) -> None:
 
 def test_dev_tick_endpoint_returns_200_in_dev_env(monkeypatch) -> None:
     monkeypatch.setattr(api_main.settings, "app_env", "dev")
+    # This test checks only the dev gate and response shape.  Do not consume
+    # rows from the developer's shared `.data` database: those rows may refer
+    # to a different state database and make the test order-dependent.
+    monkeypatch.setattr(
+        api_main.sales_followup_repository,
+        "due",
+        lambda *, now, limit=100: [],
+    )
     client = TestClient(api_main.app)
     response = client.post("/sales/_dev/tick-followup-now")
     assert response.status_code == 200

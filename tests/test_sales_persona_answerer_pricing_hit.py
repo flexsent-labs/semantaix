@@ -207,6 +207,24 @@ async def test_pricing_hit_from_scoping_transitions_to_pricing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_temporal_reply_after_price_aside_reenters_funnel() -> None:
+    """A short date reply after a price aside must continue booking."""
+    answerer, state_repo, _openrouter, _ = _build(price_result=PriceMissing("нет"))
+    _seed(
+        state_repo,
+        stage=STAGE_PRICING,
+        intent=Intent(extra={"service": "Багги"}),
+    )
+
+    result = await answerer.try_answer(question="завтра", ctx=_ctx())
+
+    assert result.handled is True
+    assert result.metadata["sales_turn_kind"] == "temporal_reply"
+    assert result.text == "Сколько человек поедет?"
+    assert state_repo.upsert_calls[-1]["current_stage"] == STAGE_SCOPING
+
+
+@pytest.mark.asyncio
 async def test_pricing_hit_accepts_next_question_payload_shape() -> None:
     found = PriceFound(
         text="6 часов — 15 000 ₽",

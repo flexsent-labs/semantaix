@@ -124,8 +124,8 @@ async def test_decline_middle_field_asks_next_field() -> None:
 
 @pytest.mark.asyncio
 async def test_negation_with_real_value_is_not_a_decline() -> None:
-    # "нет, троих" → the LLM still extracts the count; must NOT be treated as a
-    # decline (no sentinel), and the real value is kept.
+    # "нет, троих" → the deterministic word-count path extracts the count; it
+    # must NOT be treated as a decline (no sentinel), and the real value is kept.
     intent = Intent(dates="завтра в 14:00")
     answerer, repo = _build(
         intent,
@@ -134,7 +134,25 @@ async def test_negation_with_real_value_is_not_a_decline() -> None:
 
     result = await answerer.try_answer(question="нет, троих", ctx=_ctx())
 
-    assert result.text == "Сколько багги?"  # LLM's question, not a fallback
+    assert result.text == "Сколько багги?"
     last = repo.upserts[-1]["collected_intent"]
     assert last["headcount"] == 3
     assert last["vehicle_count"] is None  # NOT auto-filled with a sentinel
+
+
+@pytest.mark.asyncio
+async def test_decline_with_self_driving_explanation_completes() -> None:
+    """A natural "I'll drive myself" explanation still declines a driver."""
+    intent = Intent(
+        dates="завтра в 14:00", headcount=2, vehicle_count=1, difficulty="лёгкая"
+    )
+    answerer, repo = _build(
+        intent, _QueueOpenRouter({"extracted_fields": {}, "next_question": "?"})
+    )
+
+    result = await answerer.try_answer(
+        question="Без водителя, я сам за рулём", ctx=_ctx()
+    )
+
+    assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
+    assert repo.upserts[-1]["collected_intent"]["drivers"] == SCOPING_DECLINED_SENTINEL

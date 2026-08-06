@@ -48,6 +48,16 @@ _FILLER: frozenset[str] = frozenset(
         "сложность",
         "тур",
         "пожелание",
+        # Natural explanatory tails after a decline: "без водителей, мы сами
+        # разберёмся" is still a pure refusal of the drivers field.
+        "сам",
+        "сами",
+        "самостоятельно",
+        "разобраться",
+        "справиться",
+        "мы",
+        "я",
+        "за",
         "руль",
     }
 )

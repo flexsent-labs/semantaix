@@ -9,9 +9,9 @@ fixed price anchor lemmas, scores returned chunks against a strict
     a ±60-char snippet around the price token (so the LLM has just
     enough context to quote the price verbatim).
   * ``PriceMissing`` — a structured ``PriceUnknownPayload`` carrying the
-    customer's verbatim question. The ``service`` / ``vehicle_type`` /
-    ``hours`` fields are reserved for later stories that extend
-    ``Intent`` with those tags; today they are always ``None``.
+    customer's verbatim question. When the active funnel already selected a
+    service, that canonical service is retained in the payload; the remaining
+    ``vehicle_type`` / ``hours`` fields are reserved for later extensions.
 
 The class is intentionally framework-free: callers pass a normalizer and
 a `RagRetriever` duck-type. The lookup is async at the call boundary
@@ -214,14 +214,21 @@ class PriceLookup:
         intent: Intent,
         question: str,
         service_names: Sequence[str] = (),
+        service_hint: str | None = None,
     ) -> PriceFound | PriceMissing:
-        subject = _subject_lemmas(question, self._normalizer)
+        # A mid-booking "а сколько это стоит?" omits the service because it is
+        # already established by the funnel. Add that context for retrieval,
+        # but keep the original customer wording in a miss payload.
+        lookup_question = question
+        if service_hint and not _subject_lemmas(question, self._normalizer):
+            lookup_question = f"{question} {service_hint}"
+        subject = _subject_lemmas(lookup_question, self._normalizer)
         aliases = {
             alias
             for lemma in subject
             for alias in _PRICE_SUBJECT_ALIASES.get(lemma, ())
         }
-        query = _build_query(" ".join((question, *sorted(aliases))))
+        query = _build_query(" ".join((lookup_question, *sorted(aliases))))
         chunks = await asyncio.to_thread(
             self._rag.retrieve,
             query=query,
@@ -232,7 +239,7 @@ class PriceLookup:
         # customer didn't ask about. When the question names a configured service
         # ("… багги?"), require the winning chunk to mention that same service;
         # a generic ask (no service named) keeps the first-price-chunk behaviour.
-        asked = _best_matching_service(question, service_names, self._normalizer)
+        asked = _best_matching_service(lookup_question, service_names, self._normalizer)
         # Story 12.53 (round-11 N2) — the live project has NO services, so `asked`
         # is None and the guard above is inert. Fall back to a catalog-free check:
         # when the customer names a subject ("… багги?"), the winning chunk must
@@ -264,7 +271,7 @@ class PriceLookup:
             )
         return PriceMissing(
             payload=PriceUnknownPayload(
-                service=asked,
+                service=asked or service_hint,
                 vehicle_type=None,
                 hours=None,
                 original_question=question,
