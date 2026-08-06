@@ -79,7 +79,10 @@ class AppSettings(BaseSettings):
     bot_telegram_short_description: str = "Semantaix — регистрация и настройка операторов."
     sales_persona_first_name: str = "Анна"
     sales_persona_last_name: str = "Иванова"
-    api_internal_base_url: str = "http://api:8000"
+    # Local uvicorn processes cannot resolve the Docker Compose service name.
+    # Compose sets this explicitly to ``http://api:8000`` for container-to-
+    # container traffic.
+    api_internal_base_url: str = "http://127.0.0.1:8000"
     rag_grounding_score_threshold: float = 0.6
     default_language: str = "ru"
     default_country_code: str = "RU"

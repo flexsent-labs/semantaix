@@ -56,6 +56,8 @@ services:
       context: .
       dockerfile: services/web_ui/Dockerfile
     env_file: .env
+    environment:
+      API_INTERNAL_BASE_URL: http://api:8000
     volumes:
       - app_data:/app/.data
     healthcheck:
@@ -69,6 +71,8 @@ services:
       context: .
       dockerfile: services/bot_gateway/Dockerfile
     env_file: .env
+    environment:
+      API_INTERNAL_BASE_URL: http://api:8000
     volumes:
       # bot_gateway owns semantaix_operator_files.db and writes
       # semantaix_story1.db (Telegram transcripts) + runtime config in
@@ -90,6 +94,8 @@ services:
       context: .
       dockerfile: services/user_gateway/Dockerfile
     env_file: .env
+    environment:
+      API_INTERNAL_BASE_URL: http://api:8000
     volumes:
       - app_data:/app/.data
     ports:
@@ -120,6 +126,8 @@ services:
       context: .
       dockerfile: services/scheduler/Dockerfile
     env_file: .env
+    environment:
+      API_INTERNAL_BASE_URL: http://api:8000
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health/live')"]
       interval: 15s

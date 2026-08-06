@@ -39,6 +39,7 @@ def test_settings_defaults(monkeypatch):
     assert settings.bot_persona_first_name == "Semantaix"
     assert settings.bot_persona_last_name == ""
     assert settings.telegram_platform_bot_username == "@semantaix_bot"
+    assert settings.api_internal_base_url == "http://127.0.0.1:8000"
     assert settings.sales_persona_first_name == "Анна"
     assert settings.sales_persona_last_name == "Иванова"
     assert "бот" not in settings.bot_telegram_description.lower()
