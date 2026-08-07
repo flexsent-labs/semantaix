@@ -3,7 +3,7 @@
 [![CI](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml/badge.svg)](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/flexsent-labs/semantaix/main/.badges/coverage-summary.json)](https://github.com/flexsent-labs/semantaix/actions/workflows/ci.yml)
 
-<!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-42378%20lines-blue)<!-- LOC:END -->
+<!-- LOC:START -->![App source](https://img.shields.io/badge/app%20source-42410%20lines-blue)<!-- LOC:END -->
 
 Docker-first Russian-first Telegram customer-conversation platform (epics 1–16 shipped).
 See [`docs/index.md`](docs/index.md) for the as-built architecture map.
