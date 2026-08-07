@@ -38,6 +38,26 @@ def test_unrelated_text_is_not_closure() -> None:
     assert is_no_more("хочу ещё квадроцикл", normalizer=normalizer) is False
 
 
+def test_multiword_closure_requires_all_phrase_lemmas(tmp_path: Path) -> None:
+    phrases = tmp_path / "phrases.txt"
+    phrases.write_text("на этом всё\n", encoding="utf-8")
+    normalizer = get_russian_normalizer()
+
+    assert is_no_more(
+        "на этом всё", normalizer=normalizer, phrases_path=str(phrases)
+    ) is True
+    assert is_no_more(
+        "хочу прокатиться на квадриках",
+        normalizer=normalizer,
+        phrases_path=str(phrases),
+    ) is False
+
+
+def test_booking_request_with_preposition_is_not_closure() -> None:
+    normalizer = get_russian_normalizer()
+    assert is_no_more("хочу прокатиться на квадриках", normalizer=normalizer) is False
+
+
 def test_empty_text_is_not_closure() -> None:
     normalizer = get_russian_normalizer()
     assert is_no_more("", normalizer=normalizer) is False

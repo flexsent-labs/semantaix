@@ -28,10 +28,12 @@ from services.api.app.sales.sales_persona_answerer import (
     ASK_FOR_TIME_ONLY_LINE,
     PITCHING_ACCEPT_CONFIRM_LINE,
     SCOPING_COMPLETE_HANDOFF_LINE,
+    SERVICE_SELECTION_DATE_LINE,
     SLOT_BUSY_LINE,
     STAGE_AWAITING_TIME,
     STAGE_CLOSING,
     SalesPersonaAnswerer,
+    _is_fresh_service_booking,
 )
 
 _NOW = datetime(2026, 5, 29, 9, 0, tzinfo=UTC)  # 12:00 Moscow, Fri 29 May
@@ -143,6 +145,12 @@ def _state(
         ).to_dict(),
         "last_proposal": last_proposal,
     }
+
+
+def test_catalog_question_is_not_a_fresh_service_booking() -> None:
+    assert _is_fresh_service_booking(
+        "какие варианты на квадриках?", normalizer=get_russian_normalizer()
+    ) is False
 
 
 def _build(
@@ -289,6 +297,23 @@ async def test_free_handoff_resume_then_da_does_not_falsely_confirm() -> None:
     assert result.text == SCOPING_COMPLETE_HANDOFF_LINE
     assert result.metadata["sales_turn_kind"] == "pitching_followup"
     assert result.metadata["stage_after"] == STAGE_CLOSING
+
+
+@pytest.mark.asyncio
+async def test_fresh_service_booking_in_pitching_restarts_scoping() -> None:
+    answerer, state_repo = _build(
+        state=_state(dates="завтра в 14:00", last_proposal=None)
+    )
+    result = await answerer.try_answer(
+        question="хочу прокатиться на квадриках", ctx=_ctx()
+    )
+
+    assert result.text == SERVICE_SELECTION_DATE_LINE
+    assert result.response_mode is None
+    assert result.metadata["sales_turn_kind"] == "service_selection"
+    assert state_repo.upserts[-1]["collected_intent"] == Intent(
+        extra={"service": "квадроцикл"}
+    ).to_dict()
 
 
 # --- the "accepted but nothing to name" branch ------------------------------

@@ -834,6 +834,35 @@ def _is_standalone_service_selection(
     )
 
 
+_FRESH_BOOKING_ACTION_LEMMAS = frozenset(
+    {
+        "прокатиться",
+        "покататься",
+        "поехать",
+        "приехать",
+    }
+)
+
+
+def _is_fresh_service_booking(
+    question: str, *, normalizer: _Normalizer
+) -> bool:
+    """Recognise a new booking opener in a terminal sales stage.
+
+    A service named in an action phrase such as ``хочу прокатиться на квадриках``
+    starts a new questionnaire. It must not be interpreted as a follow-up to
+    the previous booking just because the state is still ``pitching``.
+    Catalog questions are excluded because they are handled as asides earlier
+    in the dispatch path.
+    """
+    if _single_service_context(question, normalizer=normalizer) is None:
+        return False
+    if classify_turn(question, normalizer=normalizer).kind != "other":
+        return False
+    lemmas = set(normalizer.lemmas(question))
+    return bool(_FRESH_BOOKING_ACTION_LEMMAS & lemmas)
+
+
 def _format_working_hours(working_hours: Any) -> tuple[str, str] | None:
     """The overall ``(open, close)`` span across configured days, or ``None``.
 
@@ -1726,6 +1755,17 @@ class SalesPersonaAnswerer:
         # next question deterministic so a short customer reply does not spend
         # an LLM turn or fall into the generic gibberish wording.
         if _is_standalone_service_selection(
+            question, normalizer=self._normalizer
+        ):
+            return await self._handle_service_selection(
+                question=question, ctx=ctx, state=state
+            )
+
+        # A customer can start a fresh booking with a complete action phrase
+        # ("хочу прокатиться на квадриках") after a prior handoff. Treat the
+        # named service as a new selection instead of letting pitching/closing
+        # reuse the previous intent and immediately escalate.
+        if current_stage in {STAGE_PITCHING, STAGE_CLOSING} and _is_fresh_service_booking(
             question, normalizer=self._normalizer
         ):
             return await self._handle_service_selection(

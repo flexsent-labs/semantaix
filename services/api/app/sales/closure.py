@@ -1,14 +1,16 @@
 """Closure detection for the ``pitching`` / completion stage.
 
 Lemma-based, no LLM — a sibling of :mod:`acceptance`. We read a short list
-of "nothing more" lemmas from ``data/russian_sales_closure.txt`` and match
-by **single-lemma overlap** against the customer's normalized reply, so
-"всё" / "больше ничего" / "нет" survive inflection and slang.
+of "nothing more" phrases from ``data/russian_sales_closure.txt`` and match
+their normalized lemmas against the customer's reply, so "всё" /
+"больше ничего" / "нет" survive inflection and slang.
 
-A non-empty lemma intersection means the customer signalled they have
-nothing more to add. This is consulted ONLY once scoping is complete (the
-``pitching`` stage) — never mid-scoping, where a bare "нет" could be a
-field answer rather than a closure signal.
+A single-word closure phrase must occur as a lemma in the customer's reply.
+Multi-word phrases require all of their lemmas, so a shared function word such
+as ``на`` from ``на этом всё`` cannot close an unrelated request. This is
+consulted ONLY once scoping is complete (the ``pitching`` stage) — never
+mid-scoping, where a bare "нет" could be a field answer rather than a closure
+signal.
 """
 
 from __future__ import annotations
@@ -59,13 +61,15 @@ def is_no_more(
     lemmas = set(normalizer.lemmas(text))
     if not lemmas:
         return False
-    phrase_lemma_set: set[str] = set()
     for phrase in phrases:
-        for token in normalizer.lemmas(phrase):
-            phrase_lemma_set.add(token)
-    if not phrase_lemma_set:
-        return False
-    return bool(lemmas & phrase_lemma_set)
+        phrase_lemmas = tuple(dict.fromkeys(normalizer.lemmas(phrase)))
+        if not phrase_lemmas:
+            continue
+        if len(phrase_lemmas) == 1 and phrase_lemmas[0] in lemmas:
+            return True
+        if len(phrase_lemmas) > 1 and set(phrase_lemmas).issubset(lemmas):
+            return True
+    return False
 
 
 __all__ = ["is_no_more", "load_closure_phrases"]

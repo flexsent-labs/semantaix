@@ -282,6 +282,46 @@ async def test_new_service_selection_drops_previous_booking_fields(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_fresh_quadbike_booking_after_handoff_collects_all_counts(tmp_path) -> None:
+    """A new quadbike request must not complete from a stale prior booking."""
+    conversation, state_repo, _openrouter, _services_repo = _build_sales_environment(
+        tmp_path, project_id=1207
+    )
+    state_repo.upsert(
+        chat_id=conversation.chat_id,
+        project_id=conversation.project_id,
+        current_stage="pitching",
+        collected_intent=Intent(
+            dates="завтра",
+            headcount=3,
+            vehicle_count=3,
+            extra={"service": "эндуро"},
+        ).to_dict(),
+        now=_NOW,
+    )
+
+    greeting = await conversation.say("Привет")
+    service = await conversation.say("хочу прокатиться на квадриках")
+    date = await conversation.say("завтра")
+    headcount = await conversation.say("3")
+    vehicle_count = await conversation.say("2")
+
+    assert greeting.handled is True
+    assert service.metadata["sales_turn_kind"] == "service_selection"
+    assert "дат" in (service.text or "").casefold()
+    assert "человек" in (date.text or "").casefold()
+    assert "квадроцик" in (headcount.text or "").casefold()
+    assert vehicle_count.handled is True
+    assert "сложности" in (vehicle_count.text or "").casefold()
+    assert state_repo.get(conversation.chat_id)["collected_intent"] == Intent(
+        headcount=3,
+        vehicle_count=2,
+        dates="завтра",
+        extra={"service": "квадроцикл"},
+    ).to_dict()
+
+
+@pytest.mark.asyncio
 async def test_unknown_service_question_is_not_invented_during_booking_dialogue(
     tmp_path,
 ) -> None:
