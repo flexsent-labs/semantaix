@@ -125,6 +125,28 @@ async def test_in_scope_price_ask_defers_to_hitl():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question",
+    [
+        "какие Квадроциклы",
+        "какие багги есть?",
+        "есть ли мотоциклы?",
+    ],
+)
+async def test_service_information_question_defers_even_when_calendar_is_disabled(
+    question: str,
+):
+    """A failed RAG/LLM lookup must reach the operator, not scope-decline."""
+    answerer = ScopeGuardAnswerer(phrases_getter=lambda: "Не моя тема 🙂")
+
+    result = await answerer.try_answer(question=question, ctx=_make_ctx())
+
+    assert result.handled is False
+    assert result.text is None
+    assert result.metadata.get("skip_reason") == "service_information_defer_to_hitl"
+
+
+@pytest.mark.asyncio
 async def test_in_scope_booking_ask_defers_to_hitl():
     answerer = _bookings_answerer()
     result = await answerer.try_answer(

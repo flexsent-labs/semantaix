@@ -253,3 +253,110 @@ trigger. Startup itself has no producer for the exact message: it only claims
 legacy connected rows. The local callback now persists the one-time marker even
 for legacy connected state, and the operator DM remains limited to a genuinely
 unclaimed connection callback.
+
+## Follow-up: 2026-08-06 #3
+
+### User-Reported Regression
+
+The operator still receives the exact calendar-connected message on bot
+restart, after four prior attempts to fix the behavior. This is new evidence
+that the delivered runtime has not been verified against the local fix.
+
+### New Evidence
+
+- The exact phrase has one source in the current checkout,
+  `services/api/app/main.py:4957`; it is sent from the successful Google OAuth
+  callback at `services/api/app/main.py:5194-5197`.
+- API startup only runs
+  `backfill_connection_notification_claims` and logs
+  `calendar_connect_notification_claims_backfilled`; it does not send the
+  phrase.
+- The live local calendar DB contains a connected token for project `1` and
+  `@flexsentlabs`, plus a durable notification claim at
+  `2026-08-06T07:37:52.596887+00:00`. The local process therefore has no
+  unclaimed startup notification for this connection.
+- The latest GitHub Deploy run inspected,
+  [31112194794](https://github.com/flexsent-labs/semantaix/actions/runs/31112194794),
+  checked out `3ee90fc`, then failed in the first SSH setup command
+  (`ssh-keyscan -H "$DEPLOY_HOST"`) with exit code 1. No `rsync`, production
+  `.env` installation, remote deploy script, or health check ran.
+- The preceding Deploy runs for the earlier calendar fixes also concluded
+  with failure. There is no successful Deploy run for the current calendar-fix
+  lineage in the inspected history. Public production health checks also
+  timed out, so the server runtime and deployed SHA could not be confirmed.
+
+### Updated Diagnosis
+
+**Most likely root cause:** the fixes were committed and pushed, but the
+production deployment pipeline did not deliver them to the server. The bot
+being tested is therefore likely running an older runtime (or another
+instance), where the old OAuth/startup behavior is still active. This explains
+why repeated code fixes appeared ineffective.
+
+The local restart path itself is disproved as the source of this exact phrase:
+the current startup handler does not send it, and the local durable claim is
+already present. A repeated OAuth callback or a different runtime remains a
+possible source until a production log or message timestamp is correlated.
+
+### Missing Evidence / Next Action
+
+To close the remaining uncertainty, repair the deploy SSH connectivity and
+deploy the current `main`, then verify the running commit and correlate
+`calendar_oauth_connected` / `calendar_connect_dm_skipped*` logs with a fresh
+restart. This follow-up diagnoses the delivery failure; it does not change
+deployment or application code.
+
+## Follow-up: 2026-08-06 #4
+
+### User Clarification
+
+The reported test is against the local bot through ngrok, not necessarily the
+production deployment. The prior follow-up therefore over-weighted the failed
+server deploy as an explanation for a local restart symptom.
+
+### Local Runtime Evidence
+
+- Exactly one local API process listens on `127.0.0.1:8000` and exactly one
+  bot gateway listens on `127.0.0.1:8002`.
+- The active ngrok tunnel
+  `https://lustiness-apron-unmade.ngrok-free.dev` forwards to
+  `http://localhost:8002`; no second local bot listener was found.
+- Both local health endpoints return `{"status":"ok","service":...}`.
+- The exact connected-message string still has one producer in source: the
+  API's successful Google OAuth callback. The local startup handler only
+  backfills a durable claim and explicitly documents that it sends no Telegram
+  message.
+
+### Corrected Diagnosis
+
+The failed production deploy does not by itself explain a message observed
+while using the local ngrok bot. A local restart cannot produce this exact
+message through the current startup handler. If no Google OAuth callback is
+being completed at the same time, the remaining explanations are:
+
+1. another process/instance using the same Telegram bot token is sending the
+   message (the server is relevant only in this sense); or
+2. the message is being attributed to the restart but was sent by a callback
+   or a delayed/repeated external action immediately before it.
+
+The current local database contains the durable claim for project `1` and
+`@flexsentlabs`, so a normal local restart should not send it. A definitive
+next check is to capture the API log around one restart and correlate the
+Telegram message timestamp with `calendar_oauth_connected` and
+`calendar_connect_dm_skipped*`; this is required before changing the guard
+again.
+
+### Restart Reproduction
+
+On 2026-08-06 the local API and bot gateway were deliberately stopped and
+started again while leaving ngrok untouched. They came back as one API process
+on port `8000` and one bot gateway process on port `8002`; both health checks
+returned 200. The captured startup logs contained only normal Uvicorn startup
+and health requests: no OAuth callback request, no `calendar_oauth_connected`
+event, no `calendar_connect_dm_skipped*` event, and no connected-calendar DM.
+
+This reproduces the user's restart action without reproducing the outgoing
+message and rules out the current local startup path as its sender. The next
+diagnostic must therefore inspect the other possible sender (a second runtime
+using the same Telegram token) or capture a message timestamp alongside the
+OAuth callback logs.

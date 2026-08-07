@@ -31,6 +31,7 @@ from services.api.app.calendar.service_resolver import extract_requested_start
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.russian_text.normalizer import RussianNormalizer
 from services.api.app.sales.out_of_scope import is_out_of_scope
+from services.api.app.sales.service_aliases import contains_offered_service
 from services.api.app.sales.turn_intent import classify_turn
 
 RESPONSE_MODE_SCOPE_DECLINE = "scope_decline"
@@ -39,6 +40,25 @@ RESPONSE_MODE_SCOPE_DECLINE = "scope_decline"
 # or a catalog/service-list ask. Booking/scheduling intent is detected
 # separately via has_scheduling_intent.
 _IN_SCOPE_TURN_KINDS = frozenset({"price_ask", "catalog_ask"})
+
+# A question about a named offering is still a valid customer request even when
+# it does not use one of the broad catalog phrases (for example, "какие
+# квадроциклы?" or "есть ли багги?").  If RAG/LLM cannot answer it, the last
+# resort must hand it to the operator instead of saying "Не моя тема".
+_SERVICE_INFO_LEMMAS = frozenset(
+    {
+        "какой",
+        "что",
+        "есть",
+        "вариант",
+        "опция",
+        "модель",
+        "вид",
+        "характеристика",
+        "описание",
+        "рассказать",
+    }
+)
 
 
 class ScopeGuardAnswerer:
@@ -85,6 +105,19 @@ class ScopeGuardAnswerer:
         # concrete start. Treat a parseable date+time as an in-scope booking.
         return self._parses_as_booking(question, ctx)
 
+    def _is_service_information_question(self, question: str) -> bool:
+        """Return True for a question about a named offered service.
+
+        This is intentionally narrower than ``contains_offered_service``: a
+        booking message such as ``хочу покататься на багги`` must continue to
+        use the booking-specific gate, while ``какие багги есть?`` must never
+        be rejected as off-topic when an upstream knowledge answer failed.
+        """
+        if not contains_offered_service(question, normalizer=self._normalizer):
+            return False
+        lemmas = set(self._normalizer.lemmas(question))
+        return bool(_SERVICE_INFO_LEMMAS.intersection(lemmas))
+
     def _parses_as_booking(self, question: str, ctx: AnswerContext) -> bool:
         """True when ``question`` carries a concrete, parseable date + time.
 
@@ -104,6 +137,14 @@ class ScopeGuardAnswerer:
     async def try_answer(self, *, question: str, ctx: AnswerContext) -> AnswerResult:
         # Cheap intent check first; the project-config lookup (DB) only when the
         # ask is actually in-scope.
+        if self._is_service_information_question(question):
+            # Service-information questions should reach a human regardless of
+            # calendar state: the calendar controls slot checking, not whether
+            # the operator can answer a knowledge-base question.
+            return AnswerResult(
+                handled=False,
+                metadata={"skip_reason": "service_information_defer_to_hitl"},
+            )
         if self._is_in_scope(question, ctx):
             does_bookings = await asyncio.to_thread(
                 self._project_does_bookings, ctx.project_id
